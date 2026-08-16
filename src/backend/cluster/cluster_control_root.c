@@ -1195,11 +1195,11 @@ write_durable_image(const char *final_path, const uint8 *bytes)
 		done += (size_t)n;
 	}
 	if (pg_fsync(fd) != 0) {
-		(void)CloseTransientFile(fd);
+		(void)close(fd);
 		fd = -1;
 		goto cleanup_closed;
 	}
-	if (CloseTransientFile(fd) != 0) {
+	if (close(fd) != 0) {
 		fd = -1;
 		goto cleanup_closed;
 	}
@@ -1220,7 +1220,7 @@ write_durable_image(const char *final_path, const uint8 *bytes)
 	return ok;
 
 cleanup:
-	(void)CloseTransientFile(fd);
+	(void)close(fd);
 	fd = -1;
 cleanup_closed:
 	if (created && !renamed)

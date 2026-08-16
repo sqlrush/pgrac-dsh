@@ -8299,6 +8299,23 @@ CreateCheckPoint(int flags)
 		KeepLogSeg(recptr, slotsMinReqLSN, &_logSegNo);
 	}
 	_logSegNo--;
+#ifdef USE_PGRAC_CLUSTER
+	/*
+	 * RF-ROOT P6 (STOP-05 §5.4 lock order): the guarded WAL recycle performs
+	 * WALR(thread)-X GES requests and STRONG control-root reads, so it must
+	 * never run while the checkpoint holds the clusterwide CF(X).  The frozen
+	 * lock order forbids the CF -> WALR edge, and holding CF(X) here deadlocks
+	 * against the LMS's serving-init CF(S) root read.  The shared control-file
+	 * writes and the W5a/W5b CF-borrowing publishes have already completed in
+	 * the critical section above, so releasing the clusterwide CF before the
+	 * recycle is safe; the remaining steps need no CF authority.
+	 */
+	if (cf_x_taken)
+	{
+		cluster_cf_unlock(ExclusiveLock);
+		cf_x_taken = false;
+	}
+#endif
 	RemoveOldXlogFiles(_logSegNo, RedoRecPtr, recptr,
 					   checkPoint.ThisTimeLineID);
 	}

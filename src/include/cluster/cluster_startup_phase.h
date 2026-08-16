@@ -71,6 +71,7 @@
 
 #include "cluster/cluster_recovery_duty.h"
 #include "datatype/timestamp.h"
+#include "port/atomics.h"
 #include "storage/lockdefs.h"
 #include "storage/lwlock.h"
 
@@ -269,13 +270,18 @@ typedef enum ClusterAuthorityReadiness {
 
 typedef struct ClusterPhaseSharedState {
 	LWLock lwlock; /* LWTRANCHE_CLUSTER_STARTUP_PHASE */
-	ClusterStartupPhase current_phase;
+	pg_atomic_uint32 current_phase; /* AD-023 A1: lock-free reads */
 	TimestampTz phase_start_times[CLUSTER_PHASE_LAST + 1];
 	PhaseHistoryEntry phase_history[CLUSTER_PHASE_HISTORY_RING_SIZE];
 	int phase_history_count; /* total entries ever written (lifetime) */
 	int phase_history_head;	 /* next slot to write (0..RING_SIZE-1) */
-	ClusterAuthorityReadiness authority_readiness;
-	bool authority_managed;
+	/* AD-023 A1: the two single-word authority fields are written only under
+	 * the lwlock (EXCLUSIVE) but read lock-free through pg_atomic so the
+	 * per-grant serving gates and the Postmaster's readiness polling never
+	 * contend on a hot LWLock.  The large binding fields below stay
+	 * lock-protected. */
+	pg_atomic_uint32 authority_readiness;
+	pg_atomic_uint32 authority_managed;
 	uint16 authority_origin_thread;
 	uint64 authority_boot_incarnation;
 	uint64 authority_lms_generation;

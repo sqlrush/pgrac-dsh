@@ -5736,7 +5736,29 @@ cluster_reconfig_lmon_tick(void)
 				cluster_cssd_get_dead_generation());
 			jevt.coordinator_node_id = self_id; /* observer; informational */
 			jevt.old_epoch = cluster_epoch_get_current();
-			jevt.new_epoch = jevt.old_epoch; /* survivor observes the bump via piggyback */
+			/*
+			 * AD-023 A2: adopt the joiner's committed epoch immediately
+			 * instead of waiting for a later piggyback.  The joiner's phase-3
+			 * GRD recovery-authority barrier freezes a formation snapshot at
+			 * its own committed epoch and only accepts a REDECLARE_DONE whose
+			 * composite (epoch, dead-bitmap hash) key matches exactly; a
+			 * survivor that stays on the older epoch can never match, and the
+			 * rejoin wedges until the phase-3 deadline.  The observed
+			 * committed epoch is the durable admission proof, so taking the
+			 * maximum over the newly joined nodes converges both sides.
+			 */
+			jevt.new_epoch = jevt.old_epoch;
+			for (jn = 0; jn < CLUSTER_MAX_NODES; jn++) {
+				uint64 jinc;
+				uint64 jepoch;
+
+				if (!dead_bitmap_test_bit(newly_joined, jn))
+					continue;
+				if (cluster_reconfig_get_observed_committed_join(jn, &jinc,
+															 &jepoch)
+					&& jepoch > jevt.new_epoch)
+					jevt.new_epoch = jepoch;
+			}
 			memcpy(jevt.dead_bitmap, join_remaining_dead,
 				   CLUSTER_RECONFIG_DEAD_BITMAP_BYTES);
 			memcpy(jevt.join_bitmap, newly_joined, CLUSTER_RECONFIG_DEAD_BITMAP_BYTES);
