@@ -532,7 +532,21 @@ cluster_authority_readiness_publish_serving(void)
 	if (!cluster_authority_binding_copy(&binding)
 		|| binding.state != CLUSTER_AUTHORITY_RECOVERY_READY
 		|| cluster_current_phase() != CLUSTER_PHASE_4_NORMAL)
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): classify the silent
+		 * early-return so the retry loop's failure mode is visible once. */
+		ClusterAuthorityBindingLocal diag_binding;
+
+		if (!cluster_authority_binding_copy(&diag_binding))
+			elog(LOG, "publish_serving early-return: binding copy failed");
+		else if (diag_binding.state != CLUSTER_AUTHORITY_RECOVERY_READY)
+			elog(LOG, "publish_serving early-return: state=%d phase=%d",
+				 (int)diag_binding.state, (int)cluster_current_phase());
+		else
+			elog(LOG, "publish_serving early-return: phase=%d state=%d",
+				 (int)cluster_current_phase(), (int)diag_binding.state);
 		return false;
+	}
 	/* Validate every generation component while service is still unpublished. */
 	cssd_ready = cluster_cssd_get_status() == CLUSTER_CSSD_READY;
 	qvotec_ready = cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY;
@@ -1615,14 +1629,36 @@ phase_4_handler(PhaseRunFailContext *fail_ctx)
 		}
 
 		lms_pid = phase3_lms_pid;
-		if (lms_pid <= 0
-			|| cluster_authority_readiness_get()
-				   != CLUSTER_AUTHORITY_RECOVERY_READY) {
+		if (lms_pid <= 0)
+		{
 			fail_ctx->errcode = ERRCODE_CLUSTER_LMS_UNAVAILABLE;
 			fail_ctx->errmsg = "cluster phase 4: recovery LMS authority is unavailable";
 			fail_ctx->errhint = "Restart after the phase-3 LMS generation and authority "
 								"binding are available.";
 			return PHASE_RUN_FATAL;
+		}
+
+		/*
+		 * AD-023 A1 contract: every Postmaster read of the volatile phase
+		 * state is a conditional acquire that must never queue.  A transient
+		 * contention therefore shows up as an unavailable read, not a hang,
+		 * and the contract requires retrying inside the existing phase4
+		 * deadline instead of treating one miss as terminal.
+		 */
+		for (;;)
+		{
+			if (cluster_authority_readiness_get()
+				== CLUSTER_AUTHORITY_RECOVERY_READY)
+				break;
+			if (GetCurrentTimestamp() >= phase4_deadline)
+			{
+				fail_ctx->errcode = ERRCODE_CLUSTER_LMS_UNAVAILABLE;
+				fail_ctx->errmsg = "cluster phase 4: recovery LMS authority is unavailable";
+				fail_ctx->errhint = "Restart after the phase-3 LMS generation and authority "
+									"binding are available.";
+				return PHASE_RUN_FATAL;
+			}
+			pg_usleep(20000L);
 		}
 		if (!cluster_lms_request_serving()) {
 			cluster_authority_readiness_clear();
@@ -1640,13 +1676,26 @@ phase_4_handler(PhaseRunFailContext *fail_ctx)
 								"state cannot authorize a formed-registry CF update.";
 			return PHASE_RUN_FATAL;
 		}
-		if (!cluster_authority_readiness_publish_serving()) {
-			cluster_authority_readiness_clear();
-			fail_ctx->errcode = ERRCODE_CLUSTER_LMS_UNAVAILABLE;
-			fail_ctx->errmsg = "cluster phase 4: serving authority publication failed";
-			fail_ctx->errhint = "A stale formation, QVOTEC incarnation, LMS generation, or "
-								"GRD seal cannot publish ordinary GES/GCS service.";
-			return PHASE_RUN_FATAL;
+		/*
+		 * Same A1 retry discipline for the serving publication: retry the
+		 * conditional phase-state read inside the phase4 deadline, then fail
+		 * closed only when the budget is exhausted or the authoritative
+		 * predicate itself reports stale.
+		 */
+		for (;;)
+		{
+			if (cluster_authority_readiness_publish_serving())
+				break;
+			if (GetCurrentTimestamp() >= phase4_deadline)
+			{
+				cluster_authority_readiness_clear();
+				fail_ctx->errcode = ERRCODE_CLUSTER_LMS_UNAVAILABLE;
+				fail_ctx->errmsg = "cluster phase 4: serving authority publication failed";
+				fail_ctx->errhint = "A stale formation, QVOTEC incarnation, LMS generation, or "
+									"GRD seal cannot publish ordinary GES/GCS service.";
+				return PHASE_RUN_FATAL;
+			}
+			pg_usleep(20000L);
 		}
 
 		cluster_validate_running_configuration();

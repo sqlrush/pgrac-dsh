@@ -690,6 +690,8 @@ fixture_root_main(int argc, char **argv)
 		lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
 	else if (strcmp(argv[6], "RECOVERY_REQUIRED") == 0)
 		lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_REQUIRED;
+	else if (strcmp(argv[6], "RECOVERY_COMPLETE") == 0)
+		lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
 	else {
 		fprintf(stderr, "unsupported fixture lifecycle\n");
 		return 2;
@@ -791,6 +793,255 @@ fixture_root_main(int argc, char **argv)
 										 &snapshot, &read_token)
 		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
 		fprintf(stderr, "control-root activation verification failed\n");
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * RF-ROOT P6 pair cast (t/243 setup producer).
+ *
+ * Unlike the synthetic --fixture-root mode, this mode never rewrites the
+ * wal-state registry or claim files.  It reads the REAL stopped slots for
+ * threads 1 and 2 and the REAL claim files, and mints a canonical control
+ * root whose two records mirror the whole registry:
+ *
+ *   record[0] = thread 1 / node 0, lifecycle argv[9]
+ *   record[1] = thread 2 / node 1, lifecycle argv[7]
+ *
+ * argv: --fixture-root-cast <shared_root> <wal_root> <sysid>
+ *       <storage_uuid_hex32> <authority_uuid_hex32> <lifecycle2> <inc2>
+ *       <lifecycle1> <inc1>
+ */
+static bool
+fixture_cast_load_thread(uint16 thread_id, int32 node_id, uint32 *out_tli,
+						 uint64 *out_ckpt, uint64 *out_tail,
+						 ClusterWalThreadClaim *out_claim)
+{
+	uint8 bytes[CLUSTER_WAL_STATE_FILE_SIZE];
+	ClusterWalStateSlot slot;
+	ClusterWalThreadClaim disk_claim;
+	ClusterWalThreadClaim expected_claim;
+	uint16 bad_thread = 0;
+	const char *reason = NULL;
+	char path[MAXPGPATH];
+	char thread_dir[MAXPGPATH];
+
+	if (snprintf(path, sizeof(path), "%s/%s", test_wal_root,
+				 CLUSTER_WAL_STATE_FILENAME) <= 0
+		|| !read_exact_file(path, bytes, sizeof(bytes))
+		|| !cluster_wal_state_image_validate(bytes, sizeof(bytes), &bad_thread,
+										 &reason))
+		return false;
+	memcpy(&slot, bytes + CLUSTER_WAL_STATE_SLOT_OFFSET(thread_id), sizeof(slot));
+	if (cluster_wal_state_slot_classify(&slot, thread_id, -1, NULL)
+			!= CLUSTER_WAL_SLOT_OK
+		|| slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
+		|| slot.node_id != node_id
+		|| slot.tli == 0
+		|| slot.checkpoint_redo_lsn == 0
+		|| slot.highest_lsn == 0
+		|| slot.highest_lsn < slot.checkpoint_redo_lsn
+		|| slot.merge_recovered_lsn != 0)
+		return false;
+
+	if (snprintf(thread_dir, sizeof(thread_dir), "%s/thread_%u", test_wal_root,
+				 thread_id) <= 0
+		|| snprintf(path, sizeof(path), "%s/%s", thread_dir,
+					CLUSTER_WAL_THREAD_CLAIM_FILENAME) <= 0
+		|| !read_exact_file(path, (uint8 *)&disk_claim, sizeof(disk_claim)))
+		return false;
+	cluster_wal_thread_claim_fill(&expected_claim, thread_id, node_id,
+								  disk_claim.created_at);
+	if (disk_claim.magic != expected_claim.magic
+		|| disk_claim.version != expected_claim.version
+		|| disk_claim.thread_id != thread_id
+		|| disk_claim.node_id != node_id
+		|| disk_claim.created_at == 0
+		|| disk_claim.crc != expected_claim.crc)
+		return false;
+
+	*out_tli = slot.tli;
+	*out_ckpt = slot.checkpoint_redo_lsn;
+	*out_tail = slot.highest_lsn;
+	*out_claim = expected_claim;
+	return true;
+}
+
+static void
+fixture_cast_fill_record(ClusterControlRootSnapshot *snapshot, uint64 sysid,
+						 const uint8 storage_uuid[16],
+						 const uint8 authority_uuid[16], uint16 thread_id,
+						 int32 node_id, const ClusterWalThreadClaim *claim,
+						 uint32 lifecycle, uint64 owner_incarnation, uint32 tli,
+						 uint64 ckpt, uint64 tail)
+{
+	*snapshot = (ClusterControlRootSnapshot){0};
+	snapshot->identity.system_identifier = sysid;
+	memcpy(snapshot->identity.storage_uuid, storage_uuid, 16);
+	memcpy(snapshot->identity.authority_uuid, authority_uuid, 16);
+	snapshot->identity.origin_thread_id = thread_id;
+	snapshot->identity.origin_node_id = node_id;
+	snapshot->identity.thread_claim_created_at = claim->created_at;
+	snapshot->identity.thread_claim_crc32c = claim->crc;
+	snapshot->identity.origin_owner_incarnation = owner_incarnation;
+	snapshot->identity.root_lineage_seq = 1;
+	snapshot->lifecycle = lifecycle;
+	snapshot->lifecycle_reason = CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT;
+	snapshot->root_flags = CLUSTER_CONTROL_ROOT_FLAG_CLAIM_VALID
+						   | CLUSTER_CONTROL_ROOT_FLAG_CHECKPOINT_VALID
+						   | CLUSTER_CONTROL_ROOT_FLAG_TAIL_VALID;
+	snapshot->root_publish_seq = 1;
+	snapshot->checkpoint_tli = tli;
+	snapshot->tail_tli = tli;
+	snapshot->checkpoint_source_kind = CLUSTER_CONTROL_ROOT_CHECKPOINT_NATIVE_V1;
+	snapshot->tail_validation_kind = CLUSTER_CONTROL_ROOT_TAIL_WAL_RECORD_SCAN_V1;
+	snapshot->checkpoint_lower_lsn = ckpt;
+	snapshot->validated_tail_lsn_exclusive = tail;
+	snapshot->checkpoint_record_crc32c = UINT32_C(0x33445566);
+	if (tail > ckpt) {
+		snapshot->root_flags |= CLUSTER_CONTROL_ROOT_FLAG_TAIL_LAST_RECORD_VALID;
+		snapshot->tail_last_record_lsn = tail - 1;
+		snapshot->tail_last_record_crc32c = UINT32_C(0x55667788);
+	}
+}
+
+static int
+fixture_cast_main(int argc, char **argv)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken prepared;
+	ClusterControlRootFileToken active;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootIdentity expected_identity;
+	ClusterControlRootReadToken read_token;
+	ClusterWalThreadClaim claim1;
+	ClusterWalThreadClaim claim2;
+	ClusterControlRootResult result_cast_prepare;
+	uint8 round_sha[PG_SHA256_DIGEST_LENGTH];
+	uint64 sysid;
+	uint64 inc1;
+	uint64 inc2;
+	uint32 lifecycle1;
+	uint32 lifecycle2;
+	uint32 tli1;
+	uint32 tli2;
+	uint64 ckpt1;
+	uint64 ckpt2;
+	uint64 tail1;
+	uint64 tail2;
+	uint8 storage_uuid[16];
+	uint8 authority_uuid[16];
+
+	if (argc != 11 || strcmp(argv[1], "--fixture-root-cast") != 0
+		|| !parse_u64_arg(argv[4], &sysid) || sysid == 0
+		|| strlen(argv[2]) >= sizeof(test_root)
+		|| strlen(argv[3]) >= sizeof(test_wal_root)
+		|| strlen(argv[5]) != 32 || strlen(argv[6]) != 32
+		|| !parse_uuid_hex(argv[5], storage_uuid)
+		|| !parse_uuid_hex(argv[6], authority_uuid)
+		|| (authority_uuid[6] & 0xf0) != 0x40
+		|| (authority_uuid[8] & 0xc0) != 0x80
+		|| !parse_u64_arg(argv[8], &inc2) || inc2 == 0
+		|| !parse_u64_arg(argv[10], &inc1) || inc1 == 0) {
+		fprintf(stderr, "invalid --fixture-root-cast arguments\n");
+		return 2;
+	}
+	if (strcmp(argv[7], "RECOVERY_COMPLETE") == 0)
+		lifecycle2 = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
+	else if (strcmp(argv[7], "OPEN") == 0)
+		lifecycle2 = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	else if (strcmp(argv[7], "RECOVERY_REQUIRED") == 0)
+		lifecycle2 = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_REQUIRED;
+	else {
+		fprintf(stderr, "unsupported cast lifecycle 2\n");
+		return 2;
+	}
+	if (strcmp(argv[9], "OPEN") == 0)
+		lifecycle1 = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	else if (strcmp(argv[9], "RECOVERY_COMPLETE") == 0)
+		lifecycle1 = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
+	else {
+		fprintf(stderr, "unsupported cast lifecycle 1\n");
+		return 2;
+	}
+
+	strlcpy(test_root, argv[2], sizeof(test_root));
+	strlcpy(test_wal_root, argv[3], sizeof(test_wal_root));
+	strlcpy(test_storage_uuid_text, argv[5], sizeof(test_storage_uuid_text));
+	test_system_identifier = sysid;
+	cluster_shared_data_dir = test_root;
+	cluster_wal_threads_dir = test_wal_root;
+	DataDir = test_root;
+	test_node_count = 2;
+	test_local_probe = true;
+
+	if (!fixture_cast_load_thread(1, 0, &tli1, &ckpt1, &tail1, &claim1)) {
+		fprintf(stderr, "cannot load real thread-1 source\n");
+		return 1;
+	}
+	if (!fixture_cast_load_thread(2, 1, &tli2, &ckpt2, &tail2, &claim2)) {
+		fprintf(stderr, "cannot load real thread-2 source\n");
+		return 1;
+	}
+
+	memset(&image, 0, sizeof(image));
+	image.system_identifier = sysid;
+	memcpy(image.storage_uuid, storage_uuid, 16);
+	memcpy(image.authority_uuid, authority_uuid, 16);
+	image.created_at_usec = INT64_C(1700000000000002);
+	image.assigned_record_count = 2;
+	fixture_cast_fill_record(&image.records[0], sysid, storage_uuid,
+							 authority_uuid, 1, 0, &claim1, lifecycle1, inc1,
+							 tli1, ckpt1, tail1);
+	fixture_cast_fill_record(&image.records[1], sysid, storage_uuid,
+							 authority_uuid, 2, 1, &claim2, lifecycle2, inc2,
+							 tli2, ckpt2, tail2);
+
+	memset(&round, 0, sizeof(round));
+	memcpy(round.magic, "PCRM", 4);
+	round.version = 1;
+	round.bytes = sizeof(round);
+	round.prepare_generation = 1;
+	round.transition_epoch = 1;
+	round.target_feature_bitmap =
+		PGRAC_CONTROL_ROOT_FEATURE_WAL_REUSE_V1
+		| PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	round.admitted_bitmap_low = 3;
+	round.capability_sample_digest = UINT64_C(0x8877665544332211);
+	round.coordinator_incarnation = UINT64_C(0x7766554433221100);
+	round.coordinator_node_id = 0;
+
+	wipe_root_files();
+	result_cast_prepare = cluster_control_root_create_prepared(&image, &round,
+																&prepared);
+	if (result_cast_prepare != CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
+		fprintf(stderr, "control-root cast prepare failed (result %d)\n",
+				(int)result_cast_prepare);
+		return 1;
+	}
+	round_sha256(&round, round_sha);
+	if (cluster_control_root_activate_prepared(&prepared, round_sha, &active)
+		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		|| active.activation_state != CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE) {
+		fprintf(stderr, "control-root cast activation failed\n");
+		return 1;
+	}
+	expected_identity = image.records[0].identity;
+	if (cluster_control_root_read_canonical(1, &expected_identity,
+										 CLUSTER_CONTROL_ROOT_READ_STRONG,
+										 &snapshot, &read_token)
+		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
+		fprintf(stderr, "control-root cast thread-1 readback failed\n");
+		return 1;
+	}
+	expected_identity = image.records[1].identity;
+	if (cluster_control_root_read_canonical(2, &expected_identity,
+										 CLUSTER_CONTROL_ROOT_READ_STRONG,
+										 &snapshot, &read_token)
+		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
+		fprintf(stderr, "control-root cast thread-2 readback failed\n");
 		return 1;
 	}
 	return 0;
@@ -1593,6 +1844,8 @@ UT_TEST(test_reserved_bytes_and_symlink_fail_closed)
 int
 main(int argc, char **argv)
 {
+	if (argc > 1 && strcmp(argv[1], "--fixture-root-cast") == 0)
+		return fixture_cast_main(argc, argv);
 	if (argc > 1)
 		return fixture_root_main(argc, argv);
 	setup_fixture();
