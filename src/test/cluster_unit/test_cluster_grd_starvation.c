@@ -909,6 +909,48 @@ cluster_ges_handoff_note_drain(int n_granted pg_attribute_unused(),
 	abort();
 }
 
+/*
+ * RF-ROOT P4 link-only stubs: cluster_grd.o's new recovery-authority
+ * helpers reference CSSD/LMON/LMS/membership/qvotec.  The starvation unit
+ * only exercises the starvation barrier under plain GES grants and never
+ * reaches those helpers; neutral unavailable values keep the binary
+ * standalone.
+ */
+int /* ClusterCssdStatus */
+cluster_cssd_get_status(void)
+{
+	return 0;
+}
+
+void
+cluster_lmon_wakeup(void)
+{
+}
+
+uint64
+cluster_lms_get_lms_restart_generation(void)
+{
+	return 0;
+}
+
+uint64
+cluster_membership_get_last_admitted_incarnation(int32 node_id pg_attribute_unused())
+{
+	return 0;
+}
+
+bool
+cluster_qvotec_in_quorum(void)
+{
+	return false;
+}
+
+uint64
+cluster_qvotec_get_self_incarnation(void)
+{
+	return 0;
+}
+
 
 /* ============================================================
  * spec-5.10 — test driving helpers (mirror test_cluster_grd.c).

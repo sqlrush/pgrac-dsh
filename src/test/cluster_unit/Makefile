@@ -377,8 +377,8 @@ test_cluster_external_fence: test_cluster_external_fence.c unit_test.h \
 		$(CLUSTER_EXTERNAL_FENCE_O) $(PGRAC_EXTERNAL_FENCE_PROTOCOL_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_EXTERNAL_FENCE_O) \
 		$(PGRAC_EXTERNAL_FENCE_PROTOCOL_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 # spec-5.7 D5: test_cluster_ts links cluster_ts.o (pure TT resid encoders) +
 # cluster_ir.o/cluster_dl.o/cluster_hw.o (resid encoders, for the TT-vs-others
@@ -565,8 +565,8 @@ CLUSTER_CONTROL_ROOT_O = $(top_builddir)/src/backend/cluster/cluster_control_roo
 test_cluster_control_root: test_cluster_control_root.c unit_test.h \
 		$(CLUSTER_CONTROL_ROOT_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_CONTROL_ROOT_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 CLUSTER_WAL_RETENTION_O = $(top_builddir)/src/backend/cluster/cluster_wal_retention.o
 test_cluster_wal_retention: test_cluster_wal_retention.c unit_test.h \
@@ -578,22 +578,22 @@ CLUSTER_RECOVERY_DUTY_O = $(top_builddir)/src/backend/cluster/cluster_recovery_d
 test_cluster_recovery_duty: test_cluster_recovery_duty.c unit_test.h \
 		$(CLUSTER_RECOVERY_DUTY_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_RECOVERY_DUTY_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 test_cluster_formation_witness: test_cluster_formation_witness.c unit_test.h \
 		$(CLUSTER_RECOVERY_DUTY_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_RECOVERY_DUTY_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 test_pgrac_external_fence_protocol: \
 		test_pgrac_external_fence_protocol.c unit_test.h \
 		$(PGRAC_EXTERNAL_FENCE_PROTOCOL_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< \
 		$(PGRAC_EXTERNAL_FENCE_PROTOCOL_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 PGRAC_FENCED_CONFIG_O = \
 	$(top_builddir)/src/bin/pgrac_fenced/pgrac_fenced_config.o
@@ -603,7 +603,7 @@ test_pgrac_fenced_config: test_pgrac_fenced_config.c unit_test.h \
 		-I$(top_srcdir)/src/bin/pgrac_fenced $< \
 		$(PGRAC_FENCED_CONFIG_O) \
 		$(top_builddir)/src/common/libpgcommon.a \
-		$(top_builddir)/src/port/libpgport.a -o $@
+		$(top_builddir)/src/port/libpgport.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 PGRAC_FENCED_CORE_O = \
 	$(top_builddir)/src/bin/pgrac_fenced/pgrac_fenced_core.o
@@ -620,8 +620,8 @@ test_pgrac_fenced_journal: test_pgrac_fenced_journal.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) \
 		-I$(top_srcdir)/src/bin/pgrac_fenced $< \
 		$(PGRAC_FENCED_JOURNAL_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 PGRAC_FENCED_PROVIDER_O = \
 	$(top_builddir)/src/bin/pgrac_fenced/pgrac_fenced_provider.o
@@ -640,8 +640,8 @@ test_pgrac_fenced_ctl: test_pgrac_fenced_ctl.c unit_test.h \
 		-I$(top_srcdir)/src/bin/pgrac_fenced $< \
 		$(PGRAC_FENCED_CTL_O) $(PGRAC_FENCED_JOURNAL_O) \
 		$(PGRAC_EXTERNAL_FENCE_PROTOCOL_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 CLUSTER_FENCE_AUTHORITY_O = $(top_builddir)/src/backend/cluster/cluster_fence_authority.o
 test_cluster_write_fence_durable: test_cluster_write_fence_durable.c unit_test.h \
@@ -1392,8 +1392,8 @@ test_cluster_qvotec: test_cluster_qvotec.c unit_test.h \
 		$(CLUSTER_VOTING_DISK_IO_O) $(CLUSTER_UNDO_BLOCK0_O) \
 		$(CLUSTER_UNDO_ROOT_DESCRIPTOR_O) \
 		$(top_builddir)/src/backend/cluster/cluster_semantic_activation.o \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 # spec-2.28 Sprint A Step 1 — cluster_fence.o standalone link.  Stubs all
 # PG runtime deps (shmem / lwlock / timestamp / errlog).  T-fence-1 verifies
@@ -1692,7 +1692,7 @@ test_cluster_r4_static_model: test_cluster_r4_static_model.c unit_test.h
 		-DSEMANTIC_SOURCE_PATH='"$(abspath $(top_srcdir))/src/backend/cluster/cluster_semantic_activation.c"' \
 		$< \
 		$(top_builddir)/src/common/libpgcommon.a \
-		$(top_builddir)/src/port/libpgport.a -o $@
+		$(top_builddir)/src/port/libpgport.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 # spec-8.4 B1/D1: exact caller-selected locator and dormant normalized
 # resolver entry points.  This links the production object directly.
@@ -2430,8 +2430,8 @@ test_cluster_r4_activation_record: test_cluster_r4_activation_record.c unit_test
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< \
 		$(CLUSTER_VERSION_O) $(CLUSTER_UNDO_BLOCK0_O) \
 		$(CLUSTER_UNDO_ROOT_DESCRIPTOR_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 test_cluster_r4_activation_fsm: test_cluster_r4_activation_fsm.c unit_test.h \
 		$(CLUSTER_SEMANTIC_ACTIVATION_C) $(CLUSTER_SEMANTIC_ACTIVATION_H) \
@@ -2442,8 +2442,8 @@ test_cluster_r4_activation_fsm: test_cluster_r4_activation_fsm.c unit_test.h \
 		$(CLUSTER_VERSION_O) $(CLUSTER_UNDO_BLOCK0_O) $(CLUSTER_REPLACEMENT_EPISODE_O) \
 		$(CLUSTER_REPLACEMENT_WIRE_O) $(CLUSTER_EPOCH_BALLOT_O) \
 		$(CLUSTER_UNDO_ROOT_DESCRIPTOR_O) \
-		$(top_builddir)/src/common/libpgcommon_srv.a \
-		$(top_builddir)/src/port/libpgport_srv.a -o $@
+		$(top_builddir)/src/common/libpgcommon.a \
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
 
 # Stage 8 R4 D6 lifecycle/store RED tranche: link the real heap HOT lifecycle,
 # index-handler ownership switch, executor buffer-slot implementation and heap
