@@ -260,7 +260,10 @@ void *
 ShmemInitStruct(const char *name pg_attribute_unused(), Size size pg_attribute_unused(),
 				bool *foundPtr)
 {
-	static char fake_shmem[4096];
+	/* AD-023 A1: the phase state now embeds pg_atomic_uint32 words; the
+	 * fake region must be maximally aligned so the atomic loads/stores
+	 * never touch an under-aligned address (arm64 traps on that). */
+	static char fake_shmem[4096] pg_attribute_aligned(MAXIMUM_ALIGNOF);
 
 	memset(fake_shmem, 0, sizeof(fake_shmem));
 	if (foundPtr != NULL)
@@ -310,7 +313,7 @@ cluster_write_fence_startup_self_check(void)
 	return false;
 }
 
-static char phase4_events[32];
+static char phase4_events[512];
 static int phase4_event_count = 0;
 static bool phase4_test_in_quorum = true;
 static int phase4_quorum_check_calls = 0;
@@ -828,8 +831,15 @@ UT_TEST(test_rf_a1_no_pgproc_phase_reads_never_block)
 	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
 				 (int)CLUSTER_AUTHORITY_OFF);
 	UT_ASSERT(!cluster_authority_readiness_managed());
+	/*
+	 * AD-023 A1 (lock-free branch): the three hot phase-state words are
+	 * read through pg_atomic and never take the LWLock at all, so a
+	 * no-PGPROC caller cannot block and cannot be starved by the
+	 * per-grant serving gates; the conditional-acquire discipline only
+	 * remains for the large binding copy.
+	 */
 	UT_ASSERT_EQ(phase_lwlock_blocking_calls, 0);
-	UT_ASSERT_EQ(phase_lwlock_conditional_calls, 3);
+	UT_ASSERT_EQ(phase_lwlock_conditional_calls, 0);
 
 	phase_lwlock_conditional_result = true;
 	phase_lwlock_blocking_calls = 0;
@@ -837,7 +847,7 @@ UT_TEST(test_rf_a1_no_pgproc_phase_reads_never_block)
 	UT_ASSERT_EQ((int)cluster_current_phase(),
 				 (int)CLUSTER_PHASE_PRE_INIT);
 	UT_ASSERT_EQ(phase_lwlock_blocking_calls, 0);
-	UT_ASSERT_EQ(phase_lwlock_conditional_calls, 1);
+	UT_ASSERT_EQ(phase_lwlock_conditional_calls, 0);
 
 	memset(&fake_proc, 0, sizeof(fake_proc));
 	MyProc = &fake_proc;
@@ -845,7 +855,7 @@ UT_TEST(test_rf_a1_no_pgproc_phase_reads_never_block)
 	phase_lwlock_conditional_calls = 0;
 	UT_ASSERT_EQ((int)cluster_current_phase(),
 				 (int)CLUSTER_PHASE_PRE_INIT);
-	UT_ASSERT_EQ(phase_lwlock_blocking_calls, 1);
+	UT_ASSERT_EQ(phase_lwlock_blocking_calls, 0);
 	UT_ASSERT_EQ(phase_lwlock_conditional_calls, 0);
 	MyProc = NULL;
 }
@@ -946,18 +956,24 @@ UT_TEST(test_rf_a1_readiness_is_monotone_and_generation_bound)
 UT_TEST(test_rf_a1_missing_authoritative_grd_stops_before_recovery)
 {
 	bool caught_fatal = false;
+	int saved_phase3_timeout = cluster_phase3_timeout;
 
 	reset_phase_service_fixture(true);
 	phase_test_grd_authority_ok = false;
+	cluster_phase3_timeout = 1; /* A2 retry loop must fail closed fast */
 	phase4_capture_fatal = true;
 	if (setjmp(phase4_fatal_jump) == 0)
 		cluster_run_startup_sequence();
 	else
 		caught_fatal = true;
 	phase4_capture_fatal = false;
+	cluster_phase3_timeout = saved_phase3_timeout;
 
 	UT_ASSERT(caught_fatal);
-	UT_ASSERT_STR_EQ(phase4_events, "CcQqVFXLrG");
+	/* The A2 barrier retry repeats the formation re-fetch until the
+	 * deadline, so the event stream keeps the phase-3 prefix and adds
+	 * repeated witness/classification/barrier cycles before the FATAL. */
+	UT_ASSERT(strncmp(phase4_events, "CcQqVFXLrG", 10) == 0);
 	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
 				 (int)CLUSTER_AUTHORITY_OFF);
 }

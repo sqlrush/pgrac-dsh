@@ -1412,6 +1412,10 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 				return PHASE_RUN_FATAL;
 			}
 			boot_incarnation = cluster_qvotec_get_self_incarnation();
+			/* Pace the retry so a persistently unavailable barrier
+			 * cannot spin the Postmaster without yielding; the phase-3
+			 * deadline still bounds the whole loop. */
+			pg_usleep(20000L);
 		}
 	}
 
