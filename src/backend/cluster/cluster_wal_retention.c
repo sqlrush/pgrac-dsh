@@ -2630,8 +2630,15 @@ cluster_wal_reuse_guard_remove(ClusterWalReuseActionGuard *guard,
 		|| active_reuse_guard != guard || !guard->walr.held
 		|| guard->walr.release_uncertain
 		|| (guard->flags & CLUSTER_WAL_GUARD_F_PRIMARY_L3) == 0
-		|| (guard->flags & (CLUSTER_WAL_GUARD_F_PRIMARY_ZERO
-							 | CLUSTER_WAL_GUARD_F_FALLBACK_ZERO)) != 0) {
+		/* STOP-05 §15.5: the single recycle-to-remove fallback is the one
+		 * legal shape where PRIMARY_ZERO may be set -- the recycle attempt
+		 * changed zero bytes/names and the caller re-armed the same guard
+		 * through the fallback L3.  A zero-mutation note on the fallback
+		 * itself (FALLBACK_ZERO) or a PRIMARY_ZERO without the fallback L3
+		 * is ambiguous and stays GUARD_STATE. */
+		|| (guard->flags & CLUSTER_WAL_GUARD_F_FALLBACK_ZERO) != 0
+		|| ((guard->flags & CLUSTER_WAL_GUARD_F_PRIMARY_ZERO) != 0
+			&& (guard->flags & CLUSTER_WAL_GUARD_F_FALLBACK_L3) == 0)) {
 		*out_reason = CLUSTER_WAL_DENY_GUARD_STATE;
 		return CLUSTER_WAL_GUARD_INVALID;
 	}

@@ -4133,7 +4133,11 @@ remove_action:
 		ereport(FATAL,
 				(errmsg("WAL removal did not reach a safe terminal state"),
 				 errdetail("File \"%s\" deny reason is %d.",
-						   segname, (int)reason)));
+						   segname, (int)reason),
+				 errhint("guard state=%d flags=%d walr_held=%d entry=%d action=%d",
+						 (int)guard.state, (int)guard.flags,
+						 (int)guard.walr.held, (int)guard.entry,
+						 (int)guard.action)));
 	outcome = CLUSTER_WAL_TERMINAL_REMOVED;
 
 terminal:

@@ -4982,6 +4982,77 @@ cluster_reconfig_publish_self_current_floor_locked(int32 self_id,
 	return true;
 }
 
+/*
+ * RF-ROOT P6 / crash-rejoin convergence (t243 L4 wedge).
+ *
+ * A crash-rejoining node's admission is proven entirely by the voting-disk
+ * durable JCMK plus cluster_epoch_adopt_admitted: qvotec detects its own
+ * COMMITTED marker, cluster_reconfig_note_self_admitted() bumps the local
+ * epoch to the admitted epoch, but ReconfigShmem->last_applied stays a
+ * zero event -- JOIN_COMMITTED exists only on the coordinator/survivor side
+ * and the IC envelope carries no ReconfigEvent.  The phase-3 formation
+ * witness can therefore never accept the snapshot:
+ *   - cluster_recovery_duty.c:509  local_epoch(3) != applied.new_epoch(0)
+ *   - even with that relaxed, formation_expected_marker() builds a
+ *     BASELINE(epoch 0) marker for event_id==0 that can never tuple-equal
+ *     the durable epoch-3 marker on disk.
+ * Phase 3 then polls its first live-formation wait until the 600 s
+ * deadline (the run23 postmaster sat silent for 53+ s).
+ *
+ * This helper publishes a local JOIN_COMMITTED after admission committed
+ * (off-path fast-rejoin window, epoch > 0, no event applied yet) whose
+ * event identity (event_id / coordinator / cssd_dead_generation /
+ * dead_bitmap / new_epoch) is copied verbatim from the durable majority
+ * fence marker -- the same join-commit baseline the coordinator wrote to
+ * disk -- so formation_expected_marker() reconstructs an expected marker
+ * exactly equal to the durable authority.  Every fail-closed check
+ * (witness epoch/marker, formation, barrier preconditions, all_done
+ * composite key) is preserved and the phase-3 deadline semantics are
+ * unchanged.  Idempotent: once published, last_applied.event_id != 0 and
+ * every later tick skips.
+ */
+static void
+cluster_reconfig_maybe_publish_joiner_admission_event(void)
+{
+	ClusterFenceAuthorityProof authority;
+	ReconfigEvent evt;
+	uint64 cur_epoch;
+
+	if (ReconfigShmem == NULL || cluster_node_id < 0
+		|| cluster_node_id >= CLUSTER_MAX_NODES
+		|| !offpath_fast_rejoin_active_local)
+		return;
+	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+	cur_epoch = cluster_epoch_get_current();
+	if (ReconfigShmem->last_applied.event_id != 0 || cur_epoch == 0) {
+		LWLockRelease(&ReconfigShmem->lock);
+		return;
+	}
+	LWLockRelease(&ReconfigShmem->lock);
+
+	/* The durable majority marker is the strongest available authority and
+	 * must already carry the current admitted epoch. */
+	if (cluster_write_fence_read_durable_authority(&authority)
+			!= CLUSTER_FENCE_AUTHORITY_OK
+		|| authority.marker.fence_epoch != cur_epoch
+		|| authority.marker.fence_epoch == 0)
+		return; /* retry next tick; fail-closed */
+
+	memset(&evt, 0, sizeof(evt));
+	evt.event_id = authority.marker.fence_event_id;
+	evt.coordinator_node_id = authority.marker.issuer_node_id;
+	evt.old_epoch = 0; /* informational; the durable marker is authority */
+	evt.new_epoch = authority.marker.fence_epoch;
+	memcpy(evt.dead_bitmap, authority.marker.fenced_dead_bitmap,
+		   CLUSTER_RECONFIG_DEAD_BITMAP_BYTES);
+	evt.applied_at = GetCurrentTimestamp();
+	evt.observer_role = CLUSTER_RECONFIG_OBSERVER_SURVIVOR;
+	evt.cssd_dead_generation = authority.marker.fence_generation;
+	evt.reconfig_kind = RECONFIG_KIND_JOIN_COMMITTED;
+	dead_bitmap_set_bit(evt.join_bitmap, cluster_node_id);
+	cluster_reconfig_publish_event(&evt);
+}
+
 static void
 cluster_reconfig_joiner_self_tick(void)
 {
@@ -5564,6 +5635,10 @@ cluster_reconfig_lmon_tick(void)
 		}
 		else
 			cluster_membership_set_state(self_id, CLUSTER_MEMBER_JOINING);
+
+		/* RF-ROOT P6 / crash-rejoin: publish the local admission event
+		 * (see helper) so the formation witness can prove this boot. */
+		cluster_reconfig_maybe_publish_joiner_admission_event();
 
 		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 			ClusterMembershipState ms;
