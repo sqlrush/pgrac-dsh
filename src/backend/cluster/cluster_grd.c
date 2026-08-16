@@ -2813,13 +2813,45 @@ cluster_grd_recovery_authority_barrier_wait(
 		|| cluster_lms_get_lms_restart_generation() != lms_generation
 		|| !cluster_membership_is_member(cluster_node_id)
 		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
-			   != boot_incarnation)
+			   != boot_incarnation) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the barrier
+		 * head gate.  Capped; removed before the final push. */
+		static int barrier_head_diag_count = 0;
+
+		if (barrier_head_diag_count++ < 6)
+			ereport(LOG,
+					(errmsg("TEMP barrier head fail: in_progress=%d quorum=%d "
+							"inc_match=%d lms_match=%d is_member=%d "
+							"admitted==boot=%d",
+							cluster_grd_recovery_in_progress(),
+							cluster_qvotec_in_quorum(),
+							cluster_qvotec_get_self_incarnation()
+								== boot_incarnation,
+							cluster_lms_get_lms_restart_generation()
+								== lms_generation,
+							cluster_membership_is_member(cluster_node_id),
+							cluster_membership_get_last_admitted_incarnation(
+								cluster_node_id) == boot_incarnation)));
 		return false;
+	}
 
 	epoch = formation->local_epoch;
 	if (epoch != formation->applied.new_epoch
-		|| epoch != cluster_epoch_get_current())
+		|| epoch != cluster_epoch_get_current()) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): epoch-axis gate.
+		 * Capped; removed before the final push. */
+		static int barrier_epoch_diag_count = 0;
+
+		if (barrier_epoch_diag_count++ < 6)
+			ereport(LOG,
+					(errmsg("TEMP barrier epoch fail: local=%llu applied=%llu "
+							"current=%llu",
+							(unsigned long long)epoch,
+							(unsigned long long)formation->applied.new_epoch,
+							(unsigned long long)
+								cluster_epoch_get_current())));
 		return false;
+	}
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 		bool formation_member
 			= formation->membership.membership_state[i]

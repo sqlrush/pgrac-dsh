@@ -5493,8 +5493,18 @@ cluster_reconfig_lmon_tick(void)
 		if (cluster_conf_lookup_node(i) == NULL)
 			continue; /* F11: skip un-declared peer */
 
-		if (cluster_cssd_get_peer_state(i) == CLUSTER_CSSD_PEER_DEAD)
+		if (cluster_cssd_get_peer_state(i) == CLUSTER_CSSD_PEER_DEAD) {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every tick that
+			 * captures a CSSD-DEAD peer logs the capture so the fail-stop
+			 * window is visible.  Removed before the final push. */
+			if (!dead_bitmap_test_bit(dead_bitmap, i))
+				ereport(LOG,
+						(errmsg("TEMP cssd-dead capture: peer=%d dead_gen=%llu",
+								i,
+								(unsigned long long)
+									cluster_cssd_get_dead_generation())));
 			dead_bitmap_set_bit(dead_bitmap, i);
+		}
 	}
 	cssd_dead_generation = cluster_cssd_get_dead_generation();
 
@@ -5984,12 +5994,41 @@ cluster_reconfig_lmon_tick(void)
 		&& (cluster_online_join
 			|| (dead_bitmap_is_zero(new_failure_bitmap)
 				&& !failure_generation_changed))) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): join-drive entry evidence.
+		 * Capped; removed before the final push. */
+		{
+			static int join_drive_diag_count = 0;
+
+			if (join_drive_diag_count++ < 6)
+				ereport(LOG,
+						(errmsg("TEMP join-drive: target=%d inc=%llu",
+								fast_rejoin_control_actions
+									? fast_rejoin_control_target : -1,
+								(unsigned long long)(fast_rejoin_control_actions
+													 ? fast_rejoin_control_incarnation
+													 : 0))));
+		}
 		if (external_rejoin_active)
 			cluster_reconfig_external_rejoin_tick();
 		cluster_reconfig_drive_joins(coordinator,
 			fast_rejoin_control_actions ? fast_rejoin_control_target : -1,
 			fast_rejoin_control_actions ? fast_rejoin_control_incarnation : 0);
 	} else {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the blocked
+		 * join-drive gate.  Capped; removed before the final push. */
+		static int join_gate_diag_count = 0;
+
+		if (join_gate_diag_count++ < 8)
+			ereport(LOG,
+					(errmsg("TEMP join-drive blocked: runtime=%d ordinary=%d "
+							"control=%d coord_self=%d clean_leave=%d online=%d "
+							"new_fail_zero=%d gen_changed=%d",
+							runtime_join_allowed, ordinary_actions_allowed,
+							fast_rejoin_control_actions, self_id == coordinator,
+							cluster_clean_leave_in_progress(),
+							cluster_online_join,
+							dead_bitmap_is_zero(new_failure_bitmap),
+							failure_generation_changed)));
 		cluster_reconfig_external_rejoin_release_all();
 		if (join_commit_stage.external_rejoin_consumed)
 			cluster_reconfig_release_join_commit_stage();
