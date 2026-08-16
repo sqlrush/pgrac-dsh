@@ -556,6 +556,15 @@ cluster_cssd_dispatch_heartbeat(const ClusterICEnvelope *env, const void *payloa
 	pg_atomic_add_fetch_u64(&CssdShmem->peers[sender].heartbeat_recv_count, 1);
 	pg_atomic_add_fetch_u64(&CssdShmem->total_heartbeat_recv_count, 1);
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th recv logs the
+	 * aggregate recv counter.  Removed before the final push. */
+	if ((pg_atomic_read_u64(&CssdShmem->total_heartbeat_recv_count) % 10) == 0)
+		ereport(LOG,
+				(errmsg("TEMP cssd recv: sender=%d recv_total=%llu",
+						sender,
+						(unsigned long long)pg_atomic_read_u64(
+							&CssdShmem->total_heartbeat_recv_count))));
+
 	(void)hb; /* hb fields are diagnostic-only;deadband scan uses
 				* receiver-local clock, not sender_local_clock (clock skew
 				* safe). */
@@ -657,6 +666,17 @@ cssd_heartbeat_broadcast_tick(void)
 	slots = cluster_cssd_outbound_slots();
 	if (slots == NULL)
 		return;
+
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th broadcast logs the
+	 * aggregate send counter + main-loop iterations so a stalled CSSD loop
+	 * or a starved slot is visible.  Removed before the final push. */
+	if ((cssd_seq % 10) == 0)
+		ereport(LOG,
+				(errmsg("TEMP cssd broadcast: seq=%u send_total=%llu iters=%lld",
+						cssd_seq,
+						(unsigned long long)pg_atomic_read_u64(
+							&CssdShmem->total_heartbeat_send_count),
+						(long long)CssdShmem->main_loop_iters)));
 
 	hb.cssd_seq = ++cssd_seq;
 	hb.sender_local_clock = (uint64)GetCurrentTimestamp();

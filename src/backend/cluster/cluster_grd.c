@@ -2459,6 +2459,11 @@ grd_recovery_broadcast_done(uint64 epoch)
 }
 
 /* REDECLARE_DONE receiver (cluster_ges.c inbound handler). */
+/* Process-local once-gate for the symmetric done-key echo (回正清单 P1#4):
+ * one echo per exact {epoch, dead_bitmap_hash} composite per process. */
+static uint64 grd_recovery_done_echo_epoch = 0;
+static uint64 grd_recovery_done_echo_hash = 0;
+
 void
 cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap_hash)
 {
@@ -2554,16 +2559,27 @@ cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap
 	 * recovery_done_bitmap_hash for self, written when the episode
 	 * completed), re-broadcast the local done key.  The joiner's authority
 	 * tick broadcasts its own key every tick, the survivor hears it and
-	 * replies, and the joiner's authority axis converges.  Idempotent (the
-	 * exact composite-key equality gates the reply); this runs in the LMON
-	 * dispatch context (cluster_ges.c), where the shared outbound ring is
-	 * the same path the existing broadcasts use.
+	 * replies, and the joiner's authority axis converges.
+	 *
+	 * Echo amplification guard (回正清单 P1#4): each exact {epoch, hash}
+	 * composite may trigger at most ONE echo per process.  A peer that
+	 * keeps re-broadcasting the same key therefore cannot drive an unbounded
+	 * per-frame echo storm; a NEW episode (different composite) re-arms the
+	 * echo exactly once.  This runs in the LMON dispatch context
+	 * (cluster_ges.c), where the shared outbound ring is the same path the
+	 * existing broadcasts use.
 	 */
 	if (epoch == pg_atomic_read_u64(
 				&cluster_grd_state->recovery_done_epoch[cluster_node_id])
 		&& dead_bitmap_hash == pg_atomic_read_u64(
-				&cluster_grd_state->recovery_done_bitmap_hash[cluster_node_id]))
+				&cluster_grd_state->recovery_done_bitmap_hash[cluster_node_id])
+		&& (epoch != grd_recovery_done_echo_epoch
+			|| dead_bitmap_hash != grd_recovery_done_echo_hash))
+	{
+		grd_recovery_done_echo_epoch = epoch;
+		grd_recovery_done_echo_hash = dead_bitmap_hash;
 		grd_recovery_broadcast_done_key(epoch, dead_bitmap_hash);
+	}
 }
 
 typedef enum ClusterGrdRecoveryAuthorityTerminal {

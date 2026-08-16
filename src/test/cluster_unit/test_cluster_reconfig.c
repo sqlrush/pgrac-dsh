@@ -849,6 +849,32 @@ cluster_write_fence_submit_marker(const ClusterFenceMarker *m pg_attribute_unuse
 {
 	return CLUSTER_FENCE_MARKER_SUBMIT_FAILED;
 }
+/* Link-only stub for the joiner-admission event helper (RF-ROOT P6); the real
+ * durable-authority reader is exercised by test_cluster_write_fence_durable. */
+ClusterFenceAuthorityReadResult
+cluster_write_fence_read_durable_authority(ClusterFenceAuthorityProof *out pg_attribute_unused())
+{
+	return CLUSTER_FENCE_AUTHORITY_IO_UNAVAILABLE;
+}
+
+/* Link-only stubs for the RF-ROOT P6 TEMP lock-probe diagnostics: the probe
+ * path is not exercised by this unit's pure-shmem fixtures. */
+bool
+LWLockHeldByMe(LWLock *lock pg_attribute_unused())
+{
+	return false;
+}
+
+void
+TimestampDifference(TimestampTz start_time pg_attribute_unused(),
+					TimestampTz stop_time pg_attribute_unused(),
+					long *secs, int *microsecs)
+{
+	if (secs != NULL)
+		*secs = 0;
+	if (microsecs != NULL)
+		*microsecs = 0;
+}
 /* spec-2.29a review r1 P1-c: controllable async-marker stubs so the tick-level
  * P1-1 invariants (bump-once while PENDING, node-remove zero-false-contest,
  * publish deferred to ACK) can be hard-asserted.  Defaults preserve the

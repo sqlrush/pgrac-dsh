@@ -338,6 +338,27 @@ static bool cluster_reconfig_terminal_closed_matches_episode(
 	const ClusterReplacementEpisode *episode);
 static void cluster_reconfig_release_ready_stage(void);
 static bool cluster_reconfig_lmon_submit_ready_observer_pair(TimestampTz now);
+
+/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): report any reconfig-lock acquire
+ * that blocked > 50 ms, with the raw LWLock state word.  Removed before the
+ * final push. */
+static void
+cluster_reconfig_temp_lock_probe(const char *caller, LWLockMode mode, TimestampTz before)
+{
+	long	secs;
+	int		usecs;
+
+	if (ReconfigShmem == NULL)
+		return;
+	TimestampDifference(before, GetCurrentTimestamp(), &secs, &usecs);
+	if (secs == 0 && usecs < 50000)
+		return;
+	ereport(LOG,
+			(errmsg("TEMP reconfig-lock slow acquire: caller=%s mode=%d "
+					"wait_ms=%ld state=0x%08x",
+					caller, (int)mode, secs * 1000 + usecs / 1000,
+					(unsigned)pg_atomic_read_u32(&ReconfigShmem->lock.state))));
+}
 static bool cluster_reconfig_lmon_ready_cache_current(
 	int32 *coordinator_node_id);
 
@@ -482,6 +503,8 @@ cluster_reconfig_shmem_register(void)
 void
 cluster_reconfig_get_last_event(ReconfigEvent *out)
 {
+	TimestampTz probe_t0;
+
 	Assert(out != NULL);
 
 	if (ReconfigShmem == NULL) {
@@ -492,7 +515,9 @@ cluster_reconfig_get_last_event(ReconfigEvent *out)
 		return;
 	}
 
+	probe_t0 = GetCurrentTimestamp();
 	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+	cluster_reconfig_temp_lock_probe("get_last_event", LW_SHARED, probe_t0);
 	memcpy(out, &ReconfigShmem->last_applied, sizeof(ReconfigEvent));
 	LWLockRelease(&ReconfigShmem->lock);
 }
@@ -516,8 +541,19 @@ cluster_reconfig_capture_formation_snapshot_v1(uint16 origin_thread,
 	 * only take an immediately available shared lock and lets the existing
 	 * phase-3 deadline loop retry contention. */
 	if (MyProc == NULL) {
-		if (!LWLockConditionalAcquire(&ReconfigShmem->lock, LW_SHARED))
+		if (!LWLockConditionalAcquire(&ReconfigShmem->lock, LW_SHARED)) {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): the postmaster
+			 * formation loop retries contention, so a persistent failure
+			 * here is the lock-starvation witness.  Removed before push. */
+			static int cond_fail_count = 0;
+
+			if (cond_fail_count++ < 8)
+				ereport(LOG,
+						(errmsg("TEMP reconfig-lock conditional fail: state=0x%08x",
+								(unsigned)pg_atomic_read_u32(
+									&ReconfigShmem->lock.state))));
 			return false;
+		}
 	} else
 		LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
 	src = &ReconfigShmem->last_applied;
@@ -1568,9 +1604,12 @@ cluster_reconfig_record_observed_slot(int32 node_id, uint64 incarnation, uint64 
 {
 	if (ReconfigShmem == NULL || node_id < 0 || node_id >= CLUSTER_MAX_NODES)
 		return;
+	/* RF-ROOT P6: generation is the publish gate -- write the data fields
+	 * first and the generation LAST so a reader that re-checks the
+	 * generation before/after sees one exact torn-free sample. */
 	pg_atomic_write_u64(&ReconfigShmem->observed_incarnation[node_id], incarnation);
-	pg_atomic_write_u64(&ReconfigShmem->observed_generation[node_id], generation);
 	pg_atomic_write_u64(&ReconfigShmem->observed_epoch[node_id], epoch);
+	pg_atomic_write_u64(&ReconfigShmem->observed_generation[node_id], generation);
 }
 
 uint64
@@ -1595,14 +1634,19 @@ cluster_reconfig_record_observed_committed_join(int32 node_id, uint64 incarnatio
 {
 	if (ReconfigShmem == NULL || node_id < 0 || node_id >= CLUSTER_MAX_NODES)
 		return;
-	pg_atomic_write_u64(&ReconfigShmem->observed_committed_join_incarnation[node_id], incarnation);
+	/* RF-ROOT P6: epoch is written BEFORE the incarnation; the incarnation
+	 * is the publish gate for this pair, and it is monotone across boots,
+	 * so a reader that re-checks the incarnation sees one exact sample. */
 	pg_atomic_write_u64(&ReconfigShmem->observed_committed_join_epoch[node_id], epoch);
+	pg_atomic_write_u64(&ReconfigShmem->observed_committed_join_incarnation[node_id], incarnation);
 }
 
 bool
 cluster_reconfig_get_observed_committed_join(int32 node_id, uint64 *incarnation, uint64 *epoch)
 {
 	uint64 inc;
+	uint64 inc_after;
+	uint64 ep;
 
 	if (ReconfigShmem == NULL || node_id < 0 || node_id >= CLUSTER_MAX_NODES) {
 		if (incarnation != NULL)
@@ -1611,11 +1655,20 @@ cluster_reconfig_get_observed_committed_join(int32 node_id, uint64 *incarnation,
 			*epoch = 0;
 		return false;
 	}
-	inc = pg_atomic_read_u64(&ReconfigShmem->observed_committed_join_incarnation[node_id]);
+	/* Exact torn-free sample: incarnation is the publish gate; read it
+	 * before and after the epoch and retry on any concurrent publish. */
+	do {
+		inc = pg_atomic_read_u64(
+			&ReconfigShmem->observed_committed_join_incarnation[node_id]);
+		ep = pg_atomic_read_u64(
+			&ReconfigShmem->observed_committed_join_epoch[node_id]);
+		inc_after = pg_atomic_read_u64(
+			&ReconfigShmem->observed_committed_join_incarnation[node_id]);
+	} while (inc != inc_after);
 	if (incarnation != NULL)
 		*incarnation = inc;
 	if (epoch != NULL)
-		*epoch = pg_atomic_read_u64(&ReconfigShmem->observed_committed_join_epoch[node_id]);
+		*epoch = ep;
 	return inc > 0;
 }
 
@@ -1629,7 +1682,9 @@ cluster_reconfig_get_observed_committed_join(int32 node_id, uint64 *incarnation,
 bool
 cluster_reconfig_get_observed_slot(int32 node_id, uint64 *incarnation, uint64 *generation)
 {
-	uint64 gen;
+	uint64 generation_before;
+	uint64 generation_after;
+	uint64 inc;
 
 	if (incarnation != NULL)
 		*incarnation = 0;
@@ -1639,12 +1694,24 @@ cluster_reconfig_get_observed_slot(int32 node_id, uint64 *incarnation, uint64 *g
 	if (ReconfigShmem == NULL || node_id < 0 || node_id >= CLUSTER_MAX_NODES)
 		return false;
 
-	gen = pg_atomic_read_u64(&ReconfigShmem->observed_generation[node_id]);
+	/* RF-ROOT P6: generation is the publish gate (written last by the
+	 * producer); re-checking it before/after the data reads yields one
+	 * exact torn-free sample. */
+	do
+	{
+		generation_before = pg_atomic_read_u64(
+			&ReconfigShmem->observed_generation[node_id]);
+		inc = pg_atomic_read_u64(
+			&ReconfigShmem->observed_incarnation[node_id]);
+		generation_after = pg_atomic_read_u64(
+			&ReconfigShmem->observed_generation[node_id]);
+	} while (generation_before != generation_after);
+
 	if (incarnation != NULL)
-		*incarnation = pg_atomic_read_u64(&ReconfigShmem->observed_incarnation[node_id]);
+		*incarnation = inc;
 	if (generation != NULL)
-		*generation = gen;
-	return gen > 0;
+		*generation = generation_after;
+	return generation_after > 0;
 }
 
 /* STOP04 §2.4.1: generation/incarnation is one coherent qvotec sample.  The
@@ -2063,26 +2130,6 @@ cluster_reconfig_get_observed_fresh_alive(int32 node_id)
 	if (ReconfigShmem == NULL || node_id < 0 || node_id >= CLUSTER_MAX_NODES)
 		return false;
 	return pg_atomic_read_u64(&ReconfigShmem->observed_fresh_alive[node_id]) != 0;
-}
-
-
-/*
- * Read snapshot of last_applied.event_id under shared lock.  Used by
- * lmon_tick dedup check before deciding whether to broadcast +
- * publish.  LWLock SHARED so multiple LMON ticks (race window during
- * coordinator switch) are read-side concurrent.
- */
-static uint64
-cluster_reconfig_get_last_event_id(void)
-{
-	uint64 id;
-
-	if (ReconfigShmem == NULL)
-		return 0;
-	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
-	id = ReconfigShmem->last_applied.event_id;
-	LWLockRelease(&ReconfigShmem->lock);
-	return id;
 }
 
 
@@ -4982,77 +5029,6 @@ cluster_reconfig_publish_self_current_floor_locked(int32 self_id,
 	return true;
 }
 
-/*
- * RF-ROOT P6 / crash-rejoin convergence (t243 L4 wedge).
- *
- * A crash-rejoining node's admission is proven entirely by the voting-disk
- * durable JCMK plus cluster_epoch_adopt_admitted: qvotec detects its own
- * COMMITTED marker, cluster_reconfig_note_self_admitted() bumps the local
- * epoch to the admitted epoch, but ReconfigShmem->last_applied stays a
- * zero event -- JOIN_COMMITTED exists only on the coordinator/survivor side
- * and the IC envelope carries no ReconfigEvent.  The phase-3 formation
- * witness can therefore never accept the snapshot:
- *   - cluster_recovery_duty.c:509  local_epoch(3) != applied.new_epoch(0)
- *   - even with that relaxed, formation_expected_marker() builds a
- *     BASELINE(epoch 0) marker for event_id==0 that can never tuple-equal
- *     the durable epoch-3 marker on disk.
- * Phase 3 then polls its first live-formation wait until the 600 s
- * deadline (the run23 postmaster sat silent for 53+ s).
- *
- * This helper publishes a local JOIN_COMMITTED after admission committed
- * (off-path fast-rejoin window, epoch > 0, no event applied yet) whose
- * event identity (event_id / coordinator / cssd_dead_generation /
- * dead_bitmap / new_epoch) is copied verbatim from the durable majority
- * fence marker -- the same join-commit baseline the coordinator wrote to
- * disk -- so formation_expected_marker() reconstructs an expected marker
- * exactly equal to the durable authority.  Every fail-closed check
- * (witness epoch/marker, formation, barrier preconditions, all_done
- * composite key) is preserved and the phase-3 deadline semantics are
- * unchanged.  Idempotent: once published, last_applied.event_id != 0 and
- * every later tick skips.
- */
-static void
-cluster_reconfig_maybe_publish_joiner_admission_event(void)
-{
-	ClusterFenceAuthorityProof authority;
-	ReconfigEvent evt;
-	uint64 cur_epoch;
-
-	if (ReconfigShmem == NULL || cluster_node_id < 0
-		|| cluster_node_id >= CLUSTER_MAX_NODES
-		|| !offpath_fast_rejoin_active_local)
-		return;
-	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
-	cur_epoch = cluster_epoch_get_current();
-	if (ReconfigShmem->last_applied.event_id != 0 || cur_epoch == 0) {
-		LWLockRelease(&ReconfigShmem->lock);
-		return;
-	}
-	LWLockRelease(&ReconfigShmem->lock);
-
-	/* The durable majority marker is the strongest available authority and
-	 * must already carry the current admitted epoch. */
-	if (cluster_write_fence_read_durable_authority(&authority)
-			!= CLUSTER_FENCE_AUTHORITY_OK
-		|| authority.marker.fence_epoch != cur_epoch
-		|| authority.marker.fence_epoch == 0)
-		return; /* retry next tick; fail-closed */
-
-	memset(&evt, 0, sizeof(evt));
-	evt.event_id = authority.marker.fence_event_id;
-	evt.coordinator_node_id = authority.marker.issuer_node_id;
-	evt.old_epoch = 0; /* informational; the durable marker is authority */
-	evt.new_epoch = authority.marker.fence_epoch;
-	memcpy(evt.dead_bitmap, authority.marker.fenced_dead_bitmap,
-		   CLUSTER_RECONFIG_DEAD_BITMAP_BYTES);
-	evt.applied_at = GetCurrentTimestamp();
-	evt.observer_role = CLUSTER_RECONFIG_OBSERVER_SURVIVOR;
-	evt.cssd_dead_generation = authority.marker.fence_generation;
-	evt.reconfig_kind = RECONFIG_KIND_JOIN_COMMITTED;
-	dead_bitmap_set_bit(evt.join_bitmap, cluster_node_id);
-	cluster_reconfig_publish_event(&evt);
-}
-
 static void
 cluster_reconfig_joiner_self_tick(void)
 {
@@ -5347,9 +5323,24 @@ cluster_reconfig_offpath_rejoin_tick(void)
 		self_set[cluster_node_id >> 3] = (uint8)(1u << (cluster_node_id & 7));
 		cluster_grd_arm_join_pcm_fence(self_set); /* fence FIRST (8.A) */
 
-		LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
+		{
+			TimestampTz probe_t0 = GetCurrentTimestamp();
+
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): see join-scan site. */
+			if (LWLockHeldByMe(&ReconfigShmem->lock))
+				ereport(LOG,
+						(errmsg("TEMP reconfig-lock: self-held before crash-"
+								"rejoin acquire (pid %d)", (int) MyProcPid)));
+			LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
+			cluster_reconfig_temp_lock_probe("lmon_crash_rejoin", LW_EXCLUSIVE,
+											 probe_t0);
+			ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE acquired "
+								 "(crash-rejoin, pid %d)", (int) MyProcPid)));
+		}
 		cluster_write_fence_authority_cache_invalidate();
 		ReconfigShmem->self_join_admitted = 0; /* then close the write gate */
+		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE releasing "
+							 "(crash-rejoin, pid %d)", (int) MyProcPid)));
 		LWLockRelease(&ReconfigShmem->lock);
 
 		/* NB: offpath_boot_decided stays 0 -> the boot barrier persists as the
@@ -5544,8 +5535,17 @@ cluster_reconfig_lmon_tick(void)
 	if (ordinary_actions_allowed && ReconfigShmem != NULL
 		&& runtime_join_allowed) {
 		uint64 candidate_incarnation = 0;
+		TimestampTz probe_t0 = GetCurrentTimestamp();
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): a leaked self-held lock
+		 * makes the next acquire self-deadlock (SHARED self-wait is not
+		 * detected by PG).  Removed before the final push. */
+		if (LWLockHeldByMe(&ReconfigShmem->lock))
+			ereport(LOG,
+					(errmsg("TEMP reconfig-lock: self-held before join-scan "
+							"acquire (pid %d)", (int) MyProcPid)));
 		LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+		cluster_reconfig_temp_lock_probe("lmon_join_scan", LW_SHARED, probe_t0);
 		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 			if (i == self_id || cluster_conf_lookup_node(i) == NULL
 				|| cluster_membership_get_state(i) != CLUSTER_MEMBER_DEAD
@@ -5600,11 +5600,22 @@ cluster_reconfig_lmon_tick(void)
 		uint8 newly_joined[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES];
 		uint8 join_remaining_dead[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES];
 		bool any_joined = false;
+		TimestampTz probe_t0;
 
 		memset(newly_joined, 0, sizeof(newly_joined));
 		memset(join_remaining_dead, 0, sizeof(join_remaining_dead));
 
+		probe_t0 = GetCurrentTimestamp();
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): see join-scan site. */
+		if (LWLockHeldByMe(&ReconfigShmem->lock))
+			ereport(LOG,
+					(errmsg("TEMP reconfig-lock: self-held before membership-"
+							"mutation acquire (pid %d)", (int) MyProcPid)));
 		LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
+		cluster_reconfig_temp_lock_probe("lmon_membership_mutation", LW_EXCLUSIVE,
+										 probe_t0);
+		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE acquired "
+							 "(membership-mutation, pid %d)", (int) MyProcPid)));
 
 		/*
 		 * spec-5.18 INV-LF9 (HF-2): REMOVED is TERMINAL for self too.  A removed
@@ -5635,10 +5646,6 @@ cluster_reconfig_lmon_tick(void)
 		}
 		else
 			cluster_membership_set_state(self_id, CLUSTER_MEMBER_JOINING);
-
-		/* RF-ROOT P6 / crash-rejoin: publish the local admission event
-		 * (see helper) so the formation witness can prove this boot. */
-		cluster_reconfig_maybe_publish_joiner_admission_event();
 
 		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 			ClusterMembershipState ms;
@@ -5694,6 +5701,30 @@ cluster_reconfig_lmon_tick(void)
 				dead_bitmap_set_bit(dead_bitmap, i);
 				offpath_fast_rejoin_actions = true;
 				runtime_join_allowed = true;
+			} else if (!cluster_online_join
+					   && cluster_controlfile_shared_authority
+					   && ms == CLUSTER_MEMBER_MEMBER
+					   && prior_incarnation > 0) {
+				/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the
+				 * fast-rejoin rollover gate.  Capped per peer.  Removed
+				 * before the final push. */
+				static int rollover_diag_count = 0;
+				uint64 d_inc = 0;
+				uint64 d_gen = 0;
+
+				if (rollover_diag_count++ < 10
+					&& cluster_reconfig_get_observed_slot(
+						i, &d_inc, &d_gen))
+					ereport(LOG,
+							(errmsg("TEMP fast-rejoin gate: peer=%d ms=%d "
+									"prior=%llu obs_inc=%llu obs_gen=%llu "
+									"cssd_state=%d fresh=%d",
+									i, (int)ms,
+									(unsigned long long)prior_incarnation,
+									(unsigned long long)d_inc,
+									(unsigned long long)d_gen,
+									(int)cluster_cssd_get_peer_state(i),
+									cluster_reconfig_get_observed_fresh_alive(i))));
 			}
 			/*
 			 * spec-5.18 INV-LF1 (P0): REMOVED is TERMINAL.  This loop reads the RAW
@@ -5778,6 +5809,8 @@ cluster_reconfig_lmon_tick(void)
 				&= (uint8) ~(1u << (root_gated_join_node % 8));
 		}
 
+		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE releasing "
+							 "(membership-mutation, pid %d)", (int) MyProcPid)));
 		LWLockRelease(&ReconfigShmem->lock);
 
 		/*
@@ -5812,15 +5845,12 @@ cluster_reconfig_lmon_tick(void)
 			jevt.coordinator_node_id = self_id; /* observer; informational */
 			jevt.old_epoch = cluster_epoch_get_current();
 			/*
-			 * AD-023 A2: adopt the joiner's committed epoch immediately
-			 * instead of waiting for a later piggyback.  The joiner's phase-3
-			 * GRD recovery-authority barrier freezes a formation snapshot at
-			 * its own committed epoch and only accepts a REDECLARE_DONE whose
-			 * composite (epoch, dead-bitmap hash) key matches exactly; a
-			 * survivor that stays on the older epoch can never match, and the
-			 * rejoin wedges until the phase-3 deadline.  The observed
-			 * committed epoch is the durable admission proof, so taking the
-			 * maximum over the newly joined nodes converges both sides.
+			 * AD-023 A2 §9.2.2: the JOIN_COMMITTED epoch is the exact
+			 * committed epoch of the single gated target; the incarnation
+			 * is re-verified against the gated value on the second read.
+			 * An inconsistent or zero observation fails closed (epoch
+			 * unchanged) -- never a max merge across unrelated
+			 * observations.
 			 */
 			jevt.new_epoch = jevt.old_epoch;
 			for (jn = 0; jn < CLUSTER_MAX_NODES; jn++) {
@@ -5831,8 +5861,11 @@ cluster_reconfig_lmon_tick(void)
 					continue;
 				if (cluster_reconfig_get_observed_committed_join(jn, &jinc,
 															 &jepoch)
-					&& jepoch > jevt.new_epoch)
+					&& jinc == root_gated_join_incarnation
+					&& jepoch != 0)
 					jevt.new_epoch = jepoch;
+				else
+					jevt.new_epoch = jevt.old_epoch;
 			}
 			memcpy(jevt.dead_bitmap, join_remaining_dead,
 				   CLUSTER_RECONFIG_DEAD_BITMAP_BYTES);
@@ -5882,8 +5915,11 @@ cluster_reconfig_lmon_tick(void)
 
 		/* Dedup against last_applied.  Same dead_bitmap within one DEAD episode →
 		 * same dead_gen → same event_id → skip.  Rejoin-then-redeath bumps
-		 * dead_gen → different event_id → re-fire. */
-		if (event_id == cluster_reconfig_get_last_event_id()) {
+		 * dead_gen → different event_id → re-fire.
+		 * Read the field directly: we already hold the reconfig lock EXCLUSIVE
+		 * in this section, and get_last_event_id() re-acquires SHARED, which
+		 * self-deadlocks this single-threaded LMON tick (found by t/243). */
+		if (event_id == ReconfigShmem->last_applied.event_id) {
 			if (ReconfigShmem != NULL)
 				pg_atomic_fetch_add_u64(&ReconfigShmem->dedup_skip_counter, 1);
 		} else {
@@ -5919,7 +5955,8 @@ cluster_reconfig_lmon_tick(void)
 			 * published (review P1-A: a coordinator fence-marker fail-close does
 			 * not publish; the next tick re-fires).
 			 */
-			if (cluster_reconfig_get_last_event_id() == event_id)
+			/* Direct read again — the reconfig lock is held EXCLUSIVE here. */
+			if (ReconfigShmem->last_applied.event_id == event_id)
 				cluster_reconfig_broadcast_local_procsig();
 		}
 	}
