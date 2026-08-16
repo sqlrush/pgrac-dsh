@@ -1541,6 +1541,20 @@ LmonMain(void)
 						rc = cluster_ic_send_envelope(PGRAC_IC_MSG_HEARTBEAT, pi, NULL, 0);
 					else
 						rc = cluster_ic_tier1_send_heartbeat(pi);
+					/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th
+					 * tier1 heartbeat send logs its result + fd state so a
+					 * silently-stopped heartbeat stream is visible.
+					 * Removed before the final push. */
+					{
+						static uint64 hb_diag_seq = 0;
+
+						if ((hb_diag_seq++ % 10) == 0)
+							ereport(LOG,
+									(errmsg("TEMP lmon hb send: peer=%d rc=%d "
+											"fd=%d",
+											pi, (int)rc,
+											cluster_ic_tier1_get_peer_fd(pi))));
+					}
 					switch (rc) {
 					case CLUSTER_IC_SEND_DONE:
 						break;

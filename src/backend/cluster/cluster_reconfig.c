@@ -7780,6 +7780,23 @@ cluster_reconfig_apply_join_as_coordinator(
 	if (!cluster_enabled || ReconfigShmem == NULL)
 		return;
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): JOIN_PENDING apply evidence.
+	 * Capped; removed before the final push. */
+	{
+		static int apply_join_diag_count = 0;
+		int n_apply = 0;
+
+		for (i = 0; i < CLUSTER_MAX_NODES; i++)
+			if (dead_bitmap_test_bit(join_bitmap, i))
+				n_apply++;
+		if (apply_join_diag_count++ < 4)
+			ereport(LOG,
+					(errmsg("TEMP apply-join: coord=%d n_join=%d old_epoch=%llu",
+							coordinator_node_id, n_apply,
+							(unsigned long long)
+								cluster_epoch_get_current())));
+	}
+
 	CLUSTER_INJECTION_POINT("cluster-reconfig-join-pending-pre");
 	memset(external_authorized, 0, sizeof(external_authorized));
 	for (i = 0; i < CLUSTER_MAX_NODES; i++)

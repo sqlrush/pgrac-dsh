@@ -761,6 +761,45 @@ cluster_serving_ready_is_current(void)
 	if (binding.state != CLUSTER_AUTHORITY_SERVING_READY)
 		return false;
 	current = cluster_authority_binding_external_current(&binding, true);
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose a serving-current
+	 * miss so the W2 CF rejection chain is attributable.  Capped per process;
+	 * removed before the final push. */
+	if (!current) {
+		static int serving_diag_count = 0;
+		ClusterFormationSnapshotV1 now_snapshot;
+
+		if (serving_diag_count++ < 8) {
+			bool formation_now
+				= cluster_reconfig_capture_formation_snapshot_v1(
+					binding.origin_thread, &now_snapshot);
+			bool gen_cur = cluster_serving_generation_current(&binding);
+
+			ereport(LOG,
+					(errmsg("TEMP serving miss: phase=%d cssd=%d qvotec=%d "
+							"quorum=%d self_inc=%llu/%llu admitted=%llu "
+							"lms_gen=%llu/%llu lms_ready=%d grd=%d gen_cur=%d "
+							"formation_now=%d formation_moved=%d",
+							(int)cluster_current_phase(),
+							cluster_cssd_get_status() == CLUSTER_CSSD_READY,
+							cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY,
+							cluster_qvotec_in_quorum(),
+							(unsigned long long)cluster_qvotec_get_self_incarnation(),
+							(unsigned long long)binding.boot_incarnation,
+							(unsigned long long)
+								cluster_membership_get_last_admitted_incarnation(
+									cluster_node_id),
+							(unsigned long long)cluster_lms_get_lms_restart_generation(),
+							(unsigned long long)binding.lms_generation,
+							cluster_lms_is_ready(),
+							cluster_grd_recovery_authority_is_current(
+								binding.boot_incarnation,
+								binding.lms_generation),
+							gen_cur, formation_now,
+							formation_now
+								&& memcmp(&now_snapshot, &binding.formation,
+										  sizeof(now_snapshot)) != 0)));
+		}
+	}
 	/* A current boot/LMS generation whose formation moved stays unavailable,
 	 * but keeps its immutable binding so the survivor LMON can replace it only
 	 * after the existing GRD recovery/re-declare barrier closes.  Every data-
