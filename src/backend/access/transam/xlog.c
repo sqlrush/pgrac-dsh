@@ -146,6 +146,7 @@
 #include "port/atomics.h"
 #include "port/pg_iovec.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/interrupt.h"
 #include "postmaster/startup.h"
 #include "postmaster/walwriter.h"
 #include "replication/logical.h"
@@ -7740,7 +7741,14 @@ CreateCheckPoint(int flags)
 			if (!cluster_cf_lock(ExclusiveLock))
 				ereport(ERROR,
 						(errcode(ERRCODE_CLUSTER_CONTROLFILE_AUTHORITY_UNAVAILABLE),
-						 errmsg("could not acquire the cluster control-file lock for a checkpoint")));
+						 errmsg("could not acquire the cluster control-file lock for a checkpoint"),
+						 errdetail("TEMP diag: lms_ready=%d lms_enabled=%d "
+								   "shutdown_pending=%d join_readonly=%d "
+								   "ges_available=%d eor=%d",
+								   cluster_lms_is_ready(), cluster_lms_enabled,
+								   ShutdownRequestPending,
+								   cluster_cf_join_readonly(), ges_available,
+								   eor)));
 			cf_x_taken = true;
 
 			LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);

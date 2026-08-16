@@ -625,6 +625,38 @@ cluster_lmon_request_shutdown(void)
 	LWLockRelease(&cluster_lmon_state->lwlock);
 }
 
+/*
+ * RF-ROOT P6: postmaster-only "stop publishing reconfig, keep serving".
+ * Unlike request_shutdown this does NOT make the LMON main loop exit; the
+ * retained coordination stack must stay live through the shutdown checkpoint
+ * so the checkpointer can still take CF X.
+ */
+void
+cluster_lmon_suppress_reconfig(void)
+{
+	Assert(!IsUnderPostmaster);
+
+	if (cluster_lmon_state == NULL)
+		return;
+
+	LWLockAcquire(&cluster_lmon_state->lwlock, LW_EXCLUSIVE);
+	cluster_lmon_state->reconfig_suppressed = true;
+	LWLockRelease(&cluster_lmon_state->lwlock);
+}
+
+bool
+cluster_lmon_reconfig_suppressed(void)
+{
+	bool suppressed;
+
+	if (cluster_lmon_state == NULL)
+		return false;
+	LWLockAcquire(&cluster_lmon_state->lwlock, LW_SHARED);
+	suppressed = cluster_lmon_state->reconfig_suppressed;
+	LWLockRelease(&cluster_lmon_state->lwlock);
+	return suppressed;
+}
+
 
 ClusterLmonStatus
 cluster_lmon_status(void)
@@ -972,8 +1004,8 @@ lmon_clear_latch(int code, Datum arg)
 }
 
 
-static bool
-lmon_shutdown_requested(void)
+bool
+cluster_lmon_shutdown_requested_public(void)
 {
 	bool requested;
 
@@ -1243,8 +1275,14 @@ LmonMain(void)
 				ProcessConfigFile(PGC_SIGHUP);
 			}
 
-			if (ShutdownRequestPending || lmon_shutdown_requested())
+			if (ShutdownRequestPending || cluster_lmon_shutdown_requested_public()) {
+				static bool temp_shutdown_logged = false;
+				if (!temp_shutdown_logged) {
+					temp_shutdown_logged = true;
+					elog(LOG, "TEMP lmon shutdown seen: shutdown_pending=%d", (int) ShutdownRequestPending);
+				}
 				break;
+			}
 
 			duty_started_at = GetCurrentTimestamp();
 			INSTR_TIME_SET_CURRENT(iter_started_at);
@@ -1643,6 +1681,20 @@ LmonMain(void)
 							memcpy(combined + sizeof(env), &slots[cs].payload,
 								   sizeof(slots[cs].payload));
 							send_rc = cluster_ic_send_bytes(cs, combined, sizeof(combined));
+							/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every
+							 * 20th cssd drain logs the send result + fd/state.
+							 * Removed before the final push. */
+							{
+								static uint64 cssd_drain_diag_seq = 0;
+
+								if ((cssd_drain_diag_seq++ % 20) == 0)
+									ereport(LOG,
+											(errmsg("TEMP cssd drain: peer=%d "
+													"rc=%d fd=%d shmem_state=%d",
+													cs, (int)send_rc,
+													cluster_ic_tier1_get_peer_fd(cs),
+													cluster_ic_tier1_peer_get(cs) != NULL ? (int)cluster_ic_tier1_peer_get(cs)->state : -1)));
+							}
 							switch (send_rc) {
 							case CLUSTER_IC_SEND_DONE:
 								fanout_rc = CLUSTER_IC_FANOUT_DONE;
@@ -1982,8 +2034,14 @@ LmonMain(void)
 				ProcessConfigFile(PGC_SIGHUP);
 			}
 
-			if (ShutdownRequestPending || lmon_shutdown_requested())
+			if (ShutdownRequestPending || cluster_lmon_shutdown_requested_public()) {
+				static bool temp_shutdown_logged = false;
+				if (!temp_shutdown_logged) {
+					temp_shutdown_logged = true;
+					elog(LOG, "TEMP lmon shutdown seen: shutdown_pending=%d", (int) ShutdownRequestPending);
+				}
 				break;
+			}
 
 			duty_started_at = GetCurrentTimestamp();
 			INSTR_TIME_SET_CURRENT(iter_started_at);

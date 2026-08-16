@@ -106,6 +106,7 @@ cluster_reconfig_thread_recovery_eligibility_consume(
 #include "fmgr.h"			/* PG_FUNCTION_ARGS (Step 3 D5b SRF) */
 #include "funcapi.h"		/* InitMaterializedSRF (Step 3 D5b SRF) */
 #include "miscadmin.h"		/* MyProcPid */
+#include "postmaster/interrupt.h" /* ShutdownRequestPending */
 #include "storage/lwlock.h"
 #include "storage/proc.h"		/* PGPROC */
 #include "storage/procsignal.h" /* SendProcSignal + PROCSIG_CLUSTER_RECONFIG_START */
@@ -5398,6 +5399,18 @@ cluster_reconfig_lmon_tick(void)
 	uint8 new_failure_bitmap[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES] = { 0 };
 	uint8 alive_set[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES] = { 0 };
 	int32 self_id;
+
+	/* RF-ROOT P6 fix (t/243 cast wedge): a shutdown-requested LMON must not
+	 * publish new reconfig events (fail-stop / join).  Publishing a FAIL_STOP
+	 * while the node is exiting drives the GRD into a recovery episode whose
+	 * non-current authority then rejects the checkpointer's shutdown-checkpoint
+	 * CF(X) -- the checkpointer dies without the clean STOPPED slot write and
+	 * the shared-root cast fixture fails.  Exit before any mutation once the
+	 * postmaster asked this LMON to stop. */
+	if (ShutdownRequestPending || cluster_lmon_reconfig_suppressed())
+		return;
+
+	/* Bounds checked below; keep the compiler quiet on the early return. */
 	int coordinator;
 	uint64 cssd_dead_generation;
 	uint64 event_id;

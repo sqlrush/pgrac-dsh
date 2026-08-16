@@ -187,6 +187,7 @@
 #include "cluster/cluster_catalog_bootstrap.h" /* cluster_catalog_startup_prepare (spec-6.14 D2) */
 #include "cluster/cluster_fence.h" /* cluster_fence_postmaster_check (spec-2.28 D6) */
 #include "cluster/cluster_guc.h"   /* cluster_enabled (spec-1.11 Sprint B) */
+#include "cluster/cluster_lmon.h"  /* cluster_lmon_suppress_reconfig (RF-ROOT P6) */
 #include "cluster/cluster_lms_shard.h" /* CLUSTER_LMS_MAX_WORKERS (spec-7.3 D2) */
 #include "cluster/cluster_lms.h" /* cluster_lms_mark_child_exit (Scheme A) */
 #include "cluster/cluster_lmd.h"   /* cluster_lmd_mark_child_exit (spec-2.19 D12 hardening) */
@@ -4315,6 +4316,21 @@ PostmasterStateMachine(void)
 				signal_child(LckPID, SIGTERM);
 			if (!retain_rf_a1_coordination && LmonPID != 0)
 				signal_child(LmonPID, SIGTERM);
+
+			/*
+			 * RF-ROOT P6 (t/243 cast wedge): a formed registry retains LMON
+			 * through the shutdown checkpoint so the checkpointer can still
+			 * take CF X.  But a retained, still-ticking LMON would keep
+			 * publishing reconfig events (a peer that stopped first dies ->
+			 * FAIL_STOP), which drives the GRD into a recovery episode whose
+			 * non-current authority then rejects the shutdown-checkpoint CF X
+			 * and the checkpointer exits without the clean STOPPED slot write.
+			 * Ask the retained LMON to stop publishing (it still exits through
+			 * the same flag once its own shutdown runs).  No-op when the LMON
+			 * child is absent.
+			 */
+			if (retain_rf_a1_coordination && LmonPID != 0)
+				cluster_lmon_suppress_reconfig();
 		}
 #endif
 		/* If we're in recovery, also stop startup and walreceiver procs */
