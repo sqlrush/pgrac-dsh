@@ -5962,25 +5962,35 @@ cluster_reconfig_lmon_tick(void)
 					   && ms == CLUSTER_MEMBER_MEMBER
 					   && prior_incarnation > 0) {
 				/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the
-				 * fast-rejoin rollover gate.  Capped per peer.  Removed
-				 * before the final push. */
+				 * fast-rejoin rollover gate.  Change-aware (logs whenever
+				 * the observed slot / liveness signature changes, plus the
+				 * first evals).  Removed before the final push. */
 				static int rollover_diag_count = 0;
+				static int64 last_sig = INT64_MIN;
 				uint64 d_inc = 0;
 				uint64 d_gen = 0;
+				bool have_obs
+					= cluster_reconfig_get_observed_slot(
+						i, &d_inc, &d_gen);
+				bool fresh_obs = cluster_reconfig_get_observed_fresh_alive(i);
+				int64 sig = (int64)d_inc * 8
+					+ (int64)(fresh_obs ? 1 : 0) * 4
+					+ (int64)cluster_cssd_get_peer_state(i);
 
-				if (rollover_diag_count++ < 10
-					&& cluster_reconfig_get_observed_slot(
-						i, &d_inc, &d_gen))
+				if (rollover_diag_count++ < 30 || sig != last_sig) {
+					last_sig = sig;
 					ereport(LOG,
 							(errmsg("TEMP fast-rejoin gate: peer=%d ms=%d "
 									"prior=%llu obs_inc=%llu obs_gen=%llu "
-									"cssd_state=%d fresh=%d",
+									"cssd_state=%d fresh=%d have_obs=%d",
 									i, (int)ms,
 									(unsigned long long)prior_incarnation,
 									(unsigned long long)d_inc,
 									(unsigned long long)d_gen,
 									(int)cluster_cssd_get_peer_state(i),
-									cluster_reconfig_get_observed_fresh_alive(i))));
+									fresh_obs ? 1 : 0,
+									have_obs ? 1 : 0)));
+				}
 			}
 			/*
 			 * spec-5.18 INV-LF1 (P0): REMOVED is TERMINAL.  This loop reads the RAW
