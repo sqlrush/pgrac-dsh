@@ -489,3 +489,52 @@ quorum 丢失——run118 被 seed TRAP 污染后的状态，需干净复跑重�
   grd/ges/grd_outbound/lock_acquire/wal_state_rmw/recovery_duty/formation_
   witness/cf_*/cssd/debug 等链接失败 = TEMP diag 新符号 + HEAD 既有 stale——
   TEMP 诊断清理时一并收敛。
+
+---
+
+## contract 1 停机顺序 + fence 窗口修复（2026-08-17 17:30，本轮会话）
+
+### 已提交（rf-root-dev，自 5861a6c700 起 4 commits）
+
+1. `e920ca6800` **contract 1 停机顺序**：checkpointer 改为
+   ShutdownXLOG → W3 STOPPED → 5.13 handoff → THREAD_CLEAN_CLOSE
+   （旧序 handoff 先行使 leaver 的 fence token 过期 + survivor baseline
+   self-fence，shutdown checkpoint 的 anchor 发布在临界区 PANIC → slot 2
+   永不到 STOPPED）。标记验证：`TEMP contract1 order` →
+   `checkpoint starting: shutdown immediate` → `publish_stopped result=0
+   (before_state=1 after_state=2)` → drain COMMITTED。
+2. `94791471d5` **fence 窗口双修**：(a) qvotec 同 poll 写后刷新 token
+   （4.12b D2 收窄，clean-leave commit 无 fence marker 的 survivor 侧窗口）；
+   (b) CreateCheckPoint 在取 CF(X) 前对 `cluster_write_fence_allowed()`
+   做 10s 有界等待（W2 FORCE|WAIT checkpoint 与 join commit 的结构性竞态）。
+   实测 8/8 轮 fence PANIC 归零（修前 node0 W2 锚发布
+   `epoch_cur=1 authorized=0` 必 PANIC）。
+3. `eee6832cbc` specs-local 增量（STOP-01 副本 + 增量 1/2，交 DSH 审）。
+4. `d244fec352` chore TEMP：CSSD main-loop 冻结 bisect 探针。
+
+### 当前卡点（重开）：cast 腿 pair-boot 编队楔死（老 flake 家族，今日 ~100%）
+
+三个独立子变体（全部先于本会话存在，任意 binary 均可复现）：
+- **变体 B1（CSSD 冻结）**：一节点 CSSD main loop 第 2 迭代冻结（证据：
+  `TEMP cssd loop alive iters=1` 后无输出、`liveness lock enter` 缺失，
+  冻结点在首个 WaitLatch wake 与 liveness 锁之间 = CHECK_FOR_INTERRUPTS/
+  shutdown_requested）→ 对端 deadband 判死 → 假 fail-stop epoch 0→1 →
+  joiner W2 verified CF r=10/13 → phase4 FATAL。
+- **变体 B2（GRD seal 过期）**：joiner phase3 barrier 在 epoch 0 封 seal，
+  join commit 把 epoch 推到 1 → `cluster_grd_recovery_authority_is_current`
+  epoch 精确匹配失败 → serving 永不发布 → 双端 phase4 互等。
+- **变体 B3（join-drive blocked）**：coordinator 的 join-drive 门
+  `runtime_join_allowed=0`（online_join=off + offpath_fast_rejoin=0）卡住
+  fresh-pair 的 node1 admission。
+
+### 下一轮最短路
+
+1. B1 收尾：用已提交的 bisect 探针再抓一次冻结轮（`TEMP cssd
+   post-interrupts` vs `pre-shutdown-check` 谁最后出现）→ 定位
+   CHECK_FOR_INTERRUPTS（ProcSignalBarrier 吸收）还是 CssdShmem->lwlock
+   的 EXCLUSIVE 持有人。
+2. 三个变体任一收敛后重跑 t243：ok 3 铸根 → L5（CLOSED 已由 contract 1
+   保证发布路径）→ L6/L8/L9/L10。
+3. seed clean-close 的 CF(S) stale-hold drain 失败（CLOSED 跳过）L5 前复核。
+4. 全绿后：删全部 TEMP（fence-block diag / contract1 marker / cssd 探针 +
+   存量 TEMP）→ focused unit + build 闭包 → immutable commit + push。
