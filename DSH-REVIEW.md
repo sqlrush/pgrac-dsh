@@ -229,3 +229,24 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
 ---
 🔴 [DSH-WATCH 08-17 22:22] t243 启动级失败：跑批 bail 且仅 3 ok（reglog ��——节点启动/bootstrap 层被打断。
    DSH 建议：查 tmp_check/log 两节点日志尾部的第一个 FATAL/PANIC；这类回归通常来自最新改动，先回退再修。
+
+---
+
+## 复审补记 7（2026-08-17 23:16，增量 15 复审）
+
+- 对象：3bd7e7bd89（specs 增量 14-15 文档）+ 未提交的 ges/reconfig/startup_phase
+  （增量 15 代码）。三处审查通过：
+  1) ges diag 改用无副作用 components 谓词——诊断不再误清 mid-bind 绑定 ✓；
+  2) cluster_reconfig_self_join_admitted 对 MyProc==NULL 走
+     LWLockConditionalAcquire、争用返回 false——fail-closed，消费端均重试型
+     AND 门，admission 单调，瞬时假阴性只延迟不授权 ✓；
+  3) transport 陈旧绑定清除加 lms_generation!=0 门——gen=0 只可能出现在
+     LMS 存在前的 mid-bind 窗口，phase3 循环自有失败清理（publish_recovery_fail
+     clear）+ deadline 兜底 ✓。
+- 必办（提交增量 15 前）：
+  ① 两个新分支配单测：self_join_admitted 的 MyProc==NULL 路径、
+     transport_is_current 的 gen=0 保留路径（用 ut mock 构造 binding gen=0）；
+  ② 代码级确认 phase3 循环的失败清理路径覆盖"mid-bind 保留后 publish 失败"
+     场景，别只靠注释论证。
+- 提醒：lwlock.c 的 A1 TEMP diag 仍为未提交态，与增量 15 一起跑 t243 取证
+  后再决定去留；最终 push 前必须删除（TEMP 纪律）。

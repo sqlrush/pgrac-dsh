@@ -363,6 +363,44 @@ UT_TEST(test_owner_rejoin_publication_context_rejects_token_drift)
 		CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN));
 }
 
+UT_TEST(test_owner_rejoin_closed_lifecycle_same_owner_clean_reopen)
+{
+	/* specs-local STOP-01 increment 13: a THREAD_CLEAN_CLOSE leaves the
+	 * root CLOSED; the same owner's fresh process (monotonic newer
+	 * incarnation + write-once claim CRC + durable JCMK majority) must
+	 * reopen it via OWNER_REJOIN exactly like the RECOVERY_COMPLETE
+	 * crash-rejoin mainline. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_owner_read_calls, 1);
+	UT_ASSERT_EQ(ut_root_publish_calls, 1);
+	UT_ASSERT(ut_root_publish_context_authorized);
+	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED);
+	UT_ASSERT_EQ(ut_root_published_patch.desired.lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq,
+				 ut_root_identity.root_lineage_seq + 1);
+
+	/* Non-owner / stale incarnation on a CLOSED root must still fail
+	 * closed: admitted <= owner incarnation never passes the head gate. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(70)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+
+	/* Bootstrap / retired roots are not in the reopen allowlist. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_UNUSED;
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RETIRED;
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+}
+
 UT_TEST(test_owner_rejoin_fails_closed_on_non_jcmk_drift_or_exhaustion)
 {
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
@@ -782,6 +820,7 @@ main(void)
 	UT_RUN(test_owner_import_slot_fallback_requires_absent_jcmk_and_claim);
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
+	UT_RUN(test_owner_rejoin_closed_lifecycle_same_owner_clean_reopen);
 	UT_RUN(test_owner_rejoin_publication_context_rejects_token_drift);
 	UT_RUN(test_owner_rejoin_fails_closed_on_non_jcmk_drift_or_exhaustion);
 	UT_RUN(test_formation_f1_majority_f2_ready);

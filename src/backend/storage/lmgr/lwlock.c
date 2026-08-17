@@ -88,6 +88,8 @@
  */
 #include "postgres.h"
 
+#include <execinfo.h>
+
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
@@ -1108,7 +1110,28 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 	 * memory initialization.
 	 */
 	if (MyProc == NULL)
-		elog(PANIC, "cannot wait without a PGPROC structure");
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 A1 hunt): identify the exact lock a
+		 * no-PGPROC caller tried to queue on, the wait mode, and the call
+		 * stack.  Removed before the final push. */
+		void *bt[32];
+		int nbt = backtrace(bt, 32);
+		char **sym = backtrace_symbols(bt, nbt);
+
+		ereport(PANIC,
+				(errmsg("cannot wait without a PGPROC structure"),
+				 errdetail("tranche=%u (%s) state=0x%08x mode=%d",
+						   lock->tranche,
+						   GetLWTrancheName(lock->tranche),
+						   (unsigned)pg_atomic_read_u32(&lock->state),
+						   (int)mode)));
+		if (sym != NULL)
+		{
+			for (int bi = 0; bi < nbt; bi++)
+				write_stderr("TEMP lwlock bt[%d]: %s\n", bi, sym[bi]);
+			free(sym);
+		}
+	}
 
 	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
 		elog(PANIC, "queueing for lock while waiting on another one");

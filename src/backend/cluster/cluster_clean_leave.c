@@ -2213,7 +2213,12 @@ cl_leaver_reincarnated(int32 leaving)
 	if (!cluster_reconfig_get_observed_fresh_alive(leaving))
 		return false;
 	admitted = cluster_membership_get_last_admitted_incarnation(leaving);
-	return admitted != 0 && obs_inc != 0 && obs_inc != admitted;
+	/* DSH 复审补记 6 P2: strictly-newer (monotonic) comparison.  `!=` would
+	 * also fire on an out-of-order STALE observation frame (an old
+	 * incarnation from before the admitted floor), which is not proof the
+	 * old process exited; only an incarnation ABOVE the admitted floor can
+	 * belong to a fresh process. */
+	return admitted != 0 && obs_inc != 0 && obs_inc > admitted;
 }
 
 /* survivor (incl. coordinator) side of another node's leave. */
