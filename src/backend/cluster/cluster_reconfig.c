@@ -8144,6 +8144,18 @@ cluster_reconfig_apply_join_as_coordinator(
 	cluster_write_fence_authority_cache_invalidate();
 	memcpy(pending_dead, ReconfigShmem->last_applied.dead_bitmap,
 		   sizeof(pending_dead));
+	/* RF-ROOT P6 (specs-local STOP-01 增量 6): a fast-rejoin eviction is the
+	 * fail-stop-equivalent death of the PRIOR incarnation (P04 "exclude the
+	 * prior incarnation first").  Carry the evicted set into the JOIN_PENDING
+	 * dead set so the JOIN episode's barrier skips the joiner exactly like
+	 * the fail-stop flow (its DONE is structurally impossible until the
+	 * admission this very event feeds);  the COMMITTED clears it again. */
+	{
+		int b;
+
+		for (b = 0; b < CLUSTER_RECONFIG_DEAD_BITMAP_BYTES; b++)
+			pending_dead[b] |= ReconfigShmem->fast_rejoin_bitmap[b];
+	}
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 		if (!dead_bitmap_test_bit(join_bitmap, i))
 			continue;
