@@ -418,3 +418,71 @@ OWNER_REJOIN CAS。增量 13 与 17 一并进偏离裁决，裁决未批前不�
   t243 必须重新跑一轮（构建面变化影响所有路径）。
 - 预防记录采纳：改 include 下结构体/头文件 → 先全量重建再跑批；诡异
   SIGABRT 先查 .o/.h mtime 错位。
+
+---
+
+## 复审补记 12（2026-08-18 07:45，P1 TEMP 清理中途复审）
+
+- checkpointer.c / xlog.c 的 P6 TEMP 探针删除：纯删除 + 1 行还原产品行
+  （"could not acquire the cluster control-file lock for a checkpoint"），
+  无夹带 ✓。两文件 TEMP 计数已归 0。
+- 待办：cluster_lock_acquire.c 仍剩 1 处；清理完 + 全量重建后一并
+  regress + t243 验收。注意清理与重建顺序：先清完所有 TEMP 再重建，
+  避免重建两次。
+
+---
+
+## 复审补记 13（2026-08-18 07:50，⚠️ 新会话必须执行的调整通知）
+
+> 依据：你提交的分析（五条）已被 DSH 逐条取证确认全部成立（补记 10）。
+> 以下是逐点调整指令，按顺序执行，每完成一项提交一次并等 DSH 复审。
+
+### A. 回退增量 17（立即，两处源码 + 一处单测 + 文档）
+
+冻结形态 = ce00ff9efd 之前（可用 `git show ce00ff9efd^:src/backend/cluster/cluster_recovery_duty.c` 对照）：
+
+1. head gate（现 :353-354）：
+   `(identity.origin_owner_incarnation > admitted_incarnation || identity.root_lineage_seq == UINT64_MAX)`
+   → 恢复为 `identity.origin_owner_incarnation != admitted_incarnation`
+   （OPEN 只认 owner == admitted，即冻结主线的"已满足"捷径之外一律拒绝）。
+2. 已满足捷径（现 :377-379）：
+   `if (snapshot.lifecycle == OPEN && identity.origin_owner_incarnation == admitted_incarnation) return true;`
+   → 恢复为 `if (snapshot.lifecycle == OPEN) return true;`（并恢复旧注释）。
+3. `test_cluster_recovery_duty.c` 中增量 17 的 OPEN(old-owner 重开) 用例：
+   删除或改回"OPEN + owner != admitted 必须拒绝"的断言（现 18/18 中的该例
+   是打桩假绿，不能保留）。
+4. specs-local STOP-01 增量 17 文档：标注"已回退（违反 STOP-02 §17.4，
+   2026-08-18 DSH 补记 13）"。
+
+### B. 增量 13（CLOSED 进 OWNER_REJOIN）——先裁决，后按裁决动
+
+- 同属 STOP-02 §17.4 偏离（前态只认 RECOVERY_COMPLETE）。
+- **裁决未批前不要动代码**。裁决走 pgrac-talk DEVIATION → 结果写入后执行。
+- 若裁决 = "clean-reopen 改走 STOP-01 THREAD_OPEN（CLOSED→OPEN）"：
+  ① 先实现 THREAD_OPEN 路由接通 L10 场景；② t243 33/33 复证；③ 再摘除
+  OWNER_REJOIN 的 CLOSED 允许（cluster_control_root.c:1516 allowlist 与
+  recovery_duty.c:336-341 head gate）；④ 每一步单独提交。
+- 注意：当前 t243 绿依赖 CLOSED 路由——**先接新路再拆旧路**，顺序反了会
+  把绿态打回。
+
+### C. 端到端 lifecycle 测试（不 stub 低层发布）
+
+- 现状：test_cluster_recovery_duty.c:393 一带 mock 了发布函数
+  （ut_root_publish_calls），测不出 patch_shape_valid/INVALID_ARGUMENT 断路。
+- 补一条不打桩的测试：真实 shmem 控制根 + 真实 compare_and_publish 路径，
+  断言 ① OWNER_REJOIN 前态 RECOVERY_COMPLETE 成功；② 前态 OPEN/CLOSED 的
+  OWNER_REJOIN 被 patch_shape_valid 拒绝（冻结行为）；③ THREAD_OPEN 的
+  CLOSED→OPEN 成功。放 test_cluster_control_root 或 recovery_duty 集成段。
+
+### D. 收尾清单（进行中，继续）
+
+- P0：全量重建 + regress 13/13（增量 18 已归因，批准）。
+- P1：cluster_lock_acquire.c 剩 1 处 TEMP；清完做全树 `grep -rn "TEMP " src/`
+  复核（非 P6 时代的登记即可，不必现在清）。
+- P6 重新冻结条件（全部满足才可再申请）：A/B/C 完成 + regress 13/13 +
+  t243 33/33 + 全树 TEMP 复核 + 单测 232 闭包。
+
+### E. 顺序总览
+
+A → 裁决(B) → C → D → 双绿 → 重新申请 P6 冻结。中途任何跑批出绿都要先
+提交再继续。
