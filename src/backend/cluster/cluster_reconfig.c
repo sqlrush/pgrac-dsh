@@ -340,26 +340,6 @@ static bool cluster_reconfig_terminal_closed_matches_episode(
 static void cluster_reconfig_release_ready_stage(void);
 static bool cluster_reconfig_lmon_submit_ready_observer_pair(TimestampTz now);
 
-/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): report any reconfig-lock acquire
- * that blocked > 50 ms, with the raw LWLock state word.  Removed before the
- * final push. */
-static void
-cluster_reconfig_temp_lock_probe(const char *caller, LWLockMode mode, TimestampTz before)
-{
-	long	secs;
-	int		usecs;
-
-	if (ReconfigShmem == NULL)
-		return;
-	TimestampDifference(before, GetCurrentTimestamp(), &secs, &usecs);
-	if (secs == 0 && usecs < 50000)
-		return;
-	ereport(LOG,
-			(errmsg("TEMP reconfig-lock slow acquire: caller=%s mode=%d "
-					"wait_ms=%ld state=0x%08x",
-					caller, (int)mode, secs * 1000 + usecs / 1000,
-					(unsigned)pg_atomic_read_u32(&ReconfigShmem->lock.state))));
-}
 static bool cluster_reconfig_lmon_ready_cache_current(
 	int32 *coordinator_node_id);
 
@@ -504,8 +484,6 @@ cluster_reconfig_shmem_register(void)
 void
 cluster_reconfig_get_last_event(ReconfigEvent *out)
 {
-	TimestampTz probe_t0;
-
 	Assert(out != NULL);
 
 	if (ReconfigShmem == NULL) {
@@ -516,9 +494,7 @@ cluster_reconfig_get_last_event(ReconfigEvent *out)
 		return;
 	}
 
-	probe_t0 = GetCurrentTimestamp();
 	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
-	cluster_reconfig_temp_lock_probe("get_last_event", LW_SHARED, probe_t0);
 	memcpy(out, &ReconfigShmem->last_applied, sizeof(ReconfigEvent));
 	LWLockRelease(&ReconfigShmem->lock);
 }
@@ -543,16 +519,6 @@ cluster_reconfig_capture_formation_snapshot_v1(uint16 origin_thread,
 	 * phase-3 deadline loop retry contention. */
 	if (MyProc == NULL) {
 		if (!LWLockConditionalAcquire(&ReconfigShmem->lock, LW_SHARED)) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): the postmaster
-			 * formation loop retries contention, so a persistent failure
-			 * here is the lock-starvation witness.  Removed before push. */
-			static int cond_fail_count = 0;
-
-			if (cond_fail_count++ < 8)
-				ereport(LOG,
-						(errmsg("TEMP reconfig-lock conditional fail: state=0x%08x",
-								(unsigned)pg_atomic_read_u32(
-									&ReconfigShmem->lock.state))));
 			return false;
 		}
 	} else
@@ -3290,31 +3256,6 @@ cluster_reconfig_publish_prepared_join_commit(void)
 	if (!join_commit_stage.fence_ready
 		|| cluster_epoch_get_current() != join_commit_stage.event.new_epoch)
 	{
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): publish attempt gate.
-		 * Capped; removed before the final push. */
-		{
-			static int join_publish_attempt_diag = 0;
-
-			if (join_publish_attempt_diag++ < 40)
-				ereport(LOG,
-						(errmsg("TEMP join publish attempt: fence_ready=%d "
-								"cur_epoch=%llu new_epoch=%llu expected_last=%llu "
-								"last_applied=%llu fstate=%d pending=%d",
-								join_commit_stage.fence_ready ? 1 : 0,
-								(unsigned long long)
-									cluster_epoch_get_current(),
-								(unsigned long long)
-									join_commit_stage.event.new_epoch,
-								(unsigned long long)
-									join_commit_stage.expected_last_event_id,
-								(unsigned long long)
-									ReconfigShmem->last_applied.event_id,
-								(int)cluster_membership_get_state(
-									join_commit_stage.node_id),
-								dead_bitmap_test_bit(
-									ReconfigShmem->pending_join_bitmap,
-									join_commit_stage.node_id))));
-		}
 		return false;
 	}
 
@@ -3354,45 +3295,6 @@ cluster_reconfig_publish_prepared_join_commit(void)
 	}
 	LWLockRelease(&ReconfigShmem->lock);
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): publish decision decomposition.
-	 * Capped; removed before the final push. */
-	{
-		static int join_publish_diag = 0;
-
-		if (join_publish_diag++ < 40)
-			ereport(LOG,
-					(errmsg("TEMP join publish: node=%d publish=%d fstate=%d "
-							"pending=%d last_match=%d dead_match=%d fenced_match=%d "
-							"cur_epoch=%llu new_epoch=%llu fence_ready=%d",
-							join_commit_stage.node_id, publish ? 1 : 0,
-							(int)cluster_membership_get_state(
-								join_commit_stage.node_id),
-							dead_bitmap_test_bit(
-								ReconfigShmem->pending_join_bitmap,
-								join_commit_stage.node_id)
-								? 1
-								: 0,
-							ReconfigShmem->last_applied.event_id
-									== join_commit_stage.expected_last_event_id
-								? 1
-								: 0,
-							memcmp(expected_dead,
-								   join_commit_stage.event.dead_bitmap,
-								   sizeof(expected_dead)) == 0
-								? 1
-								: 0,
-							memcmp(expected_fenced,
-								   join_commit_stage.fence_marker
-									   .fenced_dead_bitmap,
-								   sizeof(expected_fenced)) == 0
-								? 1
-								: 0,
-							(unsigned long long)
-								cluster_epoch_get_current(),
-							(unsigned long long)
-								join_commit_stage.event.new_epoch,
-							join_commit_stage.fence_ready ? 1 : 0)));
-	}
 	if (!publish)
 		return false;
 	if (cluster_reconfig_is_clean_departed(join_commit_stage.node_id))
@@ -3421,28 +3323,6 @@ cluster_reconfig_poll_join_fence_stage(TimestampTz now)
 			&join_commit_stage.fence_marker,
 			CLUSTER_MARKER_KIND_JOIN_COMMITTED,
 			join_commit_stage.node_id, now);
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): fence marker submit
-		 * outcome + the join-marker mailbox state (the likely stuck
-		 * point).  Capped; removed before the final push. */
-		{
-			static int fence_submit_diag = 0;
-
-			if (fence_submit_diag++ < 40)
-				ereport(LOG,
-						(errmsg("TEMP fence submit: node=%d ok=%d "
-								"jreq=%llu jcomp=%llu jbusy=%d",
-								join_commit_stage.node_id,
-								fence_submit_ok ? 1 : 0,
-								(unsigned long long)pg_atomic_read_u64(
-									&ReconfigShmem->join_marker_request_seq),
-								(unsigned long long)pg_atomic_read_u64(
-									&ReconfigShmem->join_marker_completion_seq),
-								cluster_marker_async_mailbox_busy(
-									&ReconfigShmem->join_marker_request_seq,
-									&ReconfigShmem->join_marker_completion_seq)
-									? 1
-									: 0)));
-		}
 		if (!fence_submit_ok)
 			return true;
 		return true;
@@ -3492,34 +3372,6 @@ cluster_reconfig_poll_join_commit_stage(void)
 
 	if (!join_commit_stage.async.has_staged_event)
 		return false;
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): commit-stage state machine
-	 * for the L5 second-rejoin wedge.  Change-aware; removed before the
-	 * final push. */
-	{
-		static int commit_stage_diag = 0;
-		static int commit_stage_last_sig = -1;
-		int csig = (join_commit_stage.fence_ready ? 100 : 0)
-			+ (join_commit_stage.submitted ? 10 : 0)
-			+ (cluster_marker_async_is_submitted(&join_commit_stage.async)
-				   ? 1
-				   : 0);
-
-		if (csig != commit_stage_last_sig) {
-			commit_stage_last_sig = csig;
-			if (commit_stage_diag++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP commit stage: node=%d fence_ready=%d "
-								"submitted=%d async_submitted=%d",
-								join_commit_stage.node_id,
-								join_commit_stage.fence_ready ? 1 : 0,
-								join_commit_stage.submitted ? 1 : 0,
-								cluster_marker_async_is_submitted(
-									&join_commit_stage.async)
-									? 1
-									: 0)));
-		}
-	}
 
 	now = GetCurrentTimestamp();
 	if (join_commit_stage.fence_ready)
@@ -3576,93 +3428,6 @@ cluster_reconfig_poll_join_commit_stage(void)
 		|| !cluster_reconfig_prepare_join_commit(join_commit_stage.node_id,
 											 join_commit_stage.admitted_incarnation,
 											 join_commit_stage.async.staged_expect_epoch)) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): commit re-vet chain
-		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
-		 * before the final push. */
-		{
-			static int revalidate_diag = 0;
-			bool slot_ok;
-			uint64 obs_inc = 0;
-			uint64 obs_gen = 0;
-			ClusterJoinVerdict vet;
-			bool owner_ok;
-			int ms;
-			bool pending_bit;
-
-			slot_ok = cluster_reconfig_get_observed_slot(
-				join_commit_stage.node_id, &obs_inc, &obs_gen);
-			vet = cluster_membership_vet_joiner(
-				join_commit_stage.node_id, admitted_incarnation,
-				admitted_generation);
-			owner_ok = join_commit_stage.external_rejoin_consumed
-				|| cluster_recovery_owner_rejoin_v1(
-					join_commit_stage.node_id,
-					join_commit_stage.admitted_incarnation);
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 owner-gate hunt): decompose the
-			 * owner gate so the failing sub-condition is attributable.
-			 * Capped with the revet diag; removed before the final push. */
-			{
-				static int revalidate_diag_owner = 0;
-				ClusterControlRootIdentity oid;
-				ClusterControlRootSnapshot osnap;
-				ClusterControlRootReadToken otok;
-				ClusterControlRootResult orr = cluster_control_root_lookup_owner_by_node_runtime(
-					join_commit_stage.node_id, &oid, &osnap, &otok);
-				ClusterRecoveryOwnerImportResult oir;
-				uint64 oproven = 0;
-				ClusterWalThreadClaim oclaim;
-				bool key_exact;
-				bool claim_crc_ok;
-
-				cluster_wal_thread_claim_fill(
-					&oclaim, oid.origin_thread_id, oid.origin_node_id,
-					oid.thread_claim_created_at);
-				oir = cluster_recovery_owner_import_read_v1(
-					join_commit_stage.node_id, &oclaim, 0, 0, &oproven);
-				key_exact = cluster_recovery_duty_key_valid_v1(&oid)
-					&& cluster_recovery_duty_key_compare(&oid, &osnap.identity)
-						   == CLUSTER_RECOVERY_DUTY_COMPARE_EXACT;
-				claim_crc_ok = oclaim.crc == oid.thread_claim_crc32c;
-				if (revalidate_diag_owner++ < 100)
-					ereport(LOG,
-							(errmsg("TEMP owner gate: node=%d root=%d lc=%d "
-									"owner_inc=%llu admitted=%llu lineage=%llu "
-									"import=%d proven=%llu key=%d crc=%d",
-									(int)join_commit_stage.node_id, (int)orr,
-									(int)osnap.lifecycle,
-									(unsigned long long)oid.origin_owner_incarnation,
-									(unsigned long long)
-										join_commit_stage.admitted_incarnation,
-									(unsigned long long)oid.root_lineage_seq,
-									(int)oir,
-									(unsigned long long)oproven,
-									key_exact ? 1 : 0,
-									claim_crc_ok ? 1 : 0)));
-			}
-			LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
-			ms = (int)cluster_membership_get_state(
-				join_commit_stage.node_id);
-			pending_bit = dead_bitmap_test_bit(
-				ReconfigShmem->pending_join_bitmap,
-				join_commit_stage.node_id);
-			LWLockRelease(&ReconfigShmem->lock);
-			if (revalidate_diag++ < 100)
-				ereport(LOG,
-						(errmsg("TEMP commit revet: node=%d slot_ok=%d obs_inc=%llu "
-								"stage_inc=%llu vet=%d owner_ok=%d ms=%d "
-								"pending_bit=%d cur_epoch=%llu expect_epoch=%llu",
-								join_commit_stage.node_id, slot_ok ? 1 : 0,
-								(unsigned long long)obs_inc,
-								(unsigned long long)
-									join_commit_stage.admitted_incarnation,
-								(int)vet, owner_ok ? 1 : 0, ms, pending_bit ? 1
-																			: 0,
-								(unsigned long long)
-									cluster_epoch_get_current(),
-								(unsigned long long)
-									join_commit_stage.async
-										.staged_expect_epoch)));
-		}
 		pg_atomic_fetch_add_u64(&ReconfigShmem->join_reject_count, 1);
 		cluster_reconfig_release_join_commit_stage();
 		return true;
@@ -3695,26 +3460,6 @@ cluster_reconfig_drive_joins(int coordinator, int32 control_target,
 
 	if (state == NULL)
 		return;
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): which stage holds the drive.
-	 * Capped; removed before the final push. */
-	{
-		static int drive_stage_diag = 0;
-
-		if (drive_stage_diag++ < 60)
-			ereport(LOG,
-					(errmsg("TEMP drive: prep_staged=%d commit_staged=%d "
-							"prep_submitted=%d commit_submitted=%d",
-							join_prepare_stage.async.has_staged_event ? 1 : 0,
-							join_commit_stage.async.has_staged_event ? 1 : 0,
-							cluster_marker_async_is_submitted(
-								&join_prepare_stage.async)
-								? 1
-								: 0,
-							cluster_marker_async_is_submitted(
-								&join_commit_stage.async)
-								? 1
-								: 0)));
-	}
 	if (cluster_reconfig_poll_join_prepare_stage())
 		return;
 	if (cluster_reconfig_poll_join_commit_stage())
@@ -3807,20 +3552,6 @@ cluster_reconfig_drive_joins(int coordinator, int32 control_target,
 		if (!cluster_reconfig_external_rejoin_prepare_commit(
 				i, admitted_incarnation))
 			continue;
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): Phase-2 commit verdict for
-		 * the L5 second-rejoin wedge.  Capped; removed before the final push. */
-		{
-			static int commit_verdict_diag = 0;
-
-			if (commit_verdict_diag++ < 10)
-				ereport(LOG,
-						(errmsg("TEMP join commit: node=%d inc=%llu gen=%llu "
-								"control=%d ctrl_inc=%llu",
-								i, (unsigned long long)admitted_incarnation,
-								(unsigned long long)admitted_generation,
-								control_target,
-								(unsigned long long)control_incarnation)));
-		}
 		(void)cluster_reconfig_commit_member(i, admitted_incarnation);
 	}
 }
@@ -5588,27 +5319,6 @@ cluster_reconfig_offpath_rejoin_tick(void)
 					(errmsg("cluster membership: node %d shared-CF fast-rejoin "
 							"admission and re-declare complete — boot fence lifted",
 							cluster_node_id)));
-		} else {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): lift-gate
-			 * decomposition.  Change-aware; removed before the final push. */
-			static int lift_diag_count = 0;
-			static int lift_last_sig = -1;
-			int lsig = (offpath_fast_rejoin_active_local ? 100 : 0)
-				+ (ReconfigShmem->self_join_admitted ? 10 : 0)
-				+ (cluster_grd_join_view_rebuilt() ? 1 : 0);
-
-			if (lsig != lift_last_sig) {
-				lift_last_sig = lsig;
-				if (lift_diag_count++ < 12)
-					ereport(LOG,
-							(errmsg("TEMP boot lift gate: fast_active=%d sj_adm=%d "
-									"view_rebuilt=%d done0=%llu",
-									offpath_fast_rejoin_active_local ? 1 : 0,
-									(int)ReconfigShmem->self_join_admitted,
-									cluster_grd_join_view_rebuilt() ? 1 : 0,
-									(unsigned long long)cluster_grd_recovery_done_epoch_for(
-										0))));
-			}
 		}
 		return; /* once per incarnation (LMON-local) */
 	}
@@ -5682,24 +5392,9 @@ cluster_reconfig_offpath_rejoin_tick(void)
 		self_set[cluster_node_id >> 3] = (uint8)(1u << (cluster_node_id & 7));
 		cluster_grd_arm_join_pcm_fence(self_set); /* fence FIRST (8.A) */
 
-		{
-			TimestampTz probe_t0 = GetCurrentTimestamp();
-
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): see join-scan site. */
-			if (LWLockHeldByMe(&ReconfigShmem->lock))
-				ereport(LOG,
-						(errmsg("TEMP reconfig-lock: self-held before crash-"
-								"rejoin acquire (pid %d)", (int) MyProcPid)));
-			LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
-			cluster_reconfig_temp_lock_probe("lmon_crash_rejoin", LW_EXCLUSIVE,
-											 probe_t0);
-			ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE acquired "
-								 "(crash-rejoin, pid %d)", (int) MyProcPid)));
-		}
+		LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
 		cluster_write_fence_authority_cache_invalidate();
 		ReconfigShmem->self_join_admitted = 0; /* then close the write gate */
-		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE releasing "
-							 "(crash-rejoin, pid %d)", (int) MyProcPid)));
 		LWLockRelease(&ReconfigShmem->lock);
 
 		/* NB: offpath_boot_decided stays 0 -> the boot barrier persists as the
@@ -5902,15 +5597,6 @@ cluster_reconfig_lmon_tick(void)
 			continue; /* F11: skip un-declared peer */
 
 		if (cluster_cssd_get_peer_state(i) == CLUSTER_CSSD_PEER_DEAD) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every tick that
-			 * captures a CSSD-DEAD peer logs the capture so the fail-stop
-			 * window is visible.  Removed before the final push. */
-			if (!dead_bitmap_test_bit(dead_bitmap, i))
-				ereport(LOG,
-						(errmsg("TEMP cssd-dead capture: peer=%d dead_gen=%llu",
-								i,
-								(unsigned long long)
-									cluster_cssd_get_dead_generation())));
 			dead_bitmap_set_bit(dead_bitmap, i);
 		}
 	}
@@ -5953,17 +5639,8 @@ cluster_reconfig_lmon_tick(void)
 	if (ordinary_actions_allowed && ReconfigShmem != NULL
 		&& runtime_join_allowed) {
 		uint64 candidate_incarnation = 0;
-		TimestampTz probe_t0 = GetCurrentTimestamp();
 
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): a leaked self-held lock
-		 * makes the next acquire self-deadlock (SHARED self-wait is not
-		 * detected by PG).  Removed before the final push. */
-		if (LWLockHeldByMe(&ReconfigShmem->lock))
-			ereport(LOG,
-					(errmsg("TEMP reconfig-lock: self-held before join-scan "
-							"acquire (pid %d)", (int) MyProcPid)));
 		LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
-		cluster_reconfig_temp_lock_probe("lmon_join_scan", LW_SHARED, probe_t0);
 		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 			if (i == self_id || cluster_conf_lookup_node(i) == NULL
 				|| cluster_membership_get_state(i) != CLUSTER_MEMBER_DEAD
@@ -6018,22 +5695,11 @@ cluster_reconfig_lmon_tick(void)
 		uint8 newly_joined[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES];
 		uint8 join_remaining_dead[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES];
 		bool any_joined = false;
-		TimestampTz probe_t0;
 
 		memset(newly_joined, 0, sizeof(newly_joined));
 		memset(join_remaining_dead, 0, sizeof(join_remaining_dead));
 
-		probe_t0 = GetCurrentTimestamp();
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): see join-scan site. */
-		if (LWLockHeldByMe(&ReconfigShmem->lock))
-			ereport(LOG,
-					(errmsg("TEMP reconfig-lock: self-held before membership-"
-							"mutation acquire (pid %d)", (int) MyProcPid)));
 		LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
-		cluster_reconfig_temp_lock_probe("lmon_membership_mutation", LW_EXCLUSIVE,
-										 probe_t0);
-		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE acquired "
-							 "(membership-mutation, pid %d)", (int) MyProcPid)));
 
 		/*
 		 * spec-5.18 INV-LF9 (HF-2): REMOVED is TERMINAL for self too.  A removed
@@ -6080,25 +5746,6 @@ cluster_reconfig_lmon_tick(void)
 		}
 		else
 		{
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): self-state JOINING
-			 * flip decomposition.  Capped; removed before the final push. */
-			static int join_flip_diag_count = 0;
-
-			if (join_flip_diag_count++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP join flip: sj_adm=%d sj_failed=%d online=%d "
-								"offpath_active=%d boot_decided=%d floor_auth=%d "
-								"floor_inc=%llu qvotec_inc=%llu cur_state=%d",
-								(int)ReconfigShmem->self_join_admitted,
-								(int)ReconfigShmem->self_join_failed,
-								cluster_online_join ? 1 : 0,
-								offpath_fast_rejoin_active_local ? 1 : 0,
-								cluster_grd_offpath_boot_decided() ? 1 : 0,
-								self_floor_authority ? 1 : 0,
-								(unsigned long long)self_floor_incarnation,
-								(unsigned long long)
-									cluster_qvotec_get_self_incarnation(),
-								(int)cluster_membership_get_state(self_id))));
 			cluster_membership_set_state(self_id, CLUSTER_MEMBER_JOINING);
 		}
 
@@ -6128,21 +5775,6 @@ cluster_reconfig_lmon_tick(void)
 				 * rollover.  Do not mutate the admitted serving formation here. */
 				ReconfigShmem->fast_rejoin_incarnation[i] = observed_incarnation;
 				prior_incarnation = observed_incarnation;
-				/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): baseline
-				 * set.  Capped; removed before the final push. */
-				{
-					static int prior_set_diag = 0;
-
-					if (prior_set_diag++ < 8)
-						ereport(LOG,
-								(errmsg("TEMP fast-rejoin prior set: peer=%d "
-										"prior=%llu fresh=%d",
-										i,
-										(unsigned long long)observed_incarnation,
-										cluster_reconfig_get_observed_fresh_alive(i)
-											? 1
-											: 0)));
-				}
 			}
 
 			/* P04 fast restart can replace a process inside CSSD's deadband, so
@@ -6178,42 +5810,6 @@ cluster_reconfig_lmon_tick(void)
 				dead_bitmap_set_bit(dead_bitmap, i);
 				offpath_fast_rejoin_actions = true;
 				runtime_join_allowed = true;
-			} else if (ms == CLUSTER_MEMBER_MEMBER || ms == CLUSTER_MEMBER_DEAD) {
-				/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): full gate
-				 * decomposition, change-aware on the complete signature.
-				 * Removed before the final push. */
-				static int rollover_diag_count = 0;
-				static int64 last_sig = INT64_MIN;
-				uint64 d_inc = 0;
-				uint64 d_gen = 0;
-				bool have_obs
-					= cluster_reconfig_get_observed_slot(
-						i, &d_inc, &d_gen);
-				bool fresh_obs = cluster_reconfig_get_observed_fresh_alive(i);
-				int cssd_st = (int)cluster_cssd_get_peer_state(i);
-				int64 sig = (int64)d_inc * 32
-					+ (int64)(fresh_obs ? 1 : 0) * 16
-					+ (int64)cssd_st * 4
-					+ (int64)prior_incarnation % 4;
-
-				if (rollover_diag_count++ < 100 || sig != last_sig) {
-					last_sig = sig;
-					ereport(LOG,
-							(errmsg("TEMP rollover gate: peer=%d ms=%d "
-									"shared_auth=%d prior=%llu cssd=%d "
-									"fresh=%d have_obs=%d obs_inc=%llu "
-									"obs_gen=%llu gt=%d",
-									i, (int)ms,
-									cluster_controlfile_shared_authority ? 1 : 0,
-									(unsigned long long)prior_incarnation,
-									cssd_st, fresh_obs ? 1 : 0,
-									have_obs ? 1 : 0,
-									(unsigned long long)d_inc,
-									(unsigned long long)d_gen,
-									(have_obs && d_inc > prior_incarnation)
-										? 1
-										: 0)));
-				}
 			}
 			/*
 			 * spec-5.18 INV-LF1 (P0): REMOVED is TERMINAL.  This loop reads the RAW
@@ -6315,8 +5911,6 @@ cluster_reconfig_lmon_tick(void)
 				&= (uint8) ~(1u << (root_gated_join_node % 8));
 		}
 
-		ereport(LOG, (errmsg("TEMP reconfig-lock: EXCLUSIVE releasing "
-							 "(membership-mutation, pid %d)", (int) MyProcPid)));
 		LWLockRelease(&ReconfigShmem->lock);
 
 		/*
@@ -6490,55 +6084,12 @@ cluster_reconfig_lmon_tick(void)
 		&& (cluster_online_join
 			|| (dead_bitmap_is_zero(new_failure_bitmap)
 				&& !failure_generation_changed))) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): join-drive entry evidence.
-		 * Capped; removed before the final push. */
-		{
-			static int join_drive_diag_count = 0;
-
-			if (join_drive_diag_count++ < 6)
-				ereport(LOG,
-						(errmsg("TEMP join-drive: target=%d inc=%llu",
-								fast_rejoin_control_actions
-									? fast_rejoin_control_target : -1,
-								(unsigned long long)(fast_rejoin_control_actions
-													 ? fast_rejoin_control_incarnation
-													 : 0))));
-		}
 		if (external_rejoin_active)
 			cluster_reconfig_external_rejoin_tick();
 		cluster_reconfig_drive_joins(coordinator,
 			fast_rejoin_control_actions ? fast_rejoin_control_target : -1,
 			fast_rejoin_control_actions ? fast_rejoin_control_incarnation : 0);
 	} else {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the blocked
-		 * join-drive gate.  Change-aware (log only on signature change) so
-		 * the L5 second-rejoin window cannot burn the cap in earlier legs;
-		 * removed before the final push. */
-		static int join_gate_diag_count = 0;
-		static int join_gate_last_sig = -1;
-		int gsig = (runtime_join_allowed ? 1000000 : 0)
-			+ (ordinary_actions_allowed ? 100000 : 0)
-			+ (fast_rejoin_control_actions ? 10000 : 0)
-			+ ((self_id == coordinator) ? 1000 : 0)
-			+ (cluster_clean_leave_in_progress() ? 100 : 0)
-			+ (cluster_online_join ? 10 : 0)
-			+ (dead_bitmap_is_zero(new_failure_bitmap) ? 1 : 0)
-			+ (failure_generation_changed ? 2 : 0);
-
-		if (gsig != join_gate_last_sig) {
-			join_gate_last_sig = gsig;
-			if (join_gate_diag_count++ < 16)
-				ereport(LOG,
-						(errmsg("TEMP join-drive blocked: runtime=%d ordinary=%d "
-								"control=%d coord_self=%d clean_leave=%d online=%d "
-								"new_fail_zero=%d gen_changed=%d",
-								runtime_join_allowed, ordinary_actions_allowed,
-								fast_rejoin_control_actions, self_id == coordinator,
-							cluster_clean_leave_in_progress(),
-							cluster_online_join,
-							dead_bitmap_is_zero(new_failure_bitmap),
-							failure_generation_changed)));
-		}
 		cluster_reconfig_external_rejoin_release_all();
 		if (join_commit_stage.external_rejoin_consumed)
 			cluster_reconfig_release_join_commit_stage();
@@ -7924,29 +7475,6 @@ cluster_reconfig_submit_join_marker_async(ClusterMarkerAsync *a, int32 target_no
 		|| !cluster_reconfig_stage_join_marker_locked(
 			target_node, CLUSTER_JOIN_MARKER_MAILBOX_WRITE_EXACT,
 			CLUSTER_JCMK_VERSION, m, sizeof(*m))) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): marker submit refusal
-		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
-		 * before the final push. */
-		{
-			static int marker_submit_diag = 0;
-
-			if (marker_submit_diag++ < 10)
-				ereport(LOG,
-						(errmsg("TEMP join marker submit fail: target=%d "
-								"kind=%d owner_reserved=%d busy=%d req=%llu "
-								"comp=%llu",
-								target_node, (int)kind,
-								join_marker_lmon_owner.reserved ? 1 : 0,
-								cluster_marker_async_mailbox_busy(
-									&ReconfigShmem->join_marker_request_seq,
-									&ReconfigShmem->join_marker_completion_seq)
-									? 1
-									: 0,
-								(unsigned long long)pg_atomic_read_u64(
-									&ReconfigShmem->join_marker_request_seq),
-								(unsigned long long)pg_atomic_read_u64(
-									&ReconfigShmem->join_marker_completion_seq))));
-		}
 		LWLockRelease(&ReconfigShmem->lock);
 		return false;
 	}
@@ -8312,23 +7840,6 @@ cluster_reconfig_apply_join_as_coordinator(
 
 	if (!cluster_enabled || ReconfigShmem == NULL)
 		return;
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): JOIN_PENDING apply evidence.
-	 * Capped; removed before the final push. */
-	{
-		static int apply_join_diag_count = 0;
-		int n_apply = 0;
-
-		for (i = 0; i < CLUSTER_MAX_NODES; i++)
-			if (dead_bitmap_test_bit(join_bitmap, i))
-				n_apply++;
-		if (apply_join_diag_count++ < 4)
-			ereport(LOG,
-					(errmsg("TEMP apply-join: coord=%d n_join=%d old_epoch=%llu",
-							coordinator_node_id, n_apply,
-							(unsigned long long)
-								cluster_epoch_get_current())));
-	}
 
 	CLUSTER_INJECTION_POINT("cluster-reconfig-join-pending-pre");
 	memset(external_authorized, 0, sizeof(external_authorized));

@@ -557,15 +557,6 @@ cluster_cssd_dispatch_heartbeat(const ClusterICEnvelope *env, const void *payloa
 	pg_atomic_add_fetch_u64(&CssdShmem->peers[sender].heartbeat_recv_count, 1);
 	pg_atomic_add_fetch_u64(&CssdShmem->total_heartbeat_recv_count, 1);
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th recv logs the
-	 * aggregate recv counter.  Removed before the final push. */
-	if ((pg_atomic_read_u64(&CssdShmem->total_heartbeat_recv_count) % 10) == 0)
-		ereport(LOG,
-				(errmsg("TEMP cssd recv: sender=%d recv_total=%llu",
-						sender,
-						(unsigned long long)pg_atomic_read_u64(
-							&CssdShmem->total_heartbeat_recv_count))));
-
 	(void)hb; /* hb fields are diagnostic-only;deadband scan uses
 				* receiver-local clock, not sender_local_clock (clock skew
 				* safe). */
@@ -630,21 +621,7 @@ cssd_advance_liveness_tick(void)
 
 	if (CssdShmem == NULL)
 		return;
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): lock entry/exit
-	 * attribution.  Capped; removed before the final push. */
-	{
-		static int liveness_diag = 0;
-
-		if (liveness_diag++ < 4)
-			ereport(LOG, (errmsg("TEMP cssd liveness lock enter")));
-	}
 	LWLockAcquire(&CssdShmem->lwlock, LW_EXCLUSIVE);
-	{
-		static int liveness_diag2 = 0;
-
-		if (liveness_diag2++ < 4)
-			ereport(LOG, (errmsg("TEMP cssd liveness lock got")));
-	}
 	CssdShmem->last_liveness_tick_at = now;
 	CssdShmem->main_loop_iters++;
 	LWLockRelease(&CssdShmem->lwlock);
@@ -682,17 +659,6 @@ cssd_heartbeat_broadcast_tick(void)
 	slots = cluster_cssd_outbound_slots();
 	if (slots == NULL)
 		return;
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th broadcast logs the
-	 * aggregate send counter + main-loop iterations so a stalled CSSD loop
-	 * or a starved slot is visible.  Removed before the final push. */
-	if ((cssd_seq % 10) == 0)
-		ereport(LOG,
-				(errmsg("TEMP cssd broadcast: seq=%u send_total=%llu iters=%lld",
-						cssd_seq,
-						(unsigned long long)pg_atomic_read_u64(
-							&CssdShmem->total_heartbeat_send_count),
-						(long long)CssdShmem->main_loop_iters)));
 
 	hb.cssd_seq = ++cssd_seq;
 	hb.sender_local_clock = (uint64)GetCurrentTimestamp();
@@ -976,44 +942,13 @@ CssdMain(void)
 
 			CHECK_FOR_INTERRUPTS();
 
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): bisect between
-			 * CHECK_FOR_INTERRUPTS and shutdown_requested.  Capped; removed
-			 * before the final push. */
-			{
-				static int bisect_diag = 0;
-
-				if (bisect_diag++ < 4)
-					ereport(LOG, (errmsg("TEMP cssd post-interrupts")));
-			}
-
 			if (ConfigReloadPending) {
 				ConfigReloadPending = false;
 				ProcessConfigFile(PGC_SIGHUP);
 			}
 
-			{
-				static int bisect_diag2 = 0;
-
-				if (bisect_diag2++ < 4)
-					ereport(LOG, (errmsg("TEMP cssd pre-shutdown-check")));
-			}
-
 			if (ShutdownRequestPending || cssd_shutdown_requested())
 				break;
-
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): log the loop
-			 * liveness every 25th iteration + the shutdown/liveness lock
-			 * entries.  Capped; removed before the final push. */
-			{
-				static long long cssd_loop_diag = 0;
-
-				if ((cssd_loop_diag++ % 25) == 0 && cssd_loop_diag < 2500)
-					ereport(LOG,
-							(errmsg("TEMP cssd loop alive: iters=%lld "
-									"main_iters=%lld",
-									(long long)cssd_loop_diag,
-									(long long)CssdShmem->main_loop_iters)));
-			}
 
 			cssd_advance_liveness_tick();
 
@@ -1052,15 +987,6 @@ CssdMain(void)
 			if (rc & WL_LATCH_SET)
 				ResetLatch(MyLatch);
 
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): post-wait
-			 * liveness.  Capped; removed before the final push. */
-			{
-				static int wait_diag = 0;
-
-				if (wait_diag++ < 4)
-					ereport(LOG, (errmsg("TEMP cssd loop woke: rc=%d timeout_ms=%d",
-										 rc, timeout_ms)));
-			}
 		}
 	}
 

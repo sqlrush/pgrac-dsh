@@ -1276,11 +1276,6 @@ LmonMain(void)
 			}
 
 			if (ShutdownRequestPending || cluster_lmon_shutdown_requested_public()) {
-				static bool temp_shutdown_logged = false;
-				if (!temp_shutdown_logged) {
-					temp_shutdown_logged = true;
-					elog(LOG, "TEMP lmon shutdown seen: shutdown_pending=%d", (int) ShutdownRequestPending);
-				}
 				break;
 			}
 
@@ -1579,20 +1574,6 @@ LmonMain(void)
 						rc = cluster_ic_send_envelope(PGRAC_IC_MSG_HEARTBEAT, pi, NULL, 0);
 					else
 						rc = cluster_ic_tier1_send_heartbeat(pi);
-					/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every 10th
-					 * tier1 heartbeat send logs its result + fd state so a
-					 * silently-stopped heartbeat stream is visible.
-					 * Removed before the final push. */
-					{
-						static uint64 hb_diag_seq = 0;
-
-						if ((hb_diag_seq++ % 10) == 0)
-							ereport(LOG,
-									(errmsg("TEMP lmon hb send: peer=%d rc=%d "
-											"fd=%d",
-											pi, (int)rc,
-											cluster_ic_tier1_get_peer_fd(pi))));
-					}
 					switch (rc) {
 					case CLUSTER_IC_SEND_DONE:
 						break;
@@ -1681,20 +1662,6 @@ LmonMain(void)
 							memcpy(combined + sizeof(env), &slots[cs].payload,
 								   sizeof(slots[cs].payload));
 							send_rc = cluster_ic_send_bytes(cs, combined, sizeof(combined));
-							/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every
-							 * 20th cssd drain logs the send result + fd/state.
-							 * Removed before the final push. */
-							{
-								static uint64 cssd_drain_diag_seq = 0;
-
-								if ((cssd_drain_diag_seq++ % 20) == 0)
-									ereport(LOG,
-											(errmsg("TEMP cssd drain: peer=%d "
-													"rc=%d fd=%d shmem_state=%d",
-													cs, (int)send_rc,
-													cluster_ic_tier1_get_peer_fd(cs),
-													cluster_ic_tier1_peer_get(cs) != NULL ? (int)cluster_ic_tier1_peer_get(cs)->state : -1)));
-							}
 							switch (send_rc) {
 							case CLUSTER_IC_SEND_DONE:
 								fanout_rc = CLUSTER_IC_FANOUT_DONE;
@@ -2042,11 +2009,6 @@ LmonMain(void)
 			}
 
 			if (ShutdownRequestPending || cluster_lmon_shutdown_requested_public()) {
-				static bool temp_shutdown_logged = false;
-				if (!temp_shutdown_logged) {
-					temp_shutdown_logged = true;
-					elog(LOG, "TEMP lmon shutdown seen: shutdown_pending=%d", (int) ShutdownRequestPending);
-				}
 				break;
 			}
 

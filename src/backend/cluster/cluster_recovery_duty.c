@@ -11,13 +11,9 @@
  */
 #include "postgres.h"
 
-#include "cluster/cluster_cssd.h"		  /* TEMP diag */
-#include "cluster/cluster_lms.h"		  /* TEMP diag */
-#include "cluster/cluster_membership.h"  /* TEMP diag */
-#include "cluster/cluster_qvotec.h"	  /* TEMP diag */
-#include "cluster/cluster_reconfig.h"	/* TEMP diag */
+#include "cluster/cluster_membership.h"
+#include "cluster/cluster_reconfig.h"
 #include "cluster/cluster_recovery_duty.h"
-#include "cluster/cluster_startup_phase.h" /* TEMP diag */
 #include "cluster_control_root_private.h"
 #include "cluster/cluster_wal_thread.h"
 #include "common/cryptohash.h"
@@ -538,47 +534,6 @@ cluster_control_root_thread_open_publish(uint64 boot_incarnation)
 		return false;
 	root_result = cluster_control_root_lookup_owner_by_node_runtime(
 		cluster_node_id, &identity, &snapshot, &token);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): THREAD_OPEN failure
-	 * decomposition.  Capped; removed before the final push. */
-	{
-		static int thread_open_diag = 0;
-
-		if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
-			 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
-			|| !cluster_recovery_duty_key_valid_v1(&identity)
-			|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
-				   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
-			|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
-			|| identity.root_lineage_seq == UINT64_MAX
-			|| boot_incarnation <= identity.origin_owner_incarnation) {
-			if (thread_open_diag++ < 8)
-				ereport(LOG,
-						(errmsg("TEMP thread open fail: root_result=%d lifecycle=%d "
-								"owner_inc=%llu boot_inc=%llu lineage=%llu key_valid=%d "
-								"transport_comp=%d phase=%d cssd=%d qvotec=%d quorum=%d "
-								"lms_rcv=%d member=%d sj_adm=%d",
-								(int)root_result, (int)snapshot.lifecycle,
-								(unsigned long long)identity.origin_owner_incarnation,
-								(unsigned long long)boot_incarnation,
-								(unsigned long long)identity.root_lineage_seq,
-								cluster_recovery_duty_key_valid_v1(&identity)
-									? 1
-									: 0,
-								cluster_recovery_transport_components_current() ? 1
-																			   : 0,
-								(int)cluster_current_phase(),
-								cluster_cssd_get_status() == CLUSTER_CSSD_READY ? 1
-																			 : 0,
-								cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY
-									? 1
-									: 0,
-								cluster_qvotec_in_quorum() ? 1 : 0,
-								cluster_lms_is_recovery_ready() ? 1 : 0,
-								cluster_membership_is_member(cluster_node_id) ? 1
-																			: 0,
-								cluster_reconfig_self_join_admitted() ? 1 : 0)));
-		}
-	}
 	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
 		|| !cluster_recovery_duty_key_valid_v1(&identity)
@@ -624,17 +579,6 @@ cluster_control_root_thread_open_publish(uint64 boot_incarnation)
 		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN,
 		&published, &published_token);
 	cluster_control_root_publish_authority_clear_v1();
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): publish result.  Capped;
-	 * removed before the final push. */
-	{
-		static int thread_open_pub_diag = 0;
-
-		if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
-			&& thread_open_pub_diag++ < 6)
-			ereport(LOG,
-					(errmsg("TEMP thread open publish fail: result=%d",
-							(int)root_result)));
-	}
 	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		&& published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 		&& published.identity.origin_owner_incarnation == boot_incarnation
@@ -765,26 +709,6 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 		|| formation_bitmap_nonempty(f2->pending_join_bitmap)
 		|| f2->applied.reconfig_kind == RECONFIG_KIND_JOIN_PENDING)
 	{
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt).  Capped; removed before
-		 * the final push. */
-		static int unstable_diag_count = 0;
-
-		if (unstable_diag_count++ < 40)
-			ereport(LOG,
-					(errmsg("TEMP witness unstable: prebump=%d self_join_adm=%d "
-							"self_join_failed=%d pending_join=%d applied_kind=%d "
-							"local_epoch=%llu applied_new_epoch=%llu "
-							"applied_event_id=%llu applied_dead_self=%d",
-							(int)f2->prebump_sync_active,
-							(int)f2->self_join_admitted,
-							(int)f2->self_join_failed,
-							formation_bitmap_nonempty(f2->pending_join_bitmap),
-							(int)f2->applied.reconfig_kind,
-							(unsigned long long)f2->local_epoch,
-							(unsigned long long)f2->applied.new_epoch,
-							(unsigned long long)f2->applied.event_id,
-							formation_bitmap_has_node(f2->applied.dead_bitmap,
-													  (int32)origin_thread - 1))));
 		return CLUSTER_FORMATION_WITNESS_UNSTABLE;
 	}
 	/*
@@ -834,30 +758,6 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 		&& (!cluster_fence_marker_valid_v1(&expected)
 			|| !cluster_fence_marker_tuple_equal(&authority->marker, &expected)))
 	{
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): marker-proven sub-
-		 * decomposition.  Capped; removed before the final push. */
-		static int marker_diag_count = 0;
-
-		if (marker_diag_count++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP witness marker fail: exp_kind=%d exp_epoch=%llu "
-							"exp_event_id=%llu exp_dead_self=%d auth_kind=%d "
-							"auth_epoch=%llu auth_event_id=%llu auth_dead_self=%d "
-							"auth_valid=%d disks=%d/%d",
-							(int)expected.marker_kind,
-							(unsigned long long)expected.fence_epoch,
-							(unsigned long long)expected.fence_event_id,
-							formation_bitmap_has_node(expected.fenced_dead_bitmap,
-													  (int32)origin_thread - 1),
-							(int)authority->marker.marker_kind,
-							(unsigned long long)authority->marker.fence_epoch,
-							(unsigned long long)authority->marker.fence_event_id,
-							formation_bitmap_has_node(
-								authority->marker.fenced_dead_bitmap,
-								(int32)origin_thread - 1),
-							cluster_fence_marker_valid_v1(&authority->marker),
-							authority->agree_disk_count,
-							authority->total_disk_count)));
 		return CLUSTER_FORMATION_WITNESS_MARKER_UNPROVEN;
 	}
 
@@ -866,43 +766,6 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 		|| f2->membership.last_admitted_incarnation[origin_node] == 0
 		|| formation_bitmap_has_node(f2->excluded_bitmap, origin_node))
 	{
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): owner-mismatch sub-
-		 * decomposition for the crash-rejoin witness stall.  Change-aware
-		 * (log when the failing field combination changes) so a spin cannot
-		 * burn the cap; removed before the final push. */
-		static int owner_diag_count = 0;
-		static int owner_last_sig = -1;
-		int sig = ((int)f2->membership.membership_state[origin_node] * 1000)
-			+ ((f2->membership.last_admitted_incarnation[origin_node] == 0) ? 100
-																		   : 0)
-			+ (formation_bitmap_has_node(f2->excluded_bitmap, origin_node) ? 10
-																		 : 0);
-
-		if (sig != owner_last_sig) {
-			owner_last_sig = sig;
-			if (owner_diag_count++ < 24)
-				ereport(LOG,
-						(errmsg("TEMP witness owner fail: node=%d state=%d "
-								"admitted_inc=%llu excluded=%d local_epoch=%llu "
-								"applied_new_epoch=%llu applied_kind=%d "
-								"applied_event_id=%llu applied_dead_self=%d "
-								"removed_self=%d self_join_admitted=%d",
-								origin_node,
-								(int)f2->membership.membership_state[origin_node],
-								(unsigned long long)
-									f2->membership.last_admitted_incarnation[origin_node],
-								formation_bitmap_has_node(f2->excluded_bitmap,
-														  origin_node),
-								(unsigned long long)f2->local_epoch,
-								(unsigned long long)f2->applied.new_epoch,
-								(int)f2->applied.reconfig_kind,
-								(unsigned long long)f2->applied.event_id,
-								formation_bitmap_has_node(f2->applied.dead_bitmap,
-														  origin_node),
-								formation_bitmap_has_node(f2->removed_bitmap,
-														  origin_node),
-								(int)f2->self_join_admitted)));
-		}
 		return CLUSTER_FORMATION_WITNESS_OWNER_MISMATCH;
 	}
 	return CLUSTER_FORMATION_WITNESS_READY;

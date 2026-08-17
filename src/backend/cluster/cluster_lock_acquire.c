@@ -192,42 +192,6 @@ cluster_lock_acquire_s1_entry(const ClusterLockAcquireRequest *req)
 	if (req == NULL)
 		return CLUSTER_LOCK_ACQUIRE_FAIL_INTERNAL;
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S1 verdict decomposition for
-	 * the CF resid.  Capped; removed before the final push. */
-	if (req->resid.type == CLUSTER_CF_RESID_TYPE) {
-		static int cfx_s1_diag = 0;
-		ClusterLockAcquireResult probe_r;
-
-		probe_r = cluster_authority_readiness_managed()
-			? (cluster_serving_ready_is_current()
-				   ? (cluster_lms_is_ready()
-						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
-						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE)
-				   : (cluster_recovery_authority_request_allowed(
-						  &req->resid, req->lockmode,
-						  AmStartupProcess() || !IsUnderPostmaster)
-						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
-						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE))
-			: (cluster_lms_enabled
-				   ? (cluster_lms_is_ready()
-						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
-						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE)
-				   : CLUSTER_LOCK_ACQUIRE_OK_NATIVE);
-
-		if (cfx_s1_diag++ < 80)
-			ereport(LOG,
-					(errmsg("TEMP cfx s1: mode=%d r=%d managed=%d serving=%d "
-							"lms_enabled=%d lms_ready=%d startup=%d not_under_pm=%d "
-							"pid=%d",
-							(int)req->lockmode, (int)probe_r,
-							cluster_authority_readiness_managed() ? 1 : 0,
-							cluster_serving_ready_is_current() ? 1 : 0,
-							cluster_lms_enabled ? 1 : 0,
-							cluster_lms_is_ready() ? 1 : 0,
-							AmStartupProcess() ? 1 : 0,
-							!IsUnderPostmaster ? 1 : 0,
-							(int)MyProcPid)));
-	}
 
 	/* RF-ROOT P6 Scheme A: a formed boot is always fail-closed unless it
 	 * holds one of the two explicit readiness proofs.  Recovery readiness
@@ -506,21 +470,6 @@ cluster_lock_acquire_s4_remote_request_wait(const ClusterLockAcquireRequest *req
 	case GES_REJECT_REASON_SHARD_FROZEN:
 		/* Master-side recovery gate (the requester-side gate makes this
 		 * a narrow race window) — same 53R9I retry surface. */
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): which master rejected
-		 * with a frozen shard.  Capped; removed before the final push. */
-		{
-			static int s4_frozen_diag = 0;
-
-			if (s4_frozen_diag++ < 10)
-				ereport(LOG,
-						(errmsg("TEMP s4 shard frozen reject: resid_type=%d "
-								"shard=%u master=%d self=%d",
-								(int)req->resid.type,
-								(unsigned)cluster_grd_shard_for_resource(
-									&req->resid),
-								(int)cluster_grd_lookup_master(&req->resid),
-								(int)cluster_node_id)));
-		}
 		return CLUSTER_LOCK_ACQUIRE_FAIL_SHARD_REMASTERING;
 	case GES_REJECT_REASON_FEATURE_NOT_SUPPORTED:
 		/* spec-5.3 — the cross-node CONVERT path is now live (TM table-lock
@@ -689,20 +638,6 @@ cluster_lock_acquire_s6_release(const ClusterLockAcquireRequest *req)
 	if (req == NULL)
 		return CLUSTER_LOCK_ACQUIRE_FAIL_INTERNAL;
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S6 release decomposition for
-	 * the CF resid.  Capped; removed before the final push. */
-	if (req->resid.type == CLUSTER_CF_RESID_TYPE) {
-		static int cfx_s6_diag = 0;
-		int32 probe_master = cluster_grd_lookup_master(&req->resid);
-
-		if (cfx_s6_diag++ < 80)
-			ereport(LOG,
-					(errmsg("TEMP cfx s6: mode=%d master=%d phase=%d pid=%d",
-							(int)req->lockmode, (int)probe_master,
-							(int)cluster_grd_shard_phase(
-								cluster_grd_shard_for_resource(&req->resid)),
-							(int)MyProcPid)));
-	}
 
 	/*
 	 * PGRAC: spec-5.5 P0 — route the release the SAME way the acquire/send path
@@ -901,28 +836,6 @@ cluster_lock_acquire_seven_step(const ClusterLockAcquireRequest *req)
 		if (!ir_bootstrap_bypass && cluster_grd_shard_phase(gate_shard) != GRD_SHARD_NORMAL) {
 			TimestampTz gate_deadline;
 
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): requester-side freeze
-			 * gate entry for the THREAD_OPEN CF wedge.  Capped; removed
-			 * before the final push. */
-			{
-				static int freeze_gate_diag = 0;
-
-				if (freeze_gate_diag++ < 10)
-					ereport(LOG,
-							(errmsg("TEMP freeze gate: resid_type=%d shard=%u "
-									"phase=%d join_dir=%d episode_epoch=%llu "
-									"master=%d self=%d wait_ms=%d dontwait=%d",
-									(int)req->resid.type, (unsigned)gate_shard,
-									(int)cluster_grd_shard_phase(gate_shard),
-									cluster_grd_join_remaster_in_progress() ? 1
-																		   : 0,
-									(unsigned long long)
-										cluster_grd_recovery_episode_epoch_value(),
-									(int)cluster_grd_lookup_master(&req->resid),
-									(int)cluster_node_id,
-									(int)cluster_grd_remaster_wait_ms,
-									req->dontwait ? 1 : 0)));
-			}
 			if (req->dontwait)
 				return CLUSTER_LOCK_ACQUIRE_FAIL_SHARD_REMASTERING;
 

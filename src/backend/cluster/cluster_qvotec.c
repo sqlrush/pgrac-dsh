@@ -2616,36 +2616,6 @@ qvotec_poll_once(void)
 	{
 		uint32 node;
 
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): what the matrix
-		 * read actually carries per poll (capped; removed before the final
-		 * push). */
-		{
-			static int obs_matrix_diag = 0;
-
-			if (obs_matrix_diag++ < 30)
-				for (node = 0; node < CLUSTER_MAX_NODES; node++) {
-					uint64 m_gen = 0;
-					uint64 m_inc = 0;
-
-					for (i = 0; i < qvotec_n_disks; i++) {
-						ClusterVotingSlot *cell
-							= &qvotec_slot_matrix[i * CLUSTER_MAX_NODES + node];
-
-						if (cell->generation > m_gen
-							&& cell->node_id == node) {
-							m_gen = cell->generation;
-							m_inc = cell->incarnation;
-						}
-					}
-					if (m_gen > 0)
-						ereport(LOG,
-								(errmsg("TEMP obs matrix: self=%d node=%u "
-										"gen=%llu inc=%llu",
-										cluster_node_id, node,
-										(unsigned long long)m_gen,
-										(unsigned long long)m_inc)));
-				}
-		}
 
 		for (node = 0; node < CLUSTER_MAX_NODES; node++) {
 			uint64 best_gen = 0;
@@ -3002,20 +2972,6 @@ qvotec_poll_once(void)
 		self_slot.generation = qvotec_slot_generation;
 		self_slot.disk_index = (uint32)i;
 
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): self-slot write
-		 * identity per poll (capped; removed before the final push). */
-		{
-			static int selfwrite_diag = 0;
-
-			if (selfwrite_diag++ < 20 && i == 0)
-				ereport(LOG,
-						(errmsg("TEMP qvotec selfwrite: pid=%d inc=%llu "
-								"gen=%llu epoch=%llu",
-								(int)MyProcPid,
-								(unsigned long long)self_slot.incarnation,
-								(unsigned long long)self_slot.generation,
-								(unsigned long long)self_slot.current_epoch)));
-		}
 
 		if (rplm_state == CLUSTER_REPLACEMENT_REQUEST_SLOT_HOLD)
 			wrc = CLUSTER_VOTING_DISK_IO_FAILED;
@@ -3138,23 +3094,6 @@ qvotec_poll_once(void)
 		proven = qvotec_join_marker_ack_proven_fds(
 			qvotec_fds, qvotec_n_disks, join_target_node,
 			join_marker_slot, join_disk_write_succeeded);
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): join-marker ack
-		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
-		 * before the final push. */
-		{
-			static int join_ack_diag = 0;
-
-			if (join_ack_diag++ < 10)
-				ereport(LOG,
-						(errmsg("TEMP join marker ack: target=%d op=%d proven=%d "
-								"write_ok=%d/%d/%d disks=%d",
-								join_target_node, (int)join_marker_operation,
-								proven ? 1 : 0,
-								join_disk_write_succeeded[0] ? 1 : 0,
-								join_disk_write_succeeded[1] ? 1 : 0,
-								join_disk_write_succeeded[2] ? 1 : 0,
-								qvotec_n_disks)));
-		}
 		cluster_reconfig_join_qvotec_complete(
 			join_marker_operation, proven, NULL);
 	}

@@ -314,14 +314,6 @@ cluster_wal_state_update_own(const ClusterWalStateUpdate *update, ClusterWalStat
 	}
 	result = cluster_wal_state_slot_verify_postread(
 		&expected_after, &fresh_observed, thread_id, cluster_node_id);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every registry write outcome.
-	 * Removed before the final push. */
-	ereport(LOG,
-			(errmsg("TEMP wal_state write: pid=%d kind=%u before_state=%u "
-					"after_state=%u result=%d",
-					(int)MyProcPid, (unsigned)update->kind,
-					(unsigned)fresh_before.state,
-					(unsigned)expected_after.state, (int)result)));
 	if (result == CLUSTER_WAL_STATE_UPDATE_OK && published_slot != NULL)
 		memcpy(published_slot, &fresh_observed, sizeof(*published_slot));
 
@@ -620,12 +612,6 @@ cluster_wal_state_publish_stopped(void)
 	update.highest_scn = (uint64)cluster_scn_current();
 	result = cluster_wal_state_update_own(
 		&update, CLUSTER_WAL_STATE_CF_ACQUIRE_X, NULL);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): publish_stopped outcome.
-	 * Removed before the final push. */
-	ereport(LOG,
-			(errmsg("TEMP publish_stopped: result=%d tli=%u highest=%X/%X",
-					(int)result, (unsigned)tli,
-					(uint32)(write_ptr >> 32), (uint32)write_ptr)));
 	if (result != CLUSTER_WAL_STATE_UPDATE_OK
 		&& result != CLUSTER_WAL_STATE_UPDATE_NOOP
 		&& result != CLUSTER_WAL_STATE_UPDATE_DISABLED)

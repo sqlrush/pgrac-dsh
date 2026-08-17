@@ -174,30 +174,6 @@ ges_readiness_allows_early_opcode(uint32 opcode)
 		 * early opcode keeps the strict transport requirement.
 		 */
 		allowed = cluster_recovery_transport_components_current();
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): REDECLARE_DONE gate
-		 * verdict + component decomposition.  Capped; removed before the
-		 * final push.  NB: uses the side-effect-free components predicate
-		 * — cluster_recovery_transport_is_current() clears a stale
-		 * STARTING binding, and a diagnostic must not destroy the
-		 * postmaster's mid-bind phase-3 binding (increment 15). */
-		{
-			static int gate_diag_count = 0;
-
-			if (gate_diag_count++ < 14)
-				ereport(LOG,
-						(errmsg("TEMP done gate: allowed=%d managed=%d serving=%d "
-								"phase=%d is_member=%d lms_rcv_ready=%d transport=%d",
-								allowed ? 1 : 0,
-								cluster_authority_readiness_managed() ? 1 : 0,
-								cluster_serving_ready_is_current() ? 1 : 0,
-								(int)cluster_current_phase(),
-								cluster_membership_is_member(cluster_node_id) ? 1
-																			 : 0,
-								cluster_lms_is_recovery_ready() ? 1 : 0,
-								cluster_recovery_transport_components_current()
-									? 1
-									: 0)));
-		}
 		return allowed;
 	}
 	return opcode == GES_REQ_OPCODE_REQUEST
@@ -470,19 +446,6 @@ cluster_ges_request_handler(const ClusterICEnvelope *env, const void *payload)
 	Assert(cluster_ges_state != NULL);
 
 	pg_atomic_fetch_add_u64(&cluster_ges_state->request_defer_count, 1);
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 frame-loss hunt): entry probe.  Capped;
-	 * removed before the final push. */
-	{
-		static int ges_entry_diag = 0;
-
-		if (ges_entry_diag++ < 20)
-			ereport(LOG,
-					(errmsg("TEMP ges entry: src=%u dst=%u plen=%u",
-							(unsigned)env->source_node_id,
-							(unsigned)env->dest_node_id,
-							(unsigned)env->payload_length)));
-	}
 
 	if (payload == NULL) {
 		cluster_grd_inc_ges_inbound_validation_fail();
@@ -1254,26 +1217,6 @@ cluster_ges_release_and_drain_local(const struct ClusterResId *resid,
 
 	if (resid == NULL || holder == NULL)
 		return GES_REJECT_REASON_TIMEOUT;
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S6 local-release gate
-	 * decomposition for the CF resid.  Capped; removed before the final
-	 * push. */
-	if (resid->type == CLUSTER_CF_RESID_TYPE) {
-		static int cfx_rel_diag = 0;
-
-		if (cfx_rel_diag++ < 80)
-			ereport(LOG,
-					(errmsg("TEMP cfx rel: gate=%d managed=%d serving=%d "
-							"phase=%d master=%d startup=%d pid=%d",
-							ges_readiness_allows_local_release_origin(resid) ? 1
-																			 : 0,
-							cluster_authority_readiness_managed() ? 1 : 0,
-							cluster_serving_ready_is_current() ? 1 : 0,
-							(int)cluster_grd_shard_phase(
-								cluster_grd_shard_for_resource(resid)),
-							(int)cluster_grd_lookup_master(resid),
-							AmStartupProcess() ? 1 : 0,
-							(int)MyProcPid)));
-	}
 	if (!ges_readiness_allows_local_release_origin(resid))
 		return GES_REJECT_REASON_SHARD_FROZEN;
 	if (cluster_authority_readiness_managed()
@@ -1373,25 +1316,6 @@ cluster_ges_lmon_drain_work_queue(void)
 		 * produces a correlated fail-closed reply and no GRD mutation. */
 		if (!ges_readiness_allows_master_request(
 				req->opcode, &resid, (LOCKMODE)req->lockmode, &holder)) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): master-side readiness
-			 * reject for the CF resid.  Capped; removed before the final
-			 * push. */
-			if (resid.type == CLUSTER_CF_RESID_TYPE) {
-				static int cfx_master_diag = 0;
-
-				if (cfx_master_diag++ < 80)
-					ereport(LOG,
-							(errmsg("TEMP cfx master-rej: opcode=%u mode=%d "
-									"phase=%d managed=%d serving=%d src=%d "
-									"pid=%d",
-									req->opcode, (int)req->lockmode,
-									(int)cluster_grd_shard_phase(
-										cluster_grd_shard_for_resource(&resid)),
-									cluster_authority_readiness_managed() ? 1 : 0,
-									cluster_serving_ready_is_current() ? 1 : 0,
-									(int)item.source_node_id,
-									(int)MyProcPid)));
-			}
 			ges_dispatch_reject((int32)item.source_node_id, &holder, &resid,
 								req->opcode, GES_REJECT_REASON_WORK_QUEUE_FULL,
 								ges_request_shard_master_generation(req));
@@ -1489,23 +1413,6 @@ cluster_ges_lmon_drain_work_queue(void)
 			if (cluster_grd_shard_phase(cluster_grd_shard_for_resource(&resid))
 				!= GRD_SHARD_NORMAL) {
 				GesReplyPayload reject;
-
-				/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): master-side
-				 * frozen-gate reject for the CF resid.  Capped; removed
-				 * before the final push. */
-				if (resid.type == CLUSTER_CF_RESID_TYPE) {
-					static int cfx_frozen_diag = 0;
-
-					if (cfx_frozen_diag++ < 80)
-						ereport(LOG,
-								(errmsg("TEMP cfx frozen-rej: opcode=%u mode=%d "
-										"phase=%d src=%d pid=%d",
-										req->opcode, (int)req->lockmode,
-										(int)cluster_grd_shard_phase(
-											cluster_grd_shard_for_resource(&resid)),
-										(int)item.source_node_id,
-										(int)MyProcPid)));
-				}
 
 				memset(&reject, 0, sizeof(reject));
 				reject.opcode = GES_REPLY_OPCODE_REJECT;
@@ -2184,22 +2091,6 @@ ges_send_request_opcode_and_wait(const struct ClusterResId *resid, uint32 lockmo
 
 	master = cluster_grd_lookup_master(resid);
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S4 entry for the CF resid —
-	 * local-origin verdict + master + shard phase.  Capped; removed before
-	 * the final push. */
-	if (resid->type == CLUSTER_CF_RESID_TYPE) {
-		static int cfx_s4_diag = 0;
-
-		if (cfx_s4_diag++ < 80)
-			ereport(LOG,
-					(errmsg("TEMP cfx s4: mode=%d opcode=%u master=%d phase=%d "
-							"pid=%d self=%d",
-							(int)lockmode, send_opcode, (int)master,
-							(int)cluster_grd_shard_phase(
-								cluster_grd_shard_for_resource(resid)),
-							(int)MyProcPid, (int)cluster_node_id)));
-	}
-
 	/*
 	 * spec-5.14 D2 class 1: when a remote node masters this resource, this
 	 * request depends on that master's GES coordination — stamp it
@@ -2433,22 +2324,6 @@ ges_send_request_opcode_and_wait(const struct ClusterResId *resid, uint32 lockmo
 
 		reject_reason = entry->reject_reason;
 		cluster_ges_reply_wait_delete(&key);
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S4 local-master wait exit
-		 * for the CF resid.  Capped; removed before the final push. */
-		if (resid->type == CLUSTER_CF_RESID_TYPE) {
-			static int cfx_s4x_diag = 0;
-
-			if (cfx_s4x_diag++ < 80)
-				ereport(LOG,
-						(errmsg("TEMP cfx s4x: reject=%d elapsed_ms=%lld "
-								"master=%d phase=%d pid=%d",
-								(int)reject_reason,
-								(long long)ges_forens_elapsed_ms(forens_start),
-								(int)master,
-								(int)cluster_grd_shard_phase(
-									cluster_grd_shard_for_resource(resid)),
-								(int)MyProcPid)));
-		}
 		/* GRANT (reject_reason == NONE) -> holder registered by the drain; S5
 		 * verify-only.  A non-NONE reject means the drain consumed the waiter
 		 * with a rejection — fail closed with that reason.

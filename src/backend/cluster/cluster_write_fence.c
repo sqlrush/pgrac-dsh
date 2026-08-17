@@ -45,7 +45,6 @@
 #include "cluster/cluster_lmon.h"			/* cluster_lmon_marker_complete_wakeup */
 #include "cluster/cluster_qvotec.h"			/* ClusterVotingSlot (marker layout asserts) */
 #include "cluster/cluster_shmem.h"			/* cluster_shmem_register_region */
-#include "cluster/cluster_startup_phase.h"	/* cluster_current_phase (TEMP diag) */
 #include "cluster/cluster_write_fence.h"	/* region + judge + wrapper + marker */
 
 /*
@@ -557,40 +556,6 @@ cluster_write_fence_reject_if_fenced(const char *op)
 {
 	if (cluster_write_fence_allowed())
 		return; /* enforcement off, or the token proves this node's authority */
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 shutdown-checkpoint fence hunt): decompose
-	 * the judge inputs on a blocked write.  Capped; removed before the final
-	 * push. */
-	{
-		static int fence_block_diag = 0;
-
-		if (fence_block_diag++ < 12)
-			ereport(LOG,
-					(errmsg("TEMP fence block: op=%s enforce=%d attached=%d "
-							"epoch_cur=%llu authorized=%llu self_fenced=%d "
-							"engaged=%d lease_expire=%llu now=%llu phase=%d",
-							op, cluster_write_fence_enforcing(),
-							cluster_write_fence_shmem != NULL,
-							(unsigned long long)cluster_epoch_get_current(),
-							(unsigned long long)(cluster_write_fence_shmem
-								? pg_atomic_read_u64(
-									&cluster_write_fence_shmem->authorized_epoch)
-								: 0),
-							cluster_write_fence_shmem
-								? (int)pg_atomic_read_u32(
-									&cluster_write_fence_shmem->self_fenced)
-								: -1,
-							cluster_write_fence_shmem
-								? (int)pg_atomic_read_u32(
-									&cluster_write_fence_shmem->fence_engaged)
-								: -1,
-							(unsigned long long)(cluster_write_fence_shmem
-								? pg_atomic_read_u64(
-									&cluster_write_fence_shmem->lease_expire_at_us)
-								: 0),
-							(unsigned long long)GetCurrentTimestamp(),
-							(int)cluster_current_phase())));
-	}
 
 	if (cluster_write_fence_shmem != NULL)
 		pg_atomic_fetch_add_u64(&cluster_write_fence_shmem->hot_gate_blocked, 1);

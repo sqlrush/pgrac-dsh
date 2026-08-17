@@ -222,17 +222,6 @@ cluster_authority_clear_matching(const ClusterAuthorityBindingLocal *binding,
 			   == binding->boot_incarnation
 		&& cluster_phase_state->authority_lms_generation
 			   == binding->lms_generation) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): record every fail-closed
-		 * clear with its caller so the phase3/4 starvation chain is visible
-		 * in the TAP logs.  Removed before the final push. */
-		ereport(LOG,
-				(errmsg("TEMP clear_matching: caller=%s state=%d phase=%d "
-						"boot=%llu lms_gen=%llu",
-						caller ? caller : "(null)",
-						(int)binding->state,
-						(int)cluster_current_phase(),
-						(unsigned long long)binding->boot_incarnation,
-						(unsigned long long)binding->lms_generation)));
 		pg_atomic_write_u32(&cluster_phase_state->authority_readiness,
 							CLUSTER_AUTHORITY_OFF);
 		/* Managed is a boot-lifetime fail-closed latch.  Losing a bound
@@ -252,23 +241,10 @@ cluster_authority_clear_matching(const ClusterAuthorityBindingLocal *binding,
 void
 cluster_authority_readiness_clear(void)
 {
-	ClusterAuthorityReadiness prev = CLUSTER_AUTHORITY_OFF;
-
 	if (cluster_phase_state == NULL)
 		return;
 	if (!cluster_phase_state_lock_acquire(LW_EXCLUSIVE))
 		return;
-	prev = (ClusterAuthorityReadiness)pg_atomic_read_u32(
-		&cluster_phase_state->authority_readiness);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): every unconditional clear that
-	 * actually drops a live binding is recorded with its phase context.
-	 * Removed before the final push. */
-	if (prev != CLUSTER_AUTHORITY_OFF)
-		ereport(LOG,
-				(errmsg("TEMP readiness_clear: state=%d phase=%d managed=%u",
-						(int)prev, (int)cluster_current_phase(),
-						(unsigned)pg_atomic_read_u32(
-							&cluster_phase_state->authority_managed))));
 	pg_atomic_write_u32(&cluster_phase_state->authority_readiness,
 						CLUSTER_AUTHORITY_OFF);
 	/* Preserve authority_managed once set; shmem reinitialization is the only
@@ -301,45 +277,6 @@ cluster_authority_binding_preseal_current(
 		&& cluster_formation_classification_revalidate_nowait(
 			   binding->origin_thread, &binding->authority,
 			   &binding->formation) == CLUSTER_FORMATION_WITNESS_READY;
-}
-
-/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the preseal/external
- * predicate so a fail-closed clear is attributable to the drifting component.
- * Capped at 10 lines per process; removed before the final push. */
-static void
-cluster_authority_temp_log_predicate_mismatch(
-	const ClusterAuthorityBindingLocal *binding, const char *caller)
-{
-	static int predicate_diag_count = 0;
-	ClusterFormationWitnessResult formation_result;
-
-	if (predicate_diag_count++ >= 10)
-		return;
-	formation_result = cluster_formation_classification_revalidate_nowait(
-		binding->origin_thread, &binding->authority, &binding->formation);
-	ereport(LOG,
-			(errmsg("TEMP predicate mismatch: caller=%s state=%d phase=%d "
-					"cssd=%d qvotec=%d quorum=%d self_inc=%llu/%llu "
-					"admitted=%llu lms_gen=%llu/%llu lms_rcv_ready=%d "
-					"formation=%d grd=%d is_member=%d sj_adm=%d",
-					caller, (int)binding->state, (int)cluster_current_phase(),
-					cluster_cssd_get_status() == CLUSTER_CSSD_READY,
-					cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY,
-					cluster_qvotec_in_quorum(),
-					(unsigned long long)cluster_qvotec_get_self_incarnation(),
-					(unsigned long long)binding->boot_incarnation,
-					(unsigned long long)
-						cluster_membership_get_last_admitted_incarnation(
-							cluster_node_id),
-					(unsigned long long)cluster_lms_get_lms_restart_generation(),
-					(unsigned long long)binding->lms_generation,
-					cluster_lms_is_recovery_ready(),
-					(int)formation_result,
-					cluster_grd_recovery_authority_is_current(
-						binding->boot_incarnation,
-						binding->lms_generation),
-					cluster_membership_is_member(cluster_node_id),
-					cluster_reconfig_self_join_admitted())));
 }
 
 /* A sealed serving generation must continue to match the live formation, but
@@ -488,31 +425,10 @@ cluster_authority_readiness_bind_recovery_generation(uint64 lms_generation)
 	ClusterAuthorityBindingLocal binding;
 	bool valid;
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): classify early-return binds.
-	 * Removed before the final push. */
-#define TEMP_BIND_EARLY(reason)                                                     \
-	do {                                                                            \
-		static int temp_bind_diag_count = 0;                                        \
-		if (temp_bind_diag_count++ < 6)                                             \
-			ereport(LOG, (errmsg("TEMP bind early: %s (gen=%llu managed=%u state=%d phase=%d cur_gen=%llu)", \
-								 (reason),                                         \
-								 (unsigned long long)lms_generation,               \
-								 (unsigned)pg_atomic_read_u32(                     \
-									 &cluster_phase_state->authority_managed),     \
-								 (int)pg_atomic_read_u32(                          \
-									 &cluster_phase_state->authority_readiness),   \
-								 (int)cluster_current_phase(),                     \
-								 (unsigned long long)                              \
-									 cluster_phase_state->authority_lms_generation))); \
-	} while (0)
-
 	if (cluster_phase_state == NULL || lms_generation == 0) {
-		if (cluster_phase_state != NULL)
-			TEMP_BIND_EARLY("null_or_zero");
 		return false;
 	}
 	if (!cluster_phase_state_lock_acquire(LW_EXCLUSIVE)) {
-		TEMP_BIND_EARLY("lock_contention");
 		return false;
 	}
 	if (pg_atomic_read_u32(&cluster_phase_state->authority_managed) == 0
@@ -525,7 +441,6 @@ cluster_authority_readiness_bind_recovery_generation(uint64 lms_generation)
 		|| (cluster_phase_state->authority_lms_generation != 0
 			&& cluster_phase_state->authority_lms_generation
 				   != lms_generation)) {
-		TEMP_BIND_EARLY("state_mismatch");
 		LWLockRelease(&cluster_phase_state->lwlock);
 		return false;
 	}
@@ -533,17 +448,13 @@ cluster_authority_readiness_bind_recovery_generation(uint64 lms_generation)
 	LWLockRelease(&cluster_phase_state->lwlock);
 
 	if (!cluster_authority_binding_copy(&binding)) {
-		TEMP_BIND_EARLY("binding_copy_fail");
 		return false;
 	}
 	valid = binding.state == CLUSTER_AUTHORITY_STARTING
 		&& cluster_authority_binding_preseal_current(&binding);
 	if (!valid && cluster_authority_binding_copy(&binding)) {
-		cluster_authority_temp_log_predicate_mismatch(&binding,
-													 "bind_preseal");
 		cluster_authority_clear_matching(&binding, "bind_preseal_fail");
 	}
-#undef TEMP_BIND_EARLY
 	return valid;
 }
 
@@ -593,8 +504,6 @@ cluster_authority_readiness_publish_recovery(uint64 lms_generation)
 		&& cluster_grd_recovery_authority_is_current(
 			   binding.boot_incarnation, lms_generation);
 	if (!valid) {
-		cluster_authority_temp_log_predicate_mismatch(&binding,
-													 "publish_recovery");
 		cluster_authority_clear_matching(&binding, "publish_recovery_fail");
 		return false;
 	}
@@ -629,8 +538,6 @@ cluster_recovery_transport_is_current(void)
 		/* Mirror the recovery_authority discipline: the STARTING preseal
 		 * carries the same phase-3 gate, and a phase-4 request must not
 		 * destroy a binding on the phase gate alone. */
-		cluster_authority_temp_log_predicate_mismatch(&binding,
-													 "recovery_transport");
 		/*
 		 * RF-ROOT P6 (specs-local STOP-01 increment 15): a STARTING
 		 * binding with lms_generation == 0 is the postmaster's mid-bind
@@ -721,30 +628,6 @@ cluster_recovery_transport_components_current(void)
 		bool member_ok = cluster_membership_is_member(cluster_node_id)
 			|| cluster_reconfig_self_join_admitted();
 
-		if (!(boot_ok && lmsgen_ok && cssd_ok && qvotec_ok && quorum_ok
-			  && inc_ok && admitted_ok && lms_match_ok && lms_rcv_ok
-			  && member_ok)) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-check
-			 * decomposition of the components-only transport proof
-			 * (cast-leg THREAD_OPEN CF r=10 hunt).  Capped; removed
-			 * before the final push. */
-			static int transport_comp_diag = 0;
-
-			if (transport_comp_diag++ < 16)
-				ereport(LOG,
-						(errmsg("TEMP transport-comp fail: state=%d phase=%d "
-								"boot_ok=%d lmsgen_ok=%d cssd_ok=%d "
-								"qvotec_ok=%d quorum_ok=%d inc_ok=%d "
-								"admitted_ok=%d lms_match_ok=%d "
-								"lms_rcv_ok=%d is_member=%d sj_adm=%d",
-								(int)binding.state,
-								(int)cluster_current_phase(), boot_ok,
-								lmsgen_ok, cssd_ok, qvotec_ok, quorum_ok,
-								inc_ok, admitted_ok, lms_match_ok,
-								lms_rcv_ok,
-								cluster_membership_is_member(cluster_node_id),
-								cluster_reconfig_self_join_admitted())));
-		}
 		return boot_ok && lmsgen_ok && cssd_ok && qvotec_ok && quorum_ok
 			&& inc_ok && admitted_ok && lms_match_ok && lms_rcv_ok
 			&& member_ok;
@@ -772,8 +655,6 @@ cluster_recovery_authority_is_current(void)
 		 * stranded phase 4 with an OFF binding that nothing re-binds
 		 * (begin() is phase-3 gated), guaranteeing the phase4
 		 * serving-publication timeout. */
-		cluster_authority_temp_log_predicate_mismatch(&binding,
-													 "recovery_authority");
 		if (!cluster_authority_binding_components_current(&binding, false))
 			cluster_authority_clear_matching(&binding,
 											 "recovery_authority_stale");
@@ -799,36 +680,7 @@ cluster_authority_readiness_publish_serving(void)
 	if (!cluster_authority_binding_copy(&binding)
 		|| binding.state != CLUSTER_AUTHORITY_RECOVERY_READY
 		|| cluster_current_phase() != CLUSTER_PHASE_4_NORMAL)
-	{
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): classify the silent
-		 * early-return -- lock contention vs a cleared (OFF) binding vs a
-		 * phase/state mismatch -- capped per process.  Removed before the
-		 * final push. */
-		static int publish_serving_diag_count = 0;
-		ClusterAuthorityBindingLocal diag_binding;
-		ClusterAuthorityReadiness raw_state;
-
-		raw_state = cluster_authority_readiness_get();
-		if (publish_serving_diag_count == 5)
-			elog(LOG, "publish_serving early-return: further repeats suppressed");
-		else if (publish_serving_diag_count < 5
-				 && cluster_authority_binding_copy(&diag_binding))
-			elog(LOG, "publish_serving early-return: state=%d phase=%d "
-				 "(raw_state=%d managed=%u)",
-				 (int)diag_binding.state, (int)cluster_current_phase(),
-				 (int)raw_state,
-				 (unsigned)pg_atomic_read_u32(
-					 &cluster_phase_state->authority_managed));
-		else if (publish_serving_diag_count < 5)
-			elog(LOG, "publish_serving early-return: binding copy failed "
-				 "(raw_state=%d managed=%u phase=%d)",
-				 (int)raw_state,
-				 (unsigned)pg_atomic_read_u32(
-					 &cluster_phase_state->authority_managed),
-				 (int)cluster_current_phase());
-		publish_serving_diag_count++;
 		return false;
-	}
 	/* Validate every generation component while service is still unpublished. */
 	cssd_ready = cluster_cssd_get_status() == CLUSTER_CSSD_READY;
 	qvotec_ready = cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY;
@@ -890,45 +742,6 @@ cluster_serving_ready_is_current(void)
 	if (binding.state != CLUSTER_AUTHORITY_SERVING_READY)
 		return false;
 	current = cluster_authority_binding_external_current(&binding, true);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose a serving-current
-	 * miss so the W2 CF rejection chain is attributable.  Capped per process;
-	 * removed before the final push. */
-	if (!current) {
-		static int serving_diag_count = 0;
-		ClusterFormationSnapshotV1 now_snapshot;
-
-		if (serving_diag_count++ < 8) {
-			bool formation_now
-				= cluster_reconfig_capture_formation_snapshot_v1(
-					binding.origin_thread, &now_snapshot);
-			bool gen_cur = cluster_serving_generation_current(&binding);
-
-			ereport(LOG,
-					(errmsg("TEMP serving miss: phase=%d cssd=%d qvotec=%d "
-							"quorum=%d self_inc=%llu/%llu admitted=%llu "
-							"lms_gen=%llu/%llu lms_ready=%d grd=%d gen_cur=%d "
-							"formation_now=%d formation_moved=%d",
-							(int)cluster_current_phase(),
-							cluster_cssd_get_status() == CLUSTER_CSSD_READY,
-							cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY,
-							cluster_qvotec_in_quorum(),
-							(unsigned long long)cluster_qvotec_get_self_incarnation(),
-							(unsigned long long)binding.boot_incarnation,
-							(unsigned long long)
-								cluster_membership_get_last_admitted_incarnation(
-									cluster_node_id),
-							(unsigned long long)cluster_lms_get_lms_restart_generation(),
-							(unsigned long long)binding.lms_generation,
-							cluster_lms_is_ready(),
-							cluster_grd_recovery_authority_is_current(
-								binding.boot_incarnation,
-								binding.lms_generation),
-							gen_cur, formation_now,
-							formation_now
-								&& memcmp(&now_snapshot, &binding.formation,
-										  sizeof(now_snapshot)) != 0)));
-		}
-	}
 	/* A current boot/LMS generation whose formation moved stays unavailable,
 	 * but keeps its immutable binding so the survivor LMON can replace it only
 	 * after the existing GRD recovery/re-declare barrier closes.  Every data-
@@ -966,19 +779,8 @@ cluster_authority_serving_rebind_lmon(void)
 		binding.origin_thread, &current);
 	moved = capture_ok
 		&& memcmp(&current, &binding.formation, sizeof(current)) != 0;
-	if (!gen_cur || !capture_ok || !moved) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind entry
-		 * decomposition.  Capped; removed before the final push. */
-		static int serving_rebind_diag = 0;
-
-		if (serving_rebind_diag++ < 16)
-			ereport(LOG,
-					(errmsg("TEMP serving rebind entry fail: state=%d ext_cur=%d "
-							"gen_cur=%d capture=%d moved=%d phase=%d",
-							(int)binding.state, ext_cur, gen_cur, capture_ok,
-							moved, (int)cluster_current_phase())));
+	if (!gen_cur || !capture_ok || !moved)
 		return false;
-	}
 
 	/* The GRD helper accepts only the exact event already closed by the ordinary
 	 * LMON P0-P7 recovery driver; it does not start a second barrier. */
@@ -987,27 +789,8 @@ cluster_authority_serving_rebind_lmon(void)
 	verify_ok = cluster_reconfig_capture_formation_snapshot_v1(
 					binding.origin_thread, &verify)
 		&& memcmp(&current, &verify, sizeof(current)) == 0;
-	if (!grd_rebind_ok || !verify_ok) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD stage
-		 * decomposition.  Capped; removed before the final push. */
-		static int serving_rebind_grd_diag = 0;
-
-		if (serving_rebind_grd_diag++ < 16)
-			ereport(LOG,
-					(errmsg("TEMP serving rebind grd fail: grd_ok=%d verify=%d "
-							"applied_event_id=%llu applied_new_epoch=%llu "
-							"local_epoch=%llu cur_epoch=%llu join_dir=%d "
-							"episode_epoch=%llu",
-							grd_rebind_ok, verify_ok,
-							(unsigned long long)current.applied.event_id,
-							(unsigned long long)current.applied.new_epoch,
-							(unsigned long long)current.local_epoch,
-							(unsigned long long)cluster_epoch_get_current(),
-							cluster_grd_join_remaster_in_progress() ? 1 : 0,
-							(unsigned long long)
-								cluster_grd_recovery_episode_epoch_value())));
+	if (!grd_rebind_ok || !verify_ok)
 		return false;
-	}
 
 	if (!cluster_phase_state_lock_acquire(LW_EXCLUSIVE))
 		return false;
@@ -1049,20 +832,6 @@ cluster_authority_serving_rebind_leaver(void)
 	ClusterFormationSnapshotV1 verify;
 	bool rebound = false;
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind entry.
-	 * Capped; removed before the final push. */
-	{
-		static int leaver_wrap_diag = 0;
-
-		if (leaver_wrap_diag++ < 60)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind wrap: managed=%d state=%d phase=%d quorum=%d",
-							cluster_authority_readiness_managed(),
-							(int)cluster_authority_readiness_get(),
-							(int)cluster_current_phase(),
-							cluster_qvotec_in_quorum())));
-	}
-
 	if (!cluster_authority_binding_copy(&binding)
 		|| binding.state != CLUSTER_AUTHORITY_SERVING_READY)
 		return false;
@@ -1072,15 +841,6 @@ cluster_authority_serving_rebind_leaver(void)
 		|| !cluster_reconfig_capture_formation_snapshot_v1(
 			   binding.origin_thread, &current)
 		|| memcmp(&current, &binding.formation, sizeof(current)) == 0) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind capture
-		 * gate.  Capped; removed before the final push. */
-		static int leaver_cap_diag = 0;
-
-		if (leaver_cap_diag++ < 60)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind capture fail: gen_cur=%d phase=%d",
-							cluster_serving_generation_current(&binding),
-							(int)cluster_current_phase())));
 		return false;
 	}
 
@@ -1091,23 +851,6 @@ cluster_authority_serving_rebind_leaver(void)
 		|| !cluster_reconfig_capture_formation_snapshot_v1(
 			   binding.origin_thread, &verify)
 		|| memcmp(&current, &verify, sizeof(current)) != 0) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind GRD/verify
-		 * stage.  Capped; removed before the final push. */
-		static int leaver_grd_diag = 0;
-
-		if (leaver_grd_diag++ < 20)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind grd fail: verify_cap=%d verify_eq=%d "
-							"fstate0=%d fstate1=%d ism0=%d ism1=%d dead0=%d dead1=%d",
-							cluster_reconfig_capture_formation_snapshot_v1(
-								binding.origin_thread, &verify),
-							memcmp(&current, &verify, sizeof(current)) == 0,
-							(int)current.membership.membership_state[0],
-							(int)current.membership.membership_state[1],
-							cluster_membership_is_member(0),
-							cluster_membership_is_member(1),
-							(current.applied.dead_bitmap[0] >> 0) & 1,
-							(current.applied.dead_bitmap[0] >> 1) & 1)));
 		return false;
 	}
 
@@ -1633,44 +1376,12 @@ cluster_phase3_wait_for_live_formation(TimestampTz deadline,
 			attempt_ms = 100;
 		result = cluster_formation_witness_build_live_wait(
 			thread_id, attempt_ms, &witness);
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): witness result throttle —
-		 * log ONLY on result change so a spin cannot burn the cap.  Capped;
-		 * removed before the final push. */
-		{
-			static uint64 witness_diag_count = 0;
-			static int witness_last_result = -1;
-
-			if (result != witness_last_result) {
-				witness_last_result = (int)result;
-				if (witness_diag_count++ < 40)
-					ereport(LOG,
-							(errmsg("TEMP formation witness: result=%d change=%llu",
-									(int)result,
-									(unsigned long long)witness_diag_count)));
-			}
-		}
 		if (result == CLUSTER_FORMATION_WITNESS_READY) {
 			if (!cluster_formation_witness_copy_classification_v1(
 					witness, out_origin_thread, out_authority, out_snapshot))
 				result = CLUSTER_FORMATION_WITNESS_CORRUPT;
 			else
 				result = cluster_formation_witness_revalidate_nowait(witness);
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): build-READY but the
-			 * copy/revalidate leg failed.  Change-aware; removed before the
-			 * final push. */
-			{
-				static int reval_diag_count = 0;
-				static int reval_last_result = -1;
-
-				if (result != CLUSTER_FORMATION_WITNESS_READY
-					&& result != reval_last_result) {
-					reval_last_result = (int)result;
-					if (reval_diag_count++ < 20)
-						ereport(LOG,
-								(errmsg("TEMP witness revalidate fail: result=%d change=%d",
-										(int)result, reval_diag_count)));
-				}
-			}
 			cluster_formation_witness_destroy(&witness);
 			if (result == CLUSTER_FORMATION_WITNESS_READY) {
 				if (out_result != NULL)
@@ -1698,18 +1409,6 @@ cluster_phase3_wait_for_live_formation(TimestampTz deadline,
 	if (out_result != NULL)
 		*out_result = result;
 	return false;
-}
-
-
-static void
-phase3_step_diag(const char *step, uint64 extra)
-{
-	static int step_diag_count = 0;
-
-	if (step_diag_count++ < 24)
-		ereport(LOG,
-				(errmsg("TEMP phase3 step: %s extra=%llu", step,
-						(unsigned long long)extra)));
 }
 
 static PhaseRunResult
@@ -1779,7 +1478,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"slow on this hardware, raise cluster.phase3_timeout.";
 		return PHASE_RUN_FATAL;
 	}
-	phase3_step_diag("cssd_ready", 0);
 
 	phase3_qvotec_pid = cluster_qvotec_start();
 	if (phase3_qvotec_pid <= 0) {
@@ -1798,7 +1496,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"is slow on this hardware, raise cluster.phase3_timeout.";
 		return PHASE_RUN_FATAL;
 	}
-	phase3_step_diag("qvotec_ready", 0);
 
 	if (cluster_phase4_wal_state_configured() && cluster_conf_node_count() > 1
 		&& !cluster_phase4_wait_for_quorum(phase3_deadline)) {
@@ -1808,7 +1505,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"quorum state before retrying startup.";
 		return PHASE_RUN_FATAL;
 	}
-	phase3_step_diag("quorum_ok", 0);
 
 	if (cluster_phase4_wal_state_configured()
 		&& !cluster_phase3_wait_for_live_formation(
@@ -1821,7 +1517,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"retrying startup.";
 		return PHASE_RUN_FATAL;
 	}
-	phase3_step_diag("formation_ready", (uint64)formation_result);
 
 	if (cluster_phase4_wal_state_configured()) {
 		if (!cluster_lms_enabled) {
@@ -1840,7 +1535,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 								"membership floor and retry startup.";
 			return PHASE_RUN_FATAL;
 		}
-		phase3_step_diag("begin_ok", 0);
 
 		phase3_lms_pid = cluster_lms_start();
 		if (phase3_lms_pid <= 0) {
@@ -1860,7 +1554,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 								"closed until phase 4.";
 			return PHASE_RUN_FATAL;
 		}
-		phase3_step_diag("lms_ready", 0);
 		/*
 		 * Bind the recovery LMS generation, then complete the GRD
 		 * recovery-authority barrier (AD-023 A2).  Both legs share one
@@ -1900,23 +1593,6 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 					lms_generation);
 				(void)cluster_control_root_thread_open_publish(
 					cluster_qvotec_get_self_incarnation());
-			}
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): bind/barrier loop
-			 * iteration state.  Capped; removed before the final push. */
-			{
-				static int phase3_loop_diag_count = 0;
-
-				if (phase3_loop_diag_count++ < 16)
-					ereport(LOG,
-							(errmsg("TEMP phase3 loop: phase=%d lms_gen=%llu self_fstate=%d "
-									"applied_new_epoch=%llu local_epoch=%llu cur_epoch=%llu",
-									(int)cluster_current_phase(),
-									(unsigned long long)lms_generation,
-									(int)formation_snapshot.membership.membership_state[cluster_node_id],
-									(unsigned long long)formation_snapshot.applied.new_epoch,
-									(unsigned long long)formation_snapshot.local_epoch,
-									(unsigned long long)
-										cluster_epoch_get_current())));
 			}
 			if (!cluster_authority_readiness_bind_recovery_generation(
 					lms_generation)) {

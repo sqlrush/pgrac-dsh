@@ -1254,24 +1254,6 @@ cluster_grd_serving_authority_rebind_lmon(
 			   != formation->applied.event_id
 		|| pg_atomic_read_u64(&cluster_grd_state->recovery_episode_epoch)
 			   != epoch) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD gate
-		 * decomposition (run125 grd_ok=0 hunt).  Capped; removed before the
-		 * final push. */
-		static int rebind_evt_diag = 0;
-
-		if (rebind_evt_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP grd rebind event gate fail: applied_event_id=%llu "
-							"last_event_id=%llu applied_new_epoch=%llu local=%llu "
-							"cur=%llu episode_epoch=%llu",
-							(unsigned long long)formation->applied.event_id,
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_last_event_id),
-							(unsigned long long)formation->applied.new_epoch,
-							(unsigned long long)epoch,
-							(unsigned long long)cluster_epoch_get_current(),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_episode_epoch))));
 		return false;
 	}
 
@@ -1307,20 +1289,6 @@ cluster_grd_serving_authority_rebind_lmon(
 			   &cluster_grd_state->recovery_event_bitmap_hash) != bitmap_hash
 		|| !cluster_grd_authority_map_is_current(
 			refresh, members_lo, members_hi)) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD hash
-		 * gate decomposition.  Capped; removed before the final push. */
-		static int rebind_hash_diag = 0;
-
-		if (rebind_hash_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP grd rebind hash gate fail: refresh=%llu "
-							"applied_hash=%llu event_hash=%llu map_cur=%d",
-							(unsigned long long)refresh,
-							(unsigned long long)bitmap_hash,
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_event_bitmap_hash),
-							cluster_grd_authority_map_is_current(
-								refresh, members_lo, members_hi))));
 		return false;
 	}
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
@@ -1350,24 +1318,6 @@ cluster_grd_serving_authority_rebind_lmon(
 					&cluster_grd_state->recovery_done_bitmap_hash[i])
 					!= bitmap_hash)
 			&& !join_fence_is_recipient_for(i, epoch)) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind done-key
-			 * gate decomposition.  Capped; removed before the final push. */
-			static int rebind_done_diag = 0;
-
-			if (rebind_done_diag++ < 10)
-				ereport(LOG,
-						(errmsg("TEMP grd rebind done gate fail: node=%d "
-								"done_epoch=%llu want=%llu done_hash=%llu "
-								"want_hash=%llu fence_recipient=%d",
-								i,
-								(unsigned long long)pg_atomic_read_u64(
-									&cluster_grd_state->recovery_done_epoch[i]),
-								(unsigned long long)epoch,
-								(unsigned long long)pg_atomic_read_u64(
-									&cluster_grd_state
-										 ->recovery_done_bitmap_hash[i]),
-								(unsigned long long)bitmap_hash,
-								join_fence_is_recipient_for(i, epoch))));
 			return false;
 		}
 	}
@@ -1451,26 +1401,6 @@ cluster_grd_serving_authority_rebind_leaver(
 		|| !cluster_membership_is_member(cluster_node_id)
 		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
 			   != boot_incarnation) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind head-gate
-		 * decomposition.  Capped; removed before the final push. */
-		static int leaver_rebind_head_diag = 0;
-
-		if (leaver_rebind_head_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind head fail: quorum=%d inc=%llu/%llu "
-							"lms=%llu/%llu is_member=%d admitted=%llu/%llu",
-							cluster_qvotec_in_quorum(),
-							(unsigned long long)
-								cluster_qvotec_get_self_incarnation(),
-							(unsigned long long)boot_incarnation,
-							(unsigned long long)
-								cluster_lms_get_lms_restart_generation(),
-							(unsigned long long)lms_generation,
-							cluster_membership_is_member(cluster_node_id),
-							(unsigned long long)
-								cluster_membership_get_last_admitted_incarnation(
-									cluster_node_id),
-							(unsigned long long)boot_incarnation)));
 		return false;
 	}
 
@@ -1487,22 +1417,6 @@ cluster_grd_serving_authority_rebind_leaver(
 	if (!cluster_clean_leave_node_refuses_writes()
 		|| formation->local_epoch == 0
 		|| formation->local_epoch != cluster_epoch_get_current()) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind event-gate
-		 * decomposition.  Capped; removed before the final push. */
-		static int leaver_rebind_evt_diag = 0;
-
-		if (leaver_rebind_evt_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind event fail: kind=%d new_epoch=%llu "
-							"local=%llu cur=%llu dead_self=%d refuses=%d",
-							(int)formation->applied.reconfig_kind,
-							(unsigned long long)formation->applied.new_epoch,
-							(unsigned long long)formation->local_epoch,
-							(unsigned long long)cluster_epoch_get_current(),
-							(formation->applied.dead_bitmap[cluster_node_id / 8]
-							 >> (cluster_node_id % 8))
-								& 1,
-							cluster_clean_leave_node_refuses_writes())));
 		return false;
 	}
 	epoch = formation->local_epoch;
@@ -1537,18 +1451,6 @@ cluster_grd_serving_authority_rebind_leaver(
 	if (refresh == 0 || bitmap_hash == 0
 		|| !cluster_grd_authority_map_is_current(
 			refresh, members_lo, members_hi)) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind map-gate
-		 * decomposition.  Capped; removed before the final push. */
-		static int leaver_rebind_map_diag = 0;
-
-		if (leaver_rebind_map_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind map fail: refresh=%llu hash=%llu "
-							"map_cur=%d",
-							(unsigned long long)refresh,
-							(unsigned long long)bitmap_hash,
-							cluster_grd_authority_map_is_current(
-								refresh, members_lo, members_hi))));
 		return false;
 	}
 
@@ -1586,32 +1488,6 @@ cluster_grd_serving_authority_rebind_leaver(
 
 	if (!cluster_grd_recovery_authority_is_current(
 			boot_incarnation, lms_generation)) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind stamp
-		 * re-validation decomposition.  Capped; removed before the final
-		 * push. */
-		static int leaver_stamp_diag = 0;
-
-		if (leaver_stamp_diag++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP leaver rebind stamp fail: epoch=%llu cur=%llu "
-							"map_cur=%d is_member=%d admitted=%llu/%llu "
-							"quorum=%d inc=%llu/%llu lms=%llu/%llu",
-							(unsigned long long)epoch,
-							(unsigned long long)cluster_epoch_get_current(),
-							cluster_grd_authority_map_is_current(
-								refresh, members_lo, members_hi),
-							cluster_membership_is_member(cluster_node_id),
-							(unsigned long long)
-								cluster_membership_get_last_admitted_incarnation(
-									cluster_node_id),
-							(unsigned long long)boot_incarnation,
-							cluster_qvotec_in_quorum(),
-							(unsigned long long)
-								cluster_qvotec_get_self_incarnation(),
-							(unsigned long long)boot_incarnation,
-							(unsigned long long)
-								cluster_lms_get_lms_restart_generation(),
-							(unsigned long long)lms_generation)));
 		grd_recovery_authority_clear_seal();
 		return false;
 	}
@@ -2623,61 +2499,6 @@ grd_recovery_barrier_complete(uint64 gen, uint64 episode_epoch)
 	int beid;
 	pid_t self_pid = MyProcPid;
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 L4 hunt): first non-acked backend
-	 * decomposition (change-aware; removed before the final push). */
-	{
-		static int barrier_stall_diag = 0;
-		static int64 last_sig = INT64_MIN;
-		PGPROC *stall_proc = NULL;
-		int stall_beid = 0;
-
-		for (beid = 1; beid <= MaxBackends; beid++) {
-			PGPROC *proc = BackendIdGetProc((BackendId)beid);
-
-			if (proc == NULL)
-				continue;
-			if (proc->pid == 0 || proc->pid == self_pid)
-				continue;
-			if (pg_atomic_read_u32(&proc->cluster_grd_registered_count) == 0)
-				continue;
-			if (pg_atomic_read_u64(&proc->cluster_grd_redeclare_acked) >= gen
-				&& pg_atomic_read_u64(&proc->cluster_grd_redeclare_acked_epoch)
-					   == episode_epoch)
-				continue;
-			stall_proc = proc;
-			stall_beid = beid;
-			break;
-		}
-		if (stall_proc != NULL) {
-			int64 sig = (int64)stall_proc->pid * 16
-				+ (int64)pg_atomic_read_u32(
-					  &stall_proc->cluster_grd_registered_count)
-					  * 4
-				+ (int64)pg_atomic_read_u64(
-					  &stall_proc->cluster_grd_redeclare_acked)
-					  % 4;
-
-			if (barrier_stall_diag++ < 20 || sig != last_sig) {
-				last_sig = sig;
-				ereport(LOG,
-						(errmsg("TEMP grd barrier stall: beid=%d pid=%d "
-								"reg=%u acked=%llu acked_epoch=%llu "
-								"wait_event=%u gen=%llu epoch=%llu",
-								stall_beid, (int)stall_proc->pid,
-								(unsigned)pg_atomic_read_u32(
-									&stall_proc->cluster_grd_registered_count),
-								(unsigned long long)pg_atomic_read_u64(
-									&stall_proc->cluster_grd_redeclare_acked),
-								(unsigned long long)pg_atomic_read_u64(
-									&stall_proc->cluster_grd_redeclare_acked_epoch),
-								(unsigned)pg_atomic_read_u32(
-									&stall_proc->wait_event_info),
-								(unsigned long long)gen,
-								(unsigned long long)episode_epoch)));
-			}
-		}
-	}
-
 	for (beid = 1; beid <= MaxBackends; beid++) {
 		PGPROC *proc = BackendIdGetProc((BackendId)beid);
 
@@ -2776,24 +2597,6 @@ grd_recovery_broadcast_done_key(uint64 epoch, uint64 bitmap_hash)
 			continue;
 		(void)cluster_grd_outbound_enqueue_backend_request((uint32)i, &req, sizeof(req));
 	}
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): DONE broadcast egress
-	 * decomposition (epoch > 0 only — the epoch-0 bootstrap barrier is
-	 * noise).  Capped; removed before the final push. */
-	{
-		static int done_egress_diag = 0;
-
-		if (epoch > 0 && done_egress_diag++ < 12)
-			ereport(LOG,
-					(errmsg("TEMP done egress: self=%d epoch=%llu hash=%llu "
-							"cssd0=%d cssd1=%d fd0=%d fd1=%d",
-							cluster_node_id, (unsigned long long)epoch,
-							(unsigned long long)bitmap_hash,
-							(int)cluster_cssd_get_peer_state(0),
-							(int)cluster_cssd_get_peer_state(1),
-							cluster_ic_tier1_get_peer_fd(0),
-							cluster_ic_tier1_get_peer_fd(1))));
-	}
 }
 
 static void
@@ -2813,12 +2616,6 @@ grd_recovery_broadcast_done(uint64 epoch)
 static uint64 grd_recovery_done_echo_epoch = 0;
 static uint64 grd_recovery_done_echo_hash = 0;
 
-/* TEMP DIAGNOSTIC (RF-ROOT P6 frame-loss hunt): monotonic shmem-visible
- * counters so the inbound processing chain stays observable even when the
- * log pipe drops lines in bursts.  Removed before the final push. */
-static uint64 temp_mark_peer_done_count = 0;
-static uint64 temp_echo_count = 0;
-
 void
 cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap_hash)
 {
@@ -2826,22 +2623,6 @@ cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap
 
 	if (cluster_grd_state == NULL || node < 0 || node >= CLUSTER_MAX_NODES)
 		return;
-	temp_mark_peer_done_count++;
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): DONE ingress (epoch > 1
-	 * only).  Capped; removed before the final push. */
-	{
-		static int done_ingress_diag = 0;
-
-		if (epoch > 1 && done_ingress_diag++ < 12)
-			ereport(LOG,
-					(errmsg("TEMP done ingress: node=%d epoch=%llu hash=%llu "
-							"prev_done=%llu",
-							node, (unsigned long long)epoch,
-							(unsigned long long)dead_bitmap_hash,
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_done_epoch[node]))));
-	}
 
 	/*
 	 * The two accounting axes feed DIFFERENT consumers and must not share
@@ -2911,34 +2692,6 @@ cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap
 			dead_bitmap_hash);
 	}
 
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): authority-axis fill/match
-	 * evidence.  Capped; removed before the final push. */
-	{
-		static int peer_done_diag_count = 0;
-		uint64 auth_epoch;
-		uint64 auth_hash;
-
-		auth_epoch = pg_atomic_read_u64(
-			&cluster_grd_state->recovery_authority_formation_epoch);
-		auth_hash = pg_atomic_read_u64(
-			&cluster_grd_state->recovery_authority_bitmap_hash);
-		if (peer_done_diag_count++ < 10)
-			ereport(LOG,
-					(errmsg("TEMP peer done: node=%d epoch=%llu hash=%llu "
-							"auth_epoch=%llu auth_hash=%llu auth_match=%d "
-							"self_done=%llu/%llu",
-							node, (unsigned long long)epoch,
-							(unsigned long long)dead_bitmap_hash,
-							(unsigned long long)auth_epoch,
-							(unsigned long long)auth_hash,
-							dead_bitmap_hash != 0 && epoch == auth_epoch
-								&& dead_bitmap_hash == auth_hash,
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_done_epoch[cluster_node_id]),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_done_bitmap_hash[cluster_node_id]))));
-	}
-
 	episode_bitmap_hash = pg_atomic_read_u64(&cluster_grd_state->recovery_event_bitmap_hash);
 
 	/*
@@ -2998,7 +2751,6 @@ cluster_grd_recovery_mark_peer_done(int32 node, uint64 epoch, uint64 dead_bitmap
 			{
 				grd_recovery_done_echo_epoch = epoch;
 				grd_recovery_done_echo_hash = dead_bitmap_hash;
-				temp_echo_count++;
 				grd_recovery_broadcast_done_key(epoch, dead_bitmap_hash);
 			}
 		}
@@ -3089,35 +2841,6 @@ grd_recovery_authority_request_current(uint64 request_generation)
 
 		if (!(boot_ok && lmsgen_ok && refresh_ok && epoch_ok && progress_ok
 			  && cssd_ok && quorum_ok && inc_ok && lms_match_ok
-			  && admitted_ok && selfmember_ok && map_ok)) {
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-check
-			 * decomposition of the authority-barrier request-current
-			 * head gate (cast-leg terminal result=2 hunt).  Capped;
-			 * removed before the final push. */
-			static int req_current_diag = 0;
-
-			if (req_current_diag++ < 16)
-				ereport(LOG,
-						(errmsg("TEMP request-current fail: phase=%d "
-								"boot_ok=%d lmsgen_ok=%d refresh_ok=%d "
-								"epoch_ok=%d(%llu/%llu) progress_ok=%d "
-								"cssd_ok=%d quorum_ok=%d inc_ok=%d "
-								"lms_match_ok=%d admitted_ok=%d "
-								"selfmember_ok=%d map_ok=%d "
-								"lms_rcv_ready=%d is_member=%d sj_adm=%d",
-								(int)cluster_current_phase(), boot_ok,
-								lmsgen_ok, refresh_ok, epoch_ok,
-								(unsigned long long)
-									cluster_epoch_get_current(),
-								(unsigned long long)epoch, progress_ok,
-								cssd_ok, quorum_ok, inc_ok, lms_match_ok,
-								admitted_ok, selfmember_ok, map_ok,
-								cluster_lms_is_recovery_ready(),
-								cluster_membership_is_member(cluster_node_id),
-								cluster_reconfig_self_join_admitted())));
-		}
-		if (!(boot_ok && lmsgen_ok && refresh_ok && epoch_ok && progress_ok
-			  && cssd_ok && quorum_ok && inc_ok && lms_match_ok
 			  && admitted_ok && selfmember_ok && map_ok))
 			return false;
 	}
@@ -3196,7 +2919,9 @@ cluster_grd_recovery_authority_lmon_tick(void)
 		|| pg_atomic_read_u64(
 			   &cluster_grd_state->recovery_authority_terminal_generation)
 			   >= request_generation)
+	{
 		return;
+	}
 	if (!grd_recovery_authority_request_current(request_generation)) {
 		grd_recovery_authority_publish_terminal(
 			request_generation, GRD_RECOVERY_AUTHORITY_TERMINAL_FAILED);
@@ -3225,40 +2950,6 @@ cluster_grd_recovery_authority_lmon_tick(void)
 			= pg_atomic_add_fetch_u64(
 				&cluster_grd_state->recovery_redeclare_generation, 1);
 		(void)grd_recovery_broadcast_redeclare();
-	}
-
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): authority-barrier LMON-side
-	 * progress.  Capped; removed before the final push. */
-	{
-		static int auth_tick_diag_count = 0;
-
-		if (auth_tick_diag_count++ < 80)
-			ereport(LOG,
-					(errmsg("TEMP authority tick: req=%llu terminal=%llu "
-							"epoch=%llu hash=%llu local_barrier=%d "
-							"done0=%llu/%llu done1=%llu/%llu members=%llu/%llu "
-							"markpd=%llu echo=%llu",
-							(unsigned long long)request_generation,
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state
-									->recovery_authority_terminal_generation),
-							(unsigned long long)epoch,
-							(unsigned long long)bitmap_hash,
-							grd_recovery_barrier_complete(
-								grd_recovery_authority_lmon_redeclare_generation,
-								epoch),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_authority_done_epoch[0]),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_authority_done_hash[0]),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_authority_done_epoch[1]),
-							(unsigned long long)pg_atomic_read_u64(
-								&cluster_grd_state->recovery_authority_done_hash[1]),
-							(unsigned long long)members_lo,
-							(unsigned long long)members_hi,
-							(unsigned long long)temp_mark_peer_done_count,
-							(unsigned long long)temp_echo_count)));
 	}
 
 	if (grd_recovery_barrier_complete(
@@ -3363,32 +3054,6 @@ cluster_grd_recovery_authority_barrier_wait(
 		|| !cluster_membership_is_member(cluster_node_id)
 		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
 			   != boot_incarnation) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the barrier
-		 * head gate.  Capped; removed before the final push. */
-		static int barrier_head_diag_count = 0;
-
-		if (barrier_head_diag_count++ < 6)
-			ereport(LOG,
-					(errmsg("TEMP barrier head fail: in_progress=%d(%s) quorum=%d "
-							"inc_match=%d lms_match=%d is_member=%d "
-							"admitted==boot=%d last_event_id=%llu done_self=%llu",
-							cluster_grd_recovery_in_progress(),
-							cluster_grd_recovery_state_name(
-								cluster_grd_recovery_state_value()),
-							cluster_qvotec_in_quorum(),
-							cluster_qvotec_get_self_incarnation()
-								== boot_incarnation,
-							cluster_lms_get_lms_restart_generation()
-								== lms_generation,
-							cluster_membership_is_member(cluster_node_id),
-							cluster_membership_get_last_admitted_incarnation(
-								cluster_node_id) == boot_incarnation,
-							(unsigned long long)
-								cluster_grd_recovery_last_event_id(),
-							(unsigned long long)
-								pg_atomic_read_u64(
-									&cluster_grd_state
-										->recovery_done_epoch[cluster_node_id]))));
 		return false;
 	}
 
@@ -3408,111 +3073,45 @@ cluster_grd_recovery_authority_barrier_wait(
 	if ((epoch != formation->applied.new_epoch
 		 && !(formation->self_join_admitted
 			  && epoch > formation->applied.new_epoch))
-		|| epoch != cluster_epoch_get_current()) {
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): epoch-axis gate.
-		 * Capped; removed before the final push. */
-		static int barrier_epoch_diag_count = 0;
-
-		if (barrier_epoch_diag_count++ < 6)
-			ereport(LOG,
-					(errmsg("TEMP barrier epoch fail: local=%llu applied=%llu "
-							"current=%llu",
-							(unsigned long long)epoch,
-							(unsigned long long)formation->applied.new_epoch,
-							(unsigned long long)
-								cluster_epoch_get_current())));
+		|| epoch != cluster_epoch_get_current())
 		return false;
-	}
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose every silent
-	 * soft-fail gate between the head gate and the seal request.  Capped;
-	 * removed before the final push. */
-	{
-		static int barrier_gate_diag_count = 0;
 
-		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
-			bool formation_member
-				= formation->membership.membership_state[i]
-				  == CLUSTER_MEMBER_MEMBER;
-			bool live_declared = cluster_conf_lookup_node(i) != NULL;
-			bool live_member = cluster_membership_is_member(i);
+	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
+		bool formation_member
+			= formation->membership.membership_state[i]
+			  == CLUSTER_MEMBER_MEMBER;
 
-			if (formation_member
-				&& (cluster_conf_lookup_node(i) == NULL
-					|| !cluster_membership_is_member(i))) {
-				if (barrier_gate_diag_count++ < 12)
-					ereport(LOG,
-							(errmsg("TEMP barrier gate fail: gate=membership-formation "
-									"node=%d fstate=%d ldeclared=%d lmember=%d",
-									i, (int)formation->membership.membership_state[i],
-									live_declared, live_member)));
-				return false;
-			}
-			if (!formation_member && cluster_conf_lookup_node(i) != NULL
-				&& cluster_membership_is_member(i)) {
-				if (barrier_gate_diag_count++ < 12)
-					ereport(LOG,
-							(errmsg("TEMP barrier gate fail: gate=membership-live "
-									"node=%d fstate=%d ldeclared=%d lmember=%d",
-									i, (int)formation->membership.membership_state[i],
-									live_declared, live_member)));
-				return false;
-			}
-			if (!formation_member)
-				continue;
-			if (i < 64)
-				members_lo |= UINT64_C(1) << i;
-			else
-				members_hi |= UINT64_C(1) << (i - 64);
-		}
-		if (!cluster_grd_authority_member(
-				members_lo, members_hi, cluster_node_id)) {
-			if (barrier_gate_diag_count++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP barrier gate fail: gate=authority-member "
-								"self=%d members_lo=%llu members_hi=%llu",
-								cluster_node_id,
-								(unsigned long long)members_lo,
-								(unsigned long long)members_hi)));
+		if (formation_member
+			&& (cluster_conf_lookup_node(i) == NULL
+				|| !cluster_membership_is_member(i)))
 			return false;
-		}
-		refresh = pg_atomic_read_u64(&cluster_grd_state->master_map_refresh_count);
-		if (refresh == 0
-			|| !cluster_grd_authority_map_is_current(
-				refresh, members_lo, members_hi)) {
-			if (barrier_gate_diag_count++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP barrier gate fail: gate=map-current "
-								"refresh=%llu members_lo=%llu members_hi=%llu",
-								(unsigned long long)refresh,
-								(unsigned long long)members_lo,
-								(unsigned long long)members_hi)));
+		if (!formation_member && cluster_conf_lookup_node(i) != NULL
+			&& cluster_membership_is_member(i))
 			return false;
-		}
-		bitmap_hash = cluster_grd_dead_bitmap_hash(
-			formation->applied.dead_bitmap);
-		if (bitmap_hash == 0) {
-			if (barrier_gate_diag_count++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP barrier gate fail: gate=bitmap-hash-zero "
-								"epoch=%llu",
-								(unsigned long long)epoch)));
-			return false;
-		}
-		if (pg_atomic_read_u64(
-				&cluster_grd_state->recovery_authority_request_generation)
-			> pg_atomic_read_u64(
-				&cluster_grd_state->recovery_authority_terminal_generation)) {
-			if (barrier_gate_diag_count++ < 12)
-				ereport(LOG,
-						(errmsg("TEMP barrier gate fail: gate=request-pending "
-								"request=%llu terminal=%llu",
-								(unsigned long long)pg_atomic_read_u64(
-									&cluster_grd_state->recovery_authority_request_generation),
-								(unsigned long long)pg_atomic_read_u64(
-									&cluster_grd_state->recovery_authority_terminal_generation))));
-			return false;
-		}
+		if (!formation_member)
+			continue;
+		if (i < 64)
+			members_lo |= UINT64_C(1) << i;
+		else
+			members_hi |= UINT64_C(1) << (i - 64);
 	}
+	if (!cluster_grd_authority_member(
+			members_lo, members_hi, cluster_node_id))
+		return false;
+	refresh = pg_atomic_read_u64(&cluster_grd_state->master_map_refresh_count);
+	if (refresh == 0
+		|| !cluster_grd_authority_map_is_current(
+			refresh, members_lo, members_hi))
+		return false;
+	bitmap_hash = cluster_grd_dead_bitmap_hash(
+		formation->applied.dead_bitmap);
+	if (bitmap_hash == 0)
+		return false;
+	if (pg_atomic_read_u64(
+			&cluster_grd_state->recovery_authority_request_generation)
+		> pg_atomic_read_u64(
+			&cluster_grd_state->recovery_authority_terminal_generation))
+		return false;
 
 	request_generation = pg_atomic_add_fetch_u64(
 		&cluster_grd_state->recovery_authority_request_sequence, 1);
@@ -3543,29 +3142,6 @@ cluster_grd_recovery_authority_barrier_wait(
 		&cluster_grd_state->recovery_authority_members[0]);
 	prev_members_hi = pg_atomic_read_u64(
 		&cluster_grd_state->recovery_authority_members[1]);
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): seal-request post.  Capped;
-	 * removed before the final push. */
-	{
-		static int request_post_diag_count = 0;
-
-		if (request_post_diag_count++ < 8)
-			ereport(LOG,
-					(errmsg("TEMP barrier request posted: gen=%llu epoch=%llu "
-							"hash=%llu refresh=%llu members=%llu/%llu boot=%llu "
-							"lms_gen=%llu prev=%llu/%llu/%llu/%llu",
-							(unsigned long long)request_generation,
-							(unsigned long long)epoch,
-							(unsigned long long)bitmap_hash,
-							(unsigned long long)refresh,
-							(unsigned long long)members_lo,
-							(unsigned long long)members_hi,
-							(unsigned long long)boot_incarnation,
-							(unsigned long long)lms_generation,
-							(unsigned long long)prev_epoch,
-							(unsigned long long)prev_hash,
-							(unsigned long long)prev_members_lo,
-							(unsigned long long)prev_members_hi)));
-	}
 	grd_recovery_authority_clear_seal();
 	pg_atomic_write_u64(
 		&cluster_grd_state->recovery_authority_request_boot_incarnation,
@@ -3616,19 +3192,6 @@ cluster_grd_recovery_authority_barrier_wait(
 			pg_read_barrier();
 			tresult = pg_atomic_read_u32(
 				&cluster_grd_state->recovery_authority_terminal_result);
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt).  Capped; removed
-			 * before the final push. */
-			{
-				static int terminal_diag_count = 0;
-
-				if (terminal_diag_count++ < 8)
-					ereport(LOG,
-							(errmsg("TEMP barrier terminal: gen=%llu result=%u current=%d",
-									(unsigned long long)request_generation,
-									tresult,
-									cluster_grd_recovery_authority_is_current(
-										boot_incarnation, lms_generation))));
-			}
 			return tresult == GRD_RECOVERY_AUTHORITY_TERMINAL_SUCCESS
 				&& cluster_grd_recovery_authority_is_current(
 					boot_incarnation, lms_generation);
@@ -3641,24 +3204,6 @@ cluster_grd_recovery_authority_barrier_wait(
 			|| cluster_qvotec_get_self_incarnation() != boot_incarnation
 			|| cluster_lms_get_lms_restart_generation() != lms_generation)
 		{
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): inner-wait early
-			 * break reason.  Capped; removed before the final push. */
-			static int inner_break_diag_count = 0;
-
-			if (inner_break_diag_count++ < 8)
-				ereport(LOG,
-						(errmsg("TEMP barrier inner break: gen=%llu req_changed=%d "
-								"epoch_moved=%d quorum=%d inc_changed=%d lms_changed=%d",
-								(unsigned long long)request_generation,
-								pg_atomic_read_u64(
-									&cluster_grd_state->recovery_authority_request_generation)
-									!= request_generation,
-								cluster_epoch_get_current() != epoch,
-								!cluster_qvotec_in_quorum(),
-								cluster_qvotec_get_self_incarnation()
-									!= boot_incarnation,
-								cluster_lms_get_lms_restart_generation()
-									!= lms_generation)));
 			break;
 		}
 		pg_usleep(1000L);
@@ -4362,28 +3907,6 @@ cluster_grd_recovery_lmon_tick(void)
 		if (grd_recovery_consume_new_event_mid_episode())
 			return;
 
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): WAIT_BARRIER stall
-		 * decomposition.  Capped; removed before the final push. */
-		{
-			static int wait_barrier_diag_count = 0;
-
-			if (wait_barrier_diag_count++ < 8)
-				ereport(LOG,
-						(errmsg("TEMP grd wait_barrier: dir=%u barrier=%d "
-								"scan=%d epoch=%llu cur=%llu cursor=%d "
-								"scan_epoch=%llu scan_done=%d nbuffers=%d",
-								(unsigned)pg_atomic_read_u32(
-									&cluster_grd_state->recovery_direction),
-								grd_recovery_barrier_complete(gen, episode_epoch),
-								grd_block_redeclare_scan_complete(episode_epoch),
-								(unsigned long long)episode_epoch,
-								(unsigned long long)
-									cluster_epoch_get_current(),
-								grd_block_redeclare_cursor,
-								(unsigned long long)grd_block_redeclare_epoch,
-								grd_block_redeclare_done, NBuffers)));
-		}
-
 		/* spec-4.7 D2 — advance the survivor block re-declare scan one chunk
 		 * while the GES rebind barrier is still pending (worker-centric, runs
 		 * in this tick;  epoch-coherent via the guard just above). */
@@ -4637,20 +4160,6 @@ cluster_grd_recovery_lmon_tick(void)
 				pg_atomic_fetch_add_u64(&cluster_grd_state->join_block_views_rebuilt_count, 1);
 			} else {
 				pg_atomic_fetch_add_u64(&cluster_grd_state->remaster_done_count, 1);
-			}
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): episode completion.
-			 * Capped; removed before the final push. */
-			{
-				static int episode_done_diag_count = 0;
-
-				if (episode_done_diag_count++ < 8)
-					ereport(LOG,
-							(errmsg("TEMP grd episode done: dir=%u epoch=%llu hash=%llu",
-									(unsigned)pg_atomic_read_u32(
-										&cluster_grd_state->recovery_direction),
-									(unsigned long long)episode_epoch,
-									(unsigned long long)pg_atomic_read_u64(
-										&cluster_grd_state->recovery_event_bitmap_hash))));
 			}
 			pg_atomic_write_u32(&cluster_grd_state->recovery_direction,
 								(uint32)GRD_REMASTER_DIR_NONE);
