@@ -279,3 +279,55 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
 - 补记 7 的 ②（phase3 失败清理路径覆盖）：bind preseal 失败 →
   clear_matching(bind_preseal_fail) → 循环 re-begin，phase3 deadline
   兜底——已由 startup_phase 25/25 与 t243 4 绿实证。
+
+---
+🔴 [DSH-WATCH 08-18 01:24] 疑似卡住：连续 2 个扫描周期（约 30 分钟）HEAD/工作区/t243 均无任何变化。
+   last: HEAD=5e9c94121d uncommitted=0 t243=33ok@00:38
+   DSH 建议：若确在等待（长跑批/思考），忽略本条；若在绕圈，请回到 P6-RESUME.md 最短路或读本条之前 DSH 的复审补记。
+
+---
+🔴 [DSH-WATCH 08-18 02:09] 疑似卡住：连续 2 个扫描周期（约 30 分钟）HEAD/工作区/t243 均无任何变化。
+   last: HEAD=5e9c94121d uncommitted=1 t243=33ok@00:38
+   DSH 建议：若确在等待（长跑批/思考），忽略本条；若在绕圈，请回到 P6-RESUME.md 最短路或读本条之前 DSH 的复审补记。
+
+---
+
+## 复审补记 8（2026-08-18 06:55，P6 完成核验）
+
+### 8.1 过夜提交复审（c9922062a7..5e9c94121d，6 提交）
+
+- 58447e38b9：补记 6 P2 收紧（obs_inc > admitted）+ 增量 13 单测 ✓；
+- 增量 16（join COMMIT-stage ungated drain，移出 join-drive 门，对齐增量 5
+  PREPARE 先例）：fix = 栅栏提交后 pending-join serving 漂移导致 poll 饿死，
+  论证自洽 ✓；
+- 增量 17（owner-rejoin OPEN 分支放行同主更新化身）：head 门 OPEN 分支要求
+  owner_inc > admitted（陈旧进程 fail-closed），proof set（claim CRC + JCMK
+  majority == admitted）不变，CAS 单调重盖 ✓。L10 场景 4× 绿为行为验证。
+- c32810bebc TEMP 清理（137 点/17 文件，-2125/+42）：+42 均为"还原被 diag
+  包裹的产品行"，无夹带逻辑 ✓。
+- 5e9c94121d P6-RESUME v5：如实记录 4× 33/33 + 10 个 pre-existing 单测失败。
+
+### 8.2 P6 完成门核验
+
+| 门 | 状态 |
+|---|---|
+| t243 绿 | ✅ 33/33 ×4（run-55/57/59/60）；run-60 在 TEMP 清理后构建上 73s PASS |
+| 聚焦单测 | ✅ Flash 报 grd 96/96、recovery_duty 18/18、startup_phase 25/25、clean_leave 11/11、ges 25/25；reconfig 保留 4 个已记录 pre-existing（DSH 独立全量复跑进行中，bash-198） |
+| 全量构建 | ✅ run-60 的 make install 即 TEMP 清理树上的全量后端构建 |
+| TEMP 清零 | ✅ c32810bebc 删除全部 137 处探针 |
+| push | ✅ 公共仓库 origin/rf-root-dev 已 == HEAD（ls-remote 实锤） |
+
+### 8.3 遗留（如实）
+
+- reconfig 套件 4 个 pre-existing 失败（增量 5-8 staleness 类）未修——记录
+  在案，非 P6 门内（原合同即"聚焦单测绿"）。
+- DSH 独立单测复跑未出结果前，P6 保持"准完成"；结果落定后本补记收尾。
+
+### 8.4 P6 最终裁定：全部门项通过 ✅
+
+- t243 33/33 ×4（含 TEMP 清理后构建的 run-60，73s PASS）；
+- 聚焦单测绿（DSH 独立复跑 232 二进制：仅 reconfig 75/76/77/92 +
+  r4_static_model 9-13 + r4_activation_record 50 失败，与 P6-RESUME v5
+  记录完全一致，均 pre-existing，与本会话无关）；
+- 全量构建绿（run-60 make install）；TEMP 清零（137 点）；公共仓库已推送。
+- P6 完成。遗留仅上述 10 个 pre-existing 断言，供后续路线处理。
