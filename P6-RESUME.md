@@ -21,11 +21,11 @@
 | `555890d2df` | **第 1 层修复：回退 S1 半个准入**（幽灵 holder 根源）。增量 3 |
 | `4eea30478d` | **第 2 层修复：qvotec baseline 抬到 clean-departed epoch floor**（重启后 fence token 停摆 PANIC）。增量 4 |
 | `4d7d1ab1ac`/`f3046c3db9` | RFROOT-PLAN 修正 |
-| `8e0c…`（多个 TEMP） | rollover/obs/selfwrite/barrier-stall 探针 |
-| `8e5e…` 等 | **第 3 层：join PREPARE drain 移出 drive 门**（增量 5）→ JOIN_PENDING 可发布、GRD JOIN episode 可启动 |
-| `4fe8…` 等 | **第 4 层：驱逐并入 JOIN_PENDING dead 集**（增量 6）→ episode 不再等 joiner 的 DONE（循环死锁破） |
-| `3e9a…` | **第 5 层：bootstrap 重入清 clean-departed**（增量 7）→ 重入节点的真实死亡不再被 CL-I13 掩码吞掉（fail-stop 可发布） |
-| `2c21…` | **第 6 层：rollover 门扩到 DEAD 态**（增量 8）→ 死带竞态下 join 也有 runtime 腿 |
+| `1262a9aaa2`/`24b38e5482`/`75d95d271d`/`df9b4c109a`/`cb4ef5a360` | TEMP：qvotec 矩阵/selfwrite、rollover 全分解、GRD barrier stall |
+| `6ab005bfb8` | **第 3 层：join PREPARE drain 移出 drive 门**（增量 5）→ JOIN_PENDING 可发布、GRD JOIN episode 可启动 |
+| `30382420b6` | **第 4 层：驱逐并入 JOIN_PENDING dead 集**（增量 6）→ episode 不再等 joiner 的 DONE（循环死锁破） |
+| `f29641e763` | **第 5 层：bootstrap 重入清 clean-departed**（增量 7）→ 重入节点的真实死亡不再被 CL-I13 掩码吞掉（fail-stop 可发布） |
+| `ef7c9d8ced` | **第 6 层：rollover 门扩到 DEAD 态**（增量 8）→ 死带竞态下 join 也有 runtime 腿 |
 
 ## 3. 当前卡点（最后一层，L4 收尾）
 
