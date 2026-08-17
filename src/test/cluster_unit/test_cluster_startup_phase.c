@@ -1024,6 +1024,58 @@ UT_TEST(test_rf_a1_readiness_is_monotone_and_generation_bound)
 	UT_ASSERT(cluster_authority_readiness_managed());
 }
 
+UT_TEST(test_rf_a1_transport_stale_clear_skips_mid_bind_gen_zero)
+{
+	ClusterFenceAuthorityProof authority;
+	ClusterFormationSnapshotV1 formation;
+
+	reset_phase_service_fixture(true);
+	/* The preseal gates require the aux services READY (the full startup
+	 * sequence normally publishes these). */
+	phase_test_cssd_status = CLUSTER_CSSD_READY;
+	phase_test_qvotec_status = CLUSTER_QVOTEC_READY;
+	/* Strict forward transitions only (prev + 1 == target). */
+	cluster_advance_phase(CLUSTER_PHASE_0_BASE);
+	cluster_advance_phase(CLUSTER_PHASE_1_CLUSTER);
+	cluster_advance_phase(CLUSTER_PHASE_2_LOCK);
+	cluster_advance_phase(CLUSTER_PHASE_3_RECOVERY);
+
+	/* begin(): STARTING binding with lms_generation = 0 — the postmaster's
+	 * mid-bind window (the LMS process does not exist yet, so the live
+	 * generation is bound one loop iteration later). */
+	memset(&authority, 0, sizeof(authority));
+	memset(&formation, 0, sizeof(formation));
+	formation.membership.membership_state[0] = CLUSTER_MEMBER_MEMBER;
+	formation.membership.last_admitted_incarnation[0] = 11;
+	formation.reserved[0] = phase_test_formation_epoch;
+	UT_ASSERT(cluster_authority_readiness_begin(1, &authority, &formation));
+	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
+				 (int)CLUSTER_AUTHORITY_STARTING);
+
+	/* The transport check fails on the unbound generation, but the binding
+	 * is mid-bind, NOT stale: the stale-clear is gated on
+	 * lms_generation != 0 (STOP-01 increment 15), so a peer DONE ingress
+	 * during the window cannot destroy the STARTING binding. */
+	UT_ASSERT(!cluster_recovery_transport_is_current());
+	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
+				 (int)CLUSTER_AUTHORITY_STARTING);
+
+	/* Once the loop binds the generation, the same check passes... */
+	UT_ASSERT(cluster_authority_readiness_bind_recovery_generation(
+		phase_test_lms_generation));
+	UT_ASSERT(cluster_recovery_transport_is_current());
+	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
+				 (int)CLUSTER_AUTHORITY_STARTING);
+
+	/* ... and a BOUND generation whose formation drifted from the live
+	 * formation IS stale: the transport check clears it (fail-closed). */
+	phase_test_classification_current = false;
+	UT_ASSERT(!cluster_recovery_transport_is_current());
+	UT_ASSERT_EQ((int)cluster_authority_readiness_get(),
+				 (int)CLUSTER_AUTHORITY_OFF);
+	phase_test_classification_current = true;
+}
+
 UT_TEST(test_rf_a1_missing_authoritative_grd_stops_before_recovery)
 {
 	bool caught_fatal = false;
@@ -1301,6 +1353,7 @@ main(void)
 	UT_RUN(test_rf_a2_serving_rebinds_only_after_lmon_closes_recovery);
 	UT_RUN(test_rf_a1_finalize_never_runs_self_fence_or_active_from_postmaster);
 	UT_RUN(test_rf_a1_readiness_is_monotone_and_generation_bound);
+	UT_RUN(test_rf_a1_transport_stale_clear_skips_mid_bind_gen_zero);
 	UT_RUN(test_rf_a1_missing_authoritative_grd_stops_before_recovery);
 	UT_RUN(test_rf_a1_refreshes_formation_if_proof_expires_during_lms_start);
 	UT_RUN(test_rf_a1_unconfigured_registry_keeps_legacy_phase4_order);

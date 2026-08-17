@@ -3289,7 +3289,34 @@ cluster_reconfig_publish_prepared_join_commit(void)
 
 	if (!join_commit_stage.fence_ready
 		|| cluster_epoch_get_current() != join_commit_stage.event.new_epoch)
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): publish attempt gate.
+		 * Capped; removed before the final push. */
+		{
+			static int join_publish_attempt_diag = 0;
+
+			if (join_publish_attempt_diag++ < 40)
+				ereport(LOG,
+						(errmsg("TEMP join publish attempt: fence_ready=%d "
+								"cur_epoch=%llu new_epoch=%llu expected_last=%llu "
+								"last_applied=%llu fstate=%d pending=%d",
+								join_commit_stage.fence_ready ? 1 : 0,
+								(unsigned long long)
+									cluster_epoch_get_current(),
+								(unsigned long long)
+									join_commit_stage.event.new_epoch,
+								(unsigned long long)
+									join_commit_stage.expected_last_event_id,
+								(unsigned long long)
+									ReconfigShmem->last_applied.event_id,
+								(int)cluster_membership_get_state(
+									join_commit_stage.node_id),
+								dead_bitmap_test_bit(
+									ReconfigShmem->pending_join_bitmap,
+									join_commit_stage.node_id))));
+		}
 		return false;
+	}
 
 	LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
 	memcpy(expected_dead, ReconfigShmem->last_applied.dead_bitmap,
@@ -3310,6 +3337,7 @@ cluster_reconfig_publish_prepared_join_commit(void)
 		&& memcmp(expected_fenced,
 				  join_commit_stage.fence_marker.fenced_dead_bitmap,
 				  sizeof(expected_fenced)) == 0) {
+		/* fall through to publish */
 		cluster_write_fence_authority_cache_invalidate();
 		cluster_membership_set_state(join_commit_stage.node_id,
 								 CLUSTER_MEMBER_MEMBER);
@@ -3326,6 +3354,45 @@ cluster_reconfig_publish_prepared_join_commit(void)
 	}
 	LWLockRelease(&ReconfigShmem->lock);
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): publish decision decomposition.
+	 * Capped; removed before the final push. */
+	{
+		static int join_publish_diag = 0;
+
+		if (join_publish_diag++ < 40)
+			ereport(LOG,
+					(errmsg("TEMP join publish: node=%d publish=%d fstate=%d "
+							"pending=%d last_match=%d dead_match=%d fenced_match=%d "
+							"cur_epoch=%llu new_epoch=%llu fence_ready=%d",
+							join_commit_stage.node_id, publish ? 1 : 0,
+							(int)cluster_membership_get_state(
+								join_commit_stage.node_id),
+							dead_bitmap_test_bit(
+								ReconfigShmem->pending_join_bitmap,
+								join_commit_stage.node_id)
+								? 1
+								: 0,
+							ReconfigShmem->last_applied.event_id
+									== join_commit_stage.expected_last_event_id
+								? 1
+								: 0,
+							memcmp(expected_dead,
+								   join_commit_stage.event.dead_bitmap,
+								   sizeof(expected_dead)) == 0
+								? 1
+								: 0,
+							memcmp(expected_fenced,
+								   join_commit_stage.fence_marker
+									   .fenced_dead_bitmap,
+								   sizeof(expected_fenced)) == 0
+								? 1
+								: 0,
+							(unsigned long long)
+								cluster_epoch_get_current(),
+							(unsigned long long)
+								join_commit_stage.event.new_epoch,
+							join_commit_stage.fence_ready ? 1 : 0)));
+	}
 	if (!publish)
 		return false;
 	if (cluster_reconfig_is_clean_departed(join_commit_stage.node_id))
@@ -3347,11 +3414,36 @@ cluster_reconfig_poll_join_fence_stage(TimestampTz now)
 	ClusterMarkerPollResult pr;
 
 	if (!cluster_marker_async_is_submitted(&join_commit_stage.fence_async)) {
-		if (!cluster_write_fence_submit_marker_async(
-				&join_commit_stage.fence_async,
-				&join_commit_stage.fence_marker,
-				CLUSTER_MARKER_KIND_JOIN_COMMITTED,
-				join_commit_stage.node_id, now))
+		bool fence_submit_ok;
+
+		fence_submit_ok = cluster_write_fence_submit_marker_async(
+			&join_commit_stage.fence_async,
+			&join_commit_stage.fence_marker,
+			CLUSTER_MARKER_KIND_JOIN_COMMITTED,
+			join_commit_stage.node_id, now);
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): fence marker submit
+		 * outcome + the join-marker mailbox state (the likely stuck
+		 * point).  Capped; removed before the final push. */
+		{
+			static int fence_submit_diag = 0;
+
+			if (fence_submit_diag++ < 40)
+				ereport(LOG,
+						(errmsg("TEMP fence submit: node=%d ok=%d "
+								"jreq=%llu jcomp=%llu jbusy=%d",
+								join_commit_stage.node_id,
+								fence_submit_ok ? 1 : 0,
+								(unsigned long long)pg_atomic_read_u64(
+									&ReconfigShmem->join_marker_request_seq),
+								(unsigned long long)pg_atomic_read_u64(
+									&ReconfigShmem->join_marker_completion_seq),
+								cluster_marker_async_mailbox_busy(
+									&ReconfigShmem->join_marker_request_seq,
+									&ReconfigShmem->join_marker_completion_seq)
+									? 1
+									: 0)));
+		}
+		if (!fence_submit_ok)
 			return true;
 		return true;
 	}
@@ -3531,7 +3623,7 @@ cluster_reconfig_poll_join_commit_stage(void)
 					&& cluster_recovery_duty_key_compare(&oid, &osnap.identity)
 						   == CLUSTER_RECOVERY_DUTY_COMPARE_EXACT;
 				claim_crc_ok = oclaim.crc == oid.thread_claim_crc32c;
-				if (revalidate_diag_owner++ < 12)
+				if (revalidate_diag_owner++ < 100)
 					ereport(LOG,
 							(errmsg("TEMP owner gate: node=%d root=%d lc=%d "
 									"owner_inc=%llu admitted=%llu lineage=%llu "
@@ -3554,7 +3646,7 @@ cluster_reconfig_poll_join_commit_stage(void)
 				ReconfigShmem->pending_join_bitmap,
 				join_commit_stage.node_id);
 			LWLockRelease(&ReconfigShmem->lock);
-			if (revalidate_diag++ < 12)
+			if (revalidate_diag++ < 100)
 				ereport(LOG,
 						(errmsg("TEMP commit revet: node=%d slot_ok=%d obs_inc=%llu "
 								"stage_inc=%llu vet=%d owner_ok=%d ms=%d "
@@ -3603,6 +3695,26 @@ cluster_reconfig_drive_joins(int coordinator, int32 control_target,
 
 	if (state == NULL)
 		return;
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 L5 hunt): which stage holds the drive.
+	 * Capped; removed before the final push. */
+	{
+		static int drive_stage_diag = 0;
+
+		if (drive_stage_diag++ < 60)
+			ereport(LOG,
+					(errmsg("TEMP drive: prep_staged=%d commit_staged=%d "
+							"prep_submitted=%d commit_submitted=%d",
+							join_prepare_stage.async.has_staged_event ? 1 : 0,
+							join_commit_stage.async.has_staged_event ? 1 : 0,
+							cluster_marker_async_is_submitted(
+								&join_prepare_stage.async)
+								? 1
+								: 0,
+							cluster_marker_async_is_submitted(
+								&join_commit_stage.async)
+								? 1
+								: 0)));
+	}
 	if (cluster_reconfig_poll_join_prepare_stage())
 		return;
 	if (cluster_reconfig_poll_join_commit_stage())
@@ -5753,6 +5865,23 @@ cluster_reconfig_lmon_tick(void)
 	 * and is a no-op when nothing is staged.
 	 */
 	(void)cluster_reconfig_poll_join_prepare_stage();
+
+	/*
+	 * RF-ROOT P6 (specs-local STOP-01 increment 16): drain an in-flight
+	 * join COMMIT stage UNGATED, for the same circularity one stage later.
+	 * The L5 restore boot stages the commit (JCMK majority-durable, re-vet
+	 * passed, epoch pre-bumped, fence marker submitted) and then the
+	 * join-drive gate closes: the pending-join formation (node1 JOINING)
+	 * drifts from the serving binding the evict-prior rebind re-stamped
+	 * (node1 ABSENT), so ordinary_actions_allowed=0 and drive_joins — and
+	 * with it the commit-stage poll that would publish the already-
+	 * authorized JOIN_COMMITTED event — is never called.  The stage only
+	 * completes an already-staged, majority-durable publication; every
+	 * safety gate (re-vet, owner, epoch, predecessor, bitmaps) lives inside
+	 * the poll, so the ungated drain cannot open a new admission decision.
+	 * No-op when nothing is staged.
+	 */
+	(void)cluster_reconfig_poll_join_commit_stage();
 
 	/*
 	 * §3.1 + F11: build the raw CSSD DEAD bitmap, filtering out un-declared

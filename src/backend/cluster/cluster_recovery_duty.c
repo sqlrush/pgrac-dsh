@@ -344,7 +344,18 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 			 * incarnation + write-once claim CRC + durable JCMK majority). */
 			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-			&& identity.origin_owner_incarnation != admitted_incarnation)
+			/* RF-ROOT P6 (specs-local STOP-01 increment 17): the OPEN
+			 * branch admits the SAME OWNER's newer incarnation too.  When
+			 * the previous clean stop's THREAD_CLEAN_CLOSE was denied in
+			 * a serving-stale window (the shutdown checkpoint's CF(X) S1
+			 * refuses), the root stays OPEN with the older owner; the
+			 * fresh process (monotonic newer incarnation + write-once
+			 * claim CRC + durable JCMK majority — the exact CLOSED-branch
+			 * proof set) reopens it via the CAS with expected_lifecycle =
+			 * OPEN.  owner_inc > admitted (a stale older process) stays
+			 * fail-closed. */
+			&& (identity.origin_owner_incarnation > admitted_incarnation
+				|| identity.root_lineage_seq == UINT64_MAX))
 		|| (snapshot.lifecycle
 				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& (identity.root_lineage_seq == UINT64_MAX
@@ -362,8 +373,13 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		return false;
 	/* A previous attempt may have completed the single ROOT CAS and then lost
 	 * the local membership publish race.  Exact OPEN+owner plus the same direct
-	 * majority JCMK is the already-satisfied gate; never advance lineage twice. */
-	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+	 * majority JCMK is the already-satisfied gate; never advance lineage twice.
+	 * (STOP-01 increment 17: an OPEN root whose owner is OLDER than the
+	 * admitted incarnation is not the already-satisfied state — the CAS below
+	 * must re-stamp the owner, or the next reopen would repeat the same
+	 * rejection.) */
+	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& identity.origin_owner_incarnation == admitted_incarnation)
 		return true;
 
 	memset(&patch, 0, sizeof(patch));
