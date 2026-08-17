@@ -5685,6 +5685,19 @@ cluster_reconfig_lmon_tick(void)
 	failstop_stage_handled = cluster_reconfig_poll_failstop_fence_stage();
 
 	/*
+	 * RF-ROOT P6 (specs-local STOP-01 增量 5): drain an in-flight join
+	 * PREPARE stage UNGATED, exactly like the fail-stop fence stage above.
+	 * The P04 fast-rejoin eviction stages JOIN_PENDING without a fail-stop
+	 * event;  gating its drain behind the join-drive (which requires the
+	 * serving rebind, which requires the GRD JOIN episode, which requires
+	 * the JOIN_PENDING event) is a circular deadlock that strands the
+	 * joiner until 53R61 (observed: L4 crash-rejoin).  The drain only
+	 * completes an already-staged publication — no new admission decision —
+	 * and is a no-op when nothing is staged.
+	 */
+	(void)cluster_reconfig_poll_join_prepare_stage();
+
+	/*
 	 * §3.1 + F11: build the raw CSSD DEAD bitmap, filtering out un-declared
 	 * peers.  Self is alive by construction (it is running this tick, in
 	 * quorum).  Lock-free snapshot — the membership-state maintenance and the
