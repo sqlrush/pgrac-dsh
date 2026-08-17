@@ -538,3 +538,47 @@ quorum 丢失——run118 被 seed TRAP 污染后的状态，需干净复跑重�
 3. seed clean-close 的 CF(S) stale-hold drain 失败（CLOSED 跳过）L5 前复核。
 4. 全绿后：删全部 TEMP（fence-block diag / contract1 marker / cssd 探针 +
    存量 TEMP）→ focused unit + build 闭包 → immutable commit + push。
+
+---
+
+## cast 腿 pair-boot 楔死结案：THREAD_OPEN CF(S) 四门不对称（2026-08-17 18:30，本轮会话）
+
+### 取证（cfx 探针 run-16/17，双侧日志实锤）
+
+上一会话把三个变体 B1/B2/B3 归为独立楔死；本轮 cfx 探针证明 cast 腿
+pair-boot（铸根后二次编队）的实际楔死链是**单根因**：
+
+1. 方案 D 的 phase3 bind/barrier 循环在 postmaster 里重试 THREAD_OPEN
+   （STOP-01 冻结 reason）；其 STRONG 根读需要 coordinated CF(S)
+   （master=对端）。
+2. S1 已按方案 D 放宽（`AmStartupProcess() || !IsUnderPostmaster`），但
+   S4 请求侧门 / S6 释放门 / master 侧 REQUEST 入站+drain 门 / grant 门
+   仍只认 StartupProcess / seal → 同一 acquire 四种裁决：
+   - node1（joiner，remote master）：S4 拒 r=18（`cfx lock: mode=5 r=18`，
+     shard phase 实为 NORMAL——门拒，非冻结）→ THREAD_OPEN 永不落地；
+   - node0（coordinator，local master）：fast path 授予、S6 释放拒
+     （`cfx rel: gate=0 startup=0`）→ RELEASE_UNCERTAIN(27) + GRD 残留
+     幽灵 CF(S) holder；
+   - 幽灵 holder → node0 checkpointer 的 W2 CF(X)（本地）与 node1 stats
+     的 W2 ACTIVE CF(X)（远程，r=13 连续超时）楔死 → 双侧 phase4
+     "Cluster Stats did not publish READY" FATAL → start_pair bail。
+3. 于是：B2（GRD seal 过期 → serving 不发布）与"W2 checkpoint 挂 ~25s"
+   都是同一幽灵-holder/门不对称的下游症状；B3（join-drive runtime=0）是
+   §3.4 正常 fail-closed，非楔死主因；B1（CSSD 冻结）本轮未复现（两侧
+   CSSD 循环全程健康 iters=26）。
+
+### 修复（2aeb583506，specs-local STOP-01 增量 3 已落）
+
+- S4 origin + S6 release：recovery 准入参数统一为
+  `AmStartupProcess() || !IsUnderPostmaster`（与 S1 一致）。
+- master 侧 REQUEST 入站/drain/grant：CF(S)/WALR(X) allowlist 请求在
+  phase3 以 components-only transport 证明放行；其余 opcode 的 seal 前置
+  不变。
+- allowlist、OK_NATIVE 拒绝、fail-closed 语义一字未动。
+
+### 后续
+
+- t243 重跑验证铸根后二次编队；若 ok 3+ 通过，进入 L5 腿（其前置复核 =
+  增量 2 观察项：seed clean-close CF(S) stale-hold drain 失败，CLOSED
+  跳过 → L5 clean-reopen 链受影响）。
+- cfx 探针（4501cb8b1c）与存量 TEMP 在最终 GREEN 前一并删除。
