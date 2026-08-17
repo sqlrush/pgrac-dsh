@@ -1253,3 +1253,47 @@ engage-first 序不变（复用既有函数）。
 - 铸根后二次 pair-boot：W2 CF(X) 双侧即时授予、checkpointer 无楔死；
   t243 ok 3 → L5 → L6/L8/L9/L10 全绿（L5 的 THREAD_OPEN 执行者增量单独
   验证）；postmaster 侧无 CF 获取日志。
+
+## 增量 4：qvotec fence baseline 以 clean-departed epoch-floor 抬升（2026-08-17，修重启后 fence token 停摆 PANIC）
+
+### 背景事实（t243 实测证据，2026-08-17）
+
+- 铸根后的二次 pair-boot（增量 3 回退后 CF(X) 已即时授予）暴露下一层：
+  node0 的 W2 checkpoint 在 recovery-anchor 发布的 CritSection 内 PANIC
+  （`epoch_cur=1 authorized=0 self_fenced=0 engaged=1`，fence-block 诊断）。
+- 因果链：① node1 干净停机时 5.13 handoff COMMITTED（epoch 0→1，按
+  冻结 D3 不提交 fence marker——"nothing to fence"）；② 重启后
+  `cluster_clean_leave_rebuild_from_disks` 凭 leave-slot 的 durable COMMITTED
+  marker 抬升 epoch floor 到 1；③ 但 last_applied（易失 ReconfigShmem）随重启
+  归零，qvotec leader 的 baseline（spec-4.12b D2，epoch 源 = last_applied）
+  只写出 epoch 0；④ 双方 token 刷新到 authorized=0，而 live epoch=1 →
+  精确 == 判据下所有 fence-gated 写 fail-closed，W2 anchor 在 CritSection
+  PANIC → 双侧 phase4 FATAL。
+- 94791471d5 的 deferral 只覆盖活体窗口（last_applied 尚在），重启窗口
+  结构性漏掉。
+
+### 合同（增量 4，spec-4.12b D2 的 epoch 源收窄）
+
+1. `qvotec_build_baseline_marker`：baseline 的 fence_epoch 取
+   `max(applied.new_epoch, max_i(clean_departed_epoch[i]))`；dead set /
+   generation / event_id / issuer 不变。clean-leave 从不 fence 任何节点
+   （冻结 spec-5.13 D3），所以把 epoch 抬到 leave floor 时 dead set 维持
+   applied 值是正确的 fence tuple。
+2. 单调性由既有守卫兜底：floor 只随 leave commit 抬升；若 durable 权威
+   高于 would-be baseline（既有 `durable_has_authority` 检查）仍不覆盖。
+3. 不变：qvotec 仍是 token 唯一写者；token 发布协议（lease-last）与
+   double-monotonic guard 不动；self-fence 语义不动。
+
+### 安全论证
+
+- 抬升只发生在 durable COMMITTED leave marker 已被 quorum-majority 证明的
+  epoch（floor 的来源本身是 durable 事实），不会虚构高于实际会籍的 epoch。
+- FAIL_STOP 路径不受影响：任何真实 fence 都有更高 epoch 的 fence marker
+  submit → applied 先行跟进 → baseline 取 max 不改变其 tuple。
+- 若 applied 已包含更高 epoch（含 join/readmission），max 不抬升——绝不
+  用 leave floor 覆盖更新的 applied 事实。
+
+### 验收
+
+- 铸根后二次 pair-boot 无 fence PANIC；W2 checkpoint 正常完成；双侧
+  phase4 → running；t243 ok 3 → L5 → L6/L8/L9/L10 全绿。

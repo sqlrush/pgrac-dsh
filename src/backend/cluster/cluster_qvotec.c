@@ -2206,6 +2206,32 @@ qvotec_build_baseline_marker(ClusterFenceMarker *out)
 											applied.coordinator_node_id);
 	}
 
+	/* RF-ROOT P6 (specs-local STOP-01 增量 4): the clean-departed epoch
+	 * floor is a durable membership fact (leave-slot COMMITTED markers) that
+	 * survives restart, while the applied ReconfigEvent it names does not
+	 * (volatile last_applied).  spec-5.13 fences nothing on a clean leave,
+	 * so raising the baseline's fence_epoch to the floor with the applied
+	 * dead set unchanged is the correct fence tuple;  without it the token
+	 * stays at the pristine/applied epoch below the floor and every
+	 * fence-gated write PANICs against the live epoch (observed: cast-leg
+	 * second-boot W2 anchor PANIC, epoch_cur=1 authorized=0).  Monotone:
+	 * the floor only rises via leave commits, which never fence a node;
+	 * the durable-authority guard above still vetoes any regression. */
+	{
+		uint64 floor_epoch = out->fence_epoch;
+		int f;
+
+		for (f = 0; f < CLUSTER_MAX_NODES; f++) {
+			uint64 departed_epoch
+				= cluster_reconfig_get_clean_departed_epoch(f);
+
+			if (departed_epoch > floor_epoch)
+				floor_epoch = departed_epoch;
+		}
+		if (floor_epoch > out->fence_epoch)
+			out->fence_epoch = floor_epoch;
+	}
+
 	/* P0-3 upper-bound: the applied epoch can never exceed the live epoch. */
 	Assert(out->fence_epoch <= cluster_epoch_get_current());
 }
