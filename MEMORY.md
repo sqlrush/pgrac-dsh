@@ -73,6 +73,9 @@ Cache Fusion / GES / SCN / 集群恢复 / Active Data Guard）。
 - **DSH 新角色（user 2026-08-17 指令）：审核编码会话（flash 模型）的代码，
   发现问题立即投递到 `~/pgrac-dsh/DSH-REVIEW.md`（专用审核通道，与编码会话自维护的
   RFROOT-PLAN.md 分离避免双写冲突）；审核合同六条见 DSH-REVIEW.md 头部。**
+- **DSH 定时监控（user 2026-08-17 指令）**：后台脚本 `.dsh-watch.sh`（job `bash-171`）
+  每 900 秒扫描编码会话进度，写入 `.dsh-watch.log`；连续 2 周期（约 30 分钟）无任何
+  变化即向 DSH-REVIEW.md 投递 🔴 疑似卡住告警；DSH 在用户询问时读日志做分析协助。
 
 - 本地：`~/pgrac-dsh` = git 仓库（main = 上游代码完整副本，59,657 提交）
 - 我的 GitHub 仓库：**https://github.com/sqlrush/pgrac-dsh**（公开）
