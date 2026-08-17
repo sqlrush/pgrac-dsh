@@ -1824,3 +1824,59 @@ L5 restore boot 的 phase3 循环在 begin_ok 后 ~13ms 内必死：
   在 ~1 tick 内完成；ok 20/21 及 L6/L8/L9/L10 全绿；cluster_unit
   新增 `test_self_join_admitted_no_pgproc_never_blocks_on_reconfig_lock`
   全绿。
+
+## 增量 16：join COMMIT 阶段排水移出 join-drive 门（2026-08-17，修 L5 restore boot 的 JOIN 永不发布）
+
+### 背景事实（run-45→53 实测证据链，2026-08-17 23:07-23:56）
+
+L5 restore boot（clean stop + 快速重开）的 phase3 权威 barrier 永不收敛
+（done0=0/0 恒空），60s bail。逐层实锤（探针全链）：
+
+1. 幸存者 node0 的 authority tick 在自身 phase3 terminal 后早退（
+   `terminal >= request`），serving rebind（`cluster_grd_serving_authority_
+   rebind_lmon`）重贴新复合体（(N, {leaver})）但不 bump request generation
+   ——tick 永不恢复广播，合成 done 槽位 + echo 是唯一线上载体（run-47
+   "grd rebind OK ... req_gen=1 terminal=1"）。
+2. node0 的 rebind 复合体是驱逐 episode 的 {leaver}；node1 的 request 是
+   pristine empty——auth_match=0 永不匹配（run-47 19.303 "peer done ...
+   auth_match=0"）。唯一能产生 (N, empty) 复合体的路径是 **JOIN episode
+   闭合后的 rebind**（run-53 16.954→18.600：L4 走通此链）。
+3. **L5 restore 的 JOIN 发布被 join-drive 门卡死**（run-52/53 探针）：
+   - 23.614 commit 决策 → marker 多数（jreq=10）→ revet 全过（无 diag）→
+     prepare（pre-bump）→ **fence marker 提交成功（"TEMP fence submit:
+     ok=1 jbusy=0"）**——一切就绪；
+   - **随后 join-drive 门关闭**（`ordinary_actions_allowed=0`——serving
+     rebind 失败：apply-join 后 node1=JOINING 的活形成与 rebind 重贴的
+     ABSENT 绑定漂移）→ `cluster_reconfig_drive_joins` 不再被调用 →
+     `poll_join_commit_stage`（含 fence 轮询 + publish）**永不运行** →
+     JOIN 事件永不发布 → GRD 无 join episode → 无 (N, empty) rebind →
+     node1 的 phase3 barrier 永远饿死。
+   - L4 能过：L4 是 control-root 门控 rejoin（control=1 → fast_rejoin_
+     control_actions=1 → 门仍开）；L5 是 ordinary rejoin（control=-1）。
+
+### 合同（增量 16）
+
+1. `cluster_reconfig_lmon_tick` 在既有 PREPARE 无门排水（增量 5，line
+   5791）旁，**同样无门排水 `cluster_reconfig_poll_join_commit_stage()`**
+   ——完成一个已 staged、JCMK 多数持久化的发布；不产生任何新准入决策。
+2. 不变：poll 内部全部安全门（revet/vet/owner/epoch/predecessor/bitmap）、
+   commit_member 的 clean-leave 门（staging 期）、publish 的 epoch+predecessor
+   门、judge/timeout/workload 全不动。
+
+### 安全论证
+
+- 与增量 5 同构：poll 只推进已授权 stage（JCMK 多数 + publish-proof 是
+  准入证据），不是新决策；无门只让既有安全逻辑运行。join-drive 门的
+  serving 前置（ordinary_actions_allowed）与 COMMIT 排水无因果关系——
+  门的存在只服务于"serving 未就绪不启动新 join"，而 stage 已启动。
+- P2（clean-leave 串行）：staging 在 commit_member 首门拒绝 leave 期间
+  的 join；pre-bump 已在 prepare 完成（epoch 已动），leave 侧对称拒绝
+  在 join 挂起时启动（既有注释契约）。排水不破坏该互斥。
+- 发布后 membership 变更仍走 publish 的精确 predecessor/epoch 门，
+  幂等重试不变。
+
+### 验收
+
+- t243 L5 restore boot：fence 提交后 publish 立刻执行 → JOIN_COMMITTED
+  事件 → GRD join episode (N, empty) → rebind (N, empty) → node1 的
+  done0 被 echo/广播盖写 → phase3 收敛 → ok 20/21；L6/L8/L9/L10 全绿。
