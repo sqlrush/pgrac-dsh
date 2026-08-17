@@ -541,44 +541,45 @@ quorum 丢失——run118 被 seed TRAP 污染后的状态，需干净复跑重�
 
 ---
 
-## cast 腿 pair-boot 楔死结案：THREAD_OPEN CF(S) 四门不对称（2026-08-17 18:30，本轮会话）
+## cast 腿 pair-boot 楔死结案：逐层剥洋葱（2026-08-17 18:50，本轮会话，持续更新）
 
-### 取证（cfx 探针 run-16/17，双侧日志实锤）
+### 第 1 层：THREAD_OPEN CF(S) 半个准入 → 幽灵 holder（已修，555890d2df）
 
-上一会话把三个变体 B1/B2/B3 归为独立楔死；本轮 cfx 探针证明 cast 腿
-pair-boot（铸根后二次编队）的实际楔死链是**单根因**：
+cfx 探针证明上一会话把 S1 recovery 准入放宽为 postmaster 是**半个放宽**
+（S4/S6/master 门仍 StartupProcess-only）：node0 postmaster 的 THREAD_OPEN
+CF(S) 本地获取成功、S6 释放被拒 → RELEASE_UNCERTAIN + GRD 幽灵 CF(S)
+holder → 双侧 W2 CF(X) 楔死 → phase4 Stats-READY FATAL。曾尝试把四门全部
+放宽——node1 postmaster 随即在远程 GES wire 路径（无 PGPROC 阻塞锁/CV）
+静默死亡，违反冻结 A1 §8.3。**最终：全部回退到冻结 AD-023 §4
+StartupProcess-only 面**（postmaster CF call count 归零，I1 验收）；
+THREAD_OPEN 的 PGPROC 执行者设计推迟到 L5 腿单独落增量。
 
-1. 方案 D 的 phase3 bind/barrier 循环在 postmaster 里重试 THREAD_OPEN
-   （STOP-01 冻结 reason）；其 STRONG 根读需要 coordinated CF(S)
-   （master=对端）。
-2. S1 已按方案 D 放宽（`AmStartupProcess() || !IsUnderPostmaster`），但
-   S4 请求侧门 / S6 释放门 / master 侧 REQUEST 入站+drain 门 / grant 门
-   仍只认 StartupProcess / seal → 同一 acquire 四种裁决：
-   - node1（joiner，remote master）：S4 拒 r=18（`cfx lock: mode=5 r=18`，
-     shard phase 实为 NORMAL——门拒，非冻结）→ THREAD_OPEN 永不落地；
-   - node0（coordinator，local master）：fast path 授予、S6 释放拒
-     （`cfx rel: gate=0 startup=0`）→ RELEASE_UNCERTAIN(27) + GRD 残留
-     幽灵 CF(S) holder；
-   - 幽灵 holder → node0 checkpointer 的 W2 CF(X)（本地）与 node1 stats
-     的 W2 ACTIVE CF(X)（远程，r=13 连续超时）楔死 → 双侧 phase4
-     "Cluster Stats did not publish READY" FATAL → start_pair bail。
-3. 于是：B2（GRD seal 过期 → serving 不发布）与"W2 checkpoint 挂 ~25s"
-   都是同一幽灵-holder/门不对称的下游症状；B3（join-drive runtime=0）是
-   §3.4 正常 fail-closed，非楔死主因；B1（CSSD 冻结）本轮未复现（两侧
-   CSSD 循环全程健康 iters=26）。
+### 第 2 层：重启后 fence token 停摆 PANIC（已修，4eea30478d）
 
-### 修复（2aeb583506，specs-local STOP-01 增量 3 已落）
+CF(X) 授予后暴露下一层：node0 W2 checkpoint 的 recovery-anchor 发布在
+CritSection PANIC（epoch_cur=1 authorized=0）。根因：clean-leave 的
+durable COMMITTED marker 在重启时抬升 epoch floor 到 1，但 last_applied
+（易失）归零 → qvotec leader baseline（spec-4.12b D2，epoch 源 =
+last_applied）写出 epoch 0 → token 停 0 vs live 1。修：baseline 的
+fence_epoch 取 max(applied.new_epoch, clean_departed_epoch[])（"nothing to
+fence" 不变式）。→ cast 腿全通（ok 1-16），进入 L4。
 
-- S4 origin + S6 release：recovery 准入参数统一为
-  `AmStartupProcess() || !IsUnderPostmaster`（与 S1 一致）。
-- master 侧 REQUEST 入站/drain/grant：CF(S)/WALR(X) allowlist 请求在
-  phase3 以 components-only transport 证明放行；其余 opcode 的 seal 前置
-  不变。
-- allowlist、OK_NATIVE 拒绝、fail-closed 语义一字未动。
+### 第 3 层：L4 crash-rejoin 循环死锁（增量 5 已落，验证中）
 
-### 后续
+L4 kill -9 → 重启 1.4s < CSSD 死带 3s → survivor 无 DEAD 边 → 无
+fail-stop；P04 快速重启回滚门（observed incarnation 超 floor，7s 后触发）
+驱逐旧化身 → epoch 1→2（JOIN_PENDING staged）。随后循环死锁：join-drive
+门 = ordinary（serving rebind @epoch2 的 GRD seal 重验）→ rebind 需
+JOIN 方向 GRD episode 关闭 → episode 需 JOIN_PENDING applied → 其
+prepare-marker drain 由 drive 驱动（被同一门挡）。修（增量 5）：join
+prepare drain 移出 drive 门、在 LMON tick 内无门驱动（镜像 fail-stop
+fence stage 先例）。预期链：JOIN_PENDING 发布 → episode → rebind →
+drive → COMMITTED + JCMK → joiner 自认 → phase3 完成。
 
-- t243 重跑验证铸根后二次编队；若 ok 3+ 通过，进入 L5 腿（其前置复核 =
-  增量 2 观察项：seed clean-close CF(S) stale-hold drain 失败，CLOSED
-  跳过 → L5 clean-reopen 链受影响）。
-- cfx 探针（4501cb8b1c）与存量 TEMP 在最终 GREEN 前一并删除。
+### 遗留（后续层，边跑边剥）
+
+- L5 腿：THREAD_OPEN 的 PGPROC 执行者（增量 3 已注明，单独增量）；
+  seed clean-close CF(S) stale-hold drain 观察项（增量 2）。
+- B1（CSSD 冻结）本轮未复现；B3（join-drive runtime=0）确认为 §3.4
+  正常 fail-closed，非缺陷。
+- cfx/obs/selfwrite/rollover 探针 + 存量 TEMP：最终 GREEN 前全删。
