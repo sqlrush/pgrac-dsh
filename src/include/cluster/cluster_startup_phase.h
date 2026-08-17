@@ -318,6 +318,7 @@ extern bool cluster_authority_readiness_publish_recovery(uint64 lms_generation);
 extern bool cluster_authority_readiness_publish_serving(void);
 extern void cluster_authority_readiness_clear(void);
 extern bool cluster_recovery_transport_is_current(void);
+extern bool cluster_recovery_transport_components_current(void); /* RF-ROOT P6 */
 extern bool cluster_recovery_authority_is_current(void);
 extern bool cluster_serving_ready_is_current(void);
 extern bool cluster_authority_serving_rebind_lmon(void);

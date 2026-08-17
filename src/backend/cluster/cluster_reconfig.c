@@ -4827,7 +4827,27 @@ cluster_reconfig_note_self_admitted(uint64 admitted_epoch)
 	}
 
 	LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
-	cluster_write_fence_authority_cache_invalidate();
+	/*
+	 * RF-ROOT P6 (crash-rejoin): invalidate the fence-authority cache ONLY
+	 * when this call actually mutates admission state.  The qvotec self-admit
+	 * detection re-runs note_self_admitted on EVERY poll while the COMMITTED
+	 * join marker remains proven; the unconditional invalidation therefore
+	 * bumped the cache sequence every ~1s forever, starving the phase-3
+	 * live-formation witness's cached revalidate_nowait (its build can prove
+	 * READY but the revalidation never matches) — phase 3 wedged in
+	 * wait_for_live_formation until the phase3_timeout on every rejoiner.
+	 * An idempotent re-run (already admitted ∧ already MEMBER ∧ no
+	 * replacement episode) mutates nothing, so the cache must stay valid.
+	 * The replacement branch below still invalidates (it can flip
+	 * self_join_admitted back to 0), and first admission / state changes
+	 * still invalidate through this same gate.
+	 */
+	if (!ReconfigShmem->self_join_admitted
+		|| cluster_membership_get_state(cluster_node_id)
+			   != CLUSTER_MEMBER_MEMBER
+		|| cluster_reconfig_has_replacement_episode(
+			&ReconfigShmem->replacement_episode))
+		cluster_write_fence_authority_cache_invalidate();
 	/* Close the check/use race with a concurrent replacement publisher. */
 	if (cluster_reconfig_has_replacement_episode(
 			&ReconfigShmem->replacement_episode)) {
@@ -4838,11 +4858,43 @@ cluster_reconfig_note_self_admitted(uint64 admitted_epoch)
 		LWLockRelease(&ReconfigShmem->lock);
 		return;
 	}
+	/*
+	 * RF-ROOT P6 (crash-rejoin): publish the admitted incarnation floor for
+	 * SELF before flipping MEMBER.  The coordinator's commit_member records
+	 * it on the survivor; without the joiner-side mirror the live-formation
+	 * witness's owner floor (last_admitted_incarnation == 0) stays unproven
+	 * forever on a rejoiner and phase 3 can never leave wait_for_live_formation
+	 * (the witness comment's "LMON publishes the exact admitted-incarnation
+	 * floor" transient).  Monotonic-max: a stale lower value never regresses.
+	 */
+	cluster_membership_record_admitted(cluster_node_id,
+								   cluster_qvotec_get_self_incarnation());
 	cluster_membership_set_state(cluster_node_id, CLUSTER_MEMBER_MEMBER);
 	ReconfigShmem->self_join_admitted = 1;
 	ReconfigShmem->self_join_failed = 0;
 	ReconfigShmem->self_join_deadline_us = 0;
 	LWLockRelease(&ReconfigShmem->lock);
+}
+
+/*
+ * cluster_reconfig_self_join_admitted -- RF-ROOT P6.
+ *
+ *	Lock-shared read of the durable self-join admission flag.  The
+ *	recovery-transport components predicate (crash-rejoin DONE ingress)
+ *	uses it as the membership proof while the LMON self-state byte can
+ *	transiently read JOINING under the boot-decided latch.
+ */
+bool
+cluster_reconfig_self_join_admitted(void)
+{
+	bool admitted;
+
+	if (ReconfigShmem == NULL)
+		return false;
+	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+	admitted = ReconfigShmem->self_join_admitted != 0;
+	LWLockRelease(&ReconfigShmem->lock);
+	return admitted;
 }
 
 /*
@@ -5279,6 +5331,27 @@ cluster_reconfig_offpath_rejoin_tick(void)
 					(errmsg("cluster membership: node %d shared-CF fast-rejoin "
 							"admission and re-declare complete — boot fence lifted",
 							cluster_node_id)));
+		} else {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): lift-gate
+			 * decomposition.  Change-aware; removed before the final push. */
+			static int lift_diag_count = 0;
+			static int lift_last_sig = -1;
+			int lsig = (offpath_fast_rejoin_active_local ? 100 : 0)
+				+ (ReconfigShmem->self_join_admitted ? 10 : 0)
+				+ (cluster_grd_join_view_rebuilt() ? 1 : 0);
+
+			if (lsig != lift_last_sig) {
+				lift_last_sig = lsig;
+				if (lift_diag_count++ < 12)
+					ereport(LOG,
+							(errmsg("TEMP boot lift gate: fast_active=%d sj_adm=%d "
+									"view_rebuilt=%d done0=%llu",
+									offpath_fast_rejoin_active_local ? 1 : 0,
+									(int)ReconfigShmem->self_join_admitted,
+									cluster_grd_join_view_rebuilt() ? 1 : 0,
+									(unsigned long long)cluster_grd_recovery_done_epoch_for(
+										0))));
+			}
 		}
 		return; /* once per incarnation (LMON-local) */
 	}
@@ -5661,6 +5734,22 @@ cluster_reconfig_lmon_tick(void)
 		else if (ReconfigShmem->self_join_admitted
 				 && !ReconfigShmem->self_join_failed
 				 && (cluster_online_join
+					 /*
+					  * RF-ROOT P6 (crash-rejoin): a durably admitted
+					  * shared-CF fast rejoiner keeps self MEMBER while the
+					  * boot-decided latch is still held.  The admission is
+					  * the membership proof (quorum-majority COMMITTED
+					  * marker + publish-proof); the epoch-independent
+					  * boot fence stays armed and keeps self-home blocks
+					  * RECOVERING until the re-declare barrier completes,
+					  * so no cold-serve window opens.  Demoting self to
+					  * JOINING here instead deadlocks the rejoin: the
+					  * phase-3 recovery-authority barrier's request check
+					  * and the GES transport gate both read the live
+					  * membership byte, and the re-declare ingress that
+					  * would lift the latch is exactly what they gate.
+					  */
+					 || offpath_fast_rejoin_active_local
 					 || (self_floor_authority
 						 && cluster_grd_offpath_boot_decided()))
 				 && cluster_reconfig_publish_self_current_floor_locked(
@@ -5668,7 +5757,28 @@ cluster_reconfig_lmon_tick(void)
 			/* Exact helper already published MEMBER. */
 		}
 		else
+		{
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): self-state JOINING
+			 * flip decomposition.  Capped; removed before the final push. */
+			static int join_flip_diag_count = 0;
+
+			if (join_flip_diag_count++ < 12)
+				ereport(LOG,
+						(errmsg("TEMP join flip: sj_adm=%d sj_failed=%d online=%d "
+								"offpath_active=%d boot_decided=%d floor_auth=%d "
+								"floor_inc=%llu qvotec_inc=%llu cur_state=%d",
+								(int)ReconfigShmem->self_join_admitted,
+								(int)ReconfigShmem->self_join_failed,
+								cluster_online_join ? 1 : 0,
+								offpath_fast_rejoin_active_local ? 1 : 0,
+								cluster_grd_offpath_boot_decided() ? 1 : 0,
+								self_floor_authority ? 1 : 0,
+								(unsigned long long)self_floor_incarnation,
+								(unsigned long long)
+									cluster_qvotec_get_self_incarnation(),
+								(int)cluster_membership_get_state(self_id))));
 			cluster_membership_set_state(self_id, CLUSTER_MEMBER_JOINING);
+		}
 
 		for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 			ClusterMembershipState ms;

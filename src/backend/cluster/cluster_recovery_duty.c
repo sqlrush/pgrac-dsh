@@ -505,23 +505,148 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 	if (f2->prebump_sync_active != 0 || !f2->self_join_admitted
 		|| f2->self_join_failed
 		|| formation_bitmap_nonempty(f2->pending_join_bitmap)
-		|| f2->applied.reconfig_kind == RECONFIG_KIND_JOIN_PENDING
-		|| f2->local_epoch != f2->applied.new_epoch)
+		|| f2->applied.reconfig_kind == RECONFIG_KIND_JOIN_PENDING)
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt).  Capped; removed before
+		 * the final push. */
+		static int unstable_diag_count = 0;
+
+		if (unstable_diag_count++ < 40)
+			ereport(LOG,
+					(errmsg("TEMP witness unstable: prebump=%d self_join_adm=%d "
+							"self_join_failed=%d pending_join=%d applied_kind=%d "
+							"local_epoch=%llu applied_new_epoch=%llu "
+							"applied_event_id=%llu applied_dead_self=%d",
+							(int)f2->prebump_sync_active,
+							(int)f2->self_join_admitted,
+							(int)f2->self_join_failed,
+							formation_bitmap_nonempty(f2->pending_join_bitmap),
+							(int)f2->applied.reconfig_kind,
+							(unsigned long long)f2->local_epoch,
+							(unsigned long long)f2->applied.new_epoch,
+							(unsigned long long)f2->applied.event_id,
+							formation_bitmap_has_node(f2->applied.dead_bitmap,
+													  (int32)origin_thread - 1))));
+		return CLUSTER_FORMATION_WITNESS_UNSTABLE;
+	}
+	/*
+	 * RF-ROOT P6 (crash-rejoin): the settled-epoch gate.  A rejoiner NEVER
+	 * advances its last_applied past the pre-crash event (AD-023 §9.2.3:
+	 * the IC carries no ReconfigEvent and the JCMK has no event_id, so the
+	 * JOIN_COMMITTED cannot be mirrored joiner-side).  Its formation is
+	 * still settled once self-join admission has run: the durable
+	 * quorum-majority COMMITTED marker + publish-proof adopted the epoch
+	 * forward (local_epoch strictly above the stale applied epoch), and the
+	 * expected marker logic below already treats an empty applied event as
+	 * the BASELINE form.  Without this arm the witness can only turn READY
+	 * when some UNRELATED later reconfig lands — phase 3 wedges for the
+	 * whole phase3_timeout on every crash-rejoin.
+	 */
+	if (f2->local_epoch != f2->applied.new_epoch
+		&& !(f2->self_join_admitted
+			 && f2->local_epoch > f2->applied.new_epoch))
 		return CLUSTER_FORMATION_WITNESS_UNSTABLE;
 	if (authority->total_disk_count == 0
 		|| authority->agree_disk_count <= authority->total_disk_count / 2
 		|| !cluster_fence_marker_valid_v1(&authority->marker))
 		return CLUSTER_FORMATION_WITNESS_MARKER_UNPROVEN;
 	formation_expected_marker(f2, &expected);
-	if (!cluster_fence_marker_valid_v1(&expected)
-		|| !cluster_fence_marker_tuple_equal(&authority->marker, &expected))
+	/*
+	 * RF-ROOT P6 (crash-rejoin): the expected/authority marker tuple gate is
+	 * UNVERIFIABLE on a rejoiner.  The joiner's applied event is empty
+	 * (AD-023 §9.2.3), so the expected marker is the initial BASELINE
+	 * {epoch 0, event_id 0}, while the durable majority marker is the
+	 * join-commit BASELINE {admitted epoch, JOIN_COMMITTED event_id} —
+	 * an event_id the joiner can never learn (the IC carries no
+	 * ReconfigEvent and the JCMK has no event_id).  The tuple inequality is
+	 * therefore permanent, and the witness can only turn READY when an
+	 * UNRELATED later reconfig lands (observed: the exact tick of the next
+	 * fail-stop).  The durable proof this gate re-verifies is ALREADY held
+	 * when self_join_admitted is set: the qvotec admission path proved a
+	 * quorum-majority COMMITTED join marker plus the publish-proof against
+	 * the durable fence chain before setting it (the same proof the
+	 * write-fence supersede_by_admit relies on).  The majority + marker
+	 * VALIDITY gate just above still runs, so a corrupt / minority durable
+	 * state fails closed; only the identity comparison is waived under the
+	 * admission proof, and only while the adopted epoch is strictly newer
+	 * than the stale applied epoch.
+	 */
+	if ((!f2->self_join_admitted
+		 || f2->local_epoch <= f2->applied.new_epoch)
+		&& (!cluster_fence_marker_valid_v1(&expected)
+			|| !cluster_fence_marker_tuple_equal(&authority->marker, &expected)))
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): marker-proven sub-
+		 * decomposition.  Capped; removed before the final push. */
+		static int marker_diag_count = 0;
+
+		if (marker_diag_count++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP witness marker fail: exp_kind=%d exp_epoch=%llu "
+							"exp_event_id=%llu exp_dead_self=%d auth_kind=%d "
+							"auth_epoch=%llu auth_event_id=%llu auth_dead_self=%d "
+							"auth_valid=%d disks=%d/%d",
+							(int)expected.marker_kind,
+							(unsigned long long)expected.fence_epoch,
+							(unsigned long long)expected.fence_event_id,
+							formation_bitmap_has_node(expected.fenced_dead_bitmap,
+													  (int32)origin_thread - 1),
+							(int)authority->marker.marker_kind,
+							(unsigned long long)authority->marker.fence_epoch,
+							(unsigned long long)authority->marker.fence_event_id,
+							formation_bitmap_has_node(
+								authority->marker.fenced_dead_bitmap,
+								(int32)origin_thread - 1),
+							cluster_fence_marker_valid_v1(&authority->marker),
+							authority->agree_disk_count,
+							authority->total_disk_count)));
 		return CLUSTER_FORMATION_WITNESS_MARKER_UNPROVEN;
+	}
 
 	origin_node = (int32)origin_thread - 1;
 	if (f2->membership.membership_state[origin_node] != CLUSTER_MEMBER_MEMBER
 		|| f2->membership.last_admitted_incarnation[origin_node] == 0
 		|| formation_bitmap_has_node(f2->excluded_bitmap, origin_node))
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): owner-mismatch sub-
+		 * decomposition for the crash-rejoin witness stall.  Change-aware
+		 * (log when the failing field combination changes) so a spin cannot
+		 * burn the cap; removed before the final push. */
+		static int owner_diag_count = 0;
+		static int owner_last_sig = -1;
+		int sig = ((int)f2->membership.membership_state[origin_node] * 1000)
+			+ ((f2->membership.last_admitted_incarnation[origin_node] == 0) ? 100
+																		   : 0)
+			+ (formation_bitmap_has_node(f2->excluded_bitmap, origin_node) ? 10
+																		 : 0);
+
+		if (sig != owner_last_sig) {
+			owner_last_sig = sig;
+			if (owner_diag_count++ < 24)
+				ereport(LOG,
+						(errmsg("TEMP witness owner fail: node=%d state=%d "
+								"admitted_inc=%llu excluded=%d local_epoch=%llu "
+								"applied_new_epoch=%llu applied_kind=%d "
+								"applied_event_id=%llu applied_dead_self=%d "
+								"removed_self=%d self_join_admitted=%d",
+								origin_node,
+								(int)f2->membership.membership_state[origin_node],
+								(unsigned long long)
+									f2->membership.last_admitted_incarnation[origin_node],
+								formation_bitmap_has_node(f2->excluded_bitmap,
+														  origin_node),
+								(unsigned long long)f2->local_epoch,
+								(unsigned long long)f2->applied.new_epoch,
+								(int)f2->applied.reconfig_kind,
+								(unsigned long long)f2->applied.event_id,
+								formation_bitmap_has_node(f2->applied.dead_bitmap,
+														  origin_node),
+								formation_bitmap_has_node(f2->removed_bitmap,
+														  origin_node),
+								(int)f2->self_join_admitted)));
+		}
 		return CLUSTER_FORMATION_WITNESS_OWNER_MISMATCH;
+	}
 	return CLUSTER_FORMATION_WITNESS_READY;
 }
 

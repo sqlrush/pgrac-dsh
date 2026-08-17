@@ -780,6 +780,7 @@ extern bool cluster_reconfig_join_in_progress(void);
  * write gate (gate-open guard = adopt && state==MEMBER — P1-r5 half-publish).
  */
 extern void cluster_reconfig_note_self_admitted(uint64 admitted_epoch);
+extern bool cluster_reconfig_self_join_admitted(void); /* RF-ROOT P6 */
 
 /* spec-5.15A closed replacement admission.  A canonical local ADMITTED
  * episode may publish self MEMBER while keeping the ordinary write gate

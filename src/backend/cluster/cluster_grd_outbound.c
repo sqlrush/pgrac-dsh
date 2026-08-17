@@ -660,6 +660,17 @@ cluster_grd_outbound_lmon_drain_send(void)
 
 		rc = cluster_ic_send_envelope(slot.msg_type, (int32)slot.dest_node_id,
 									  slot.payload_len > 0 ? slot.payload : NULL, slot.payload_len);
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): ring-drain send result.
+		 * Capped; removed before the final push. */
+		{
+			static int drain_send_diag = 0;
+
+			if (drain_send_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP drain send: type=%u dest=%d rc=%d",
+								(unsigned)slot.msg_type, (int)slot.dest_node_id,
+								(int)rc)));
+		}
 		switch (rc) {
 		case CLUSTER_IC_SEND_DONE:
 		case CLUSTER_IC_SEND_WOULD_BLOCK:

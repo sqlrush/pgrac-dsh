@@ -1111,6 +1111,22 @@ tier1_send_bytes(int32 target_node_id, const void *buf, size_t len)
 	 * is buffered (F2 dynamic) -- WOULD_BLOCK return tells caller to
 	 * drain on next WL_SOCKET_WRITEABLE via the path above.
 	 */
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-frame send counter with
+	 * type + length so the sender-side frame stream can be diffed against
+	 * the receiver-side TEMP tier1 recv frame log.  Removed before the
+	 * final push. */
+	{
+		static uint64 send_frame_diag_seq = 0;
+		ClusterICEnvelope *senv = (ClusterICEnvelope *)buf;
+
+		if ((send_frame_diag_seq++ % 20) == 0 && len >= PGRAC_IC_ENVELOPE_BYTES)
+			ereport(LOG,
+					(errmsg("TEMP tier1 send frame: peer=%d type=%u plen=%u "
+							"len=%zu seq=%llu",
+							target_node_id, (unsigned)senv->msg_type,
+							(unsigned)senv->payload_length, len,
+							(unsigned long long)send_frame_diag_seq)));
+	}
 	pgstat_report_wait_start(WAIT_EVENT_CLUSTER_IC_TCP_SEND);
 	sent = send(fd, buf, len, 0);
 	pgstat_report_wait_end();
@@ -1777,6 +1793,17 @@ cluster_ic_tier1_connect_one(int32 peer_id, int *out_peer_fd)
 	if (rc < 0 && errno != EINPROGRESS) {
 		int saved = errno;
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): connect-fail detail.
+		 * Capped; removed before the final push. */
+		{
+			static int connfail_diag = 0;
+
+			if (connfail_diag++ < 6)
+				ereport(LOG,
+						(errmsg("TEMP tier1 connect fail: peer=%d host=%s port=%d "
+								"errno=%d (%s)",
+								peer_id, host, port, saved, strerror(saved))));
+		}
 		(void)close(fd);
 		peer_record_error(peer_id, saved, "08001", "connect %s:%d: %s", host, port,
 						  strerror(saved));
@@ -1801,6 +1828,22 @@ cluster_ic_tier1_finish_connect(int32 peer_id, int peer_fd)
 	if (getsockopt(peer_fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) < 0 || so_error != 0) {
 		int saved = (so_error != 0) ? so_error : errno;
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): async connect SO_ERROR
+		 * detail.  Capped; removed before the final push. */
+		{
+			static int soerr_diag = 0;
+
+			if (soerr_diag++ < 6)
+				ereport(LOG,
+						(errmsg("TEMP tier1 finish_connect fail: peer=%d addr=%s "
+								"errno=%d (%s)",
+								peer_id,
+								peer_id >= 0
+										&& peer_id < CLUSTER_MAX_NODES
+									? Tier1Shmem->peers[peer_id].interconnect_addr
+									: "?",
+								saved, strerror(saved))));
+		}
 		peer_record_error(peer_id, saved, "08001", "connect SO_ERROR: %s", strerror(saved));
 		cluster_ic_tier1_close_peer(peer_id, "connect failed");
 		return false;
@@ -2719,6 +2762,21 @@ cluster_ic_tier1_recv_heartbeat_drain(int32 peer_id, int peer_fd)
 		if (env.msg_type == PGRAC_IC_MSG_HEARTBEAT) {
 			pg_atomic_add_fetch_u64(&Tier1Shmem->peers[peer_id].heartbeat_recv_count, 1);
 			Tier1Shmem->peers[peer_id].last_heartbeat_recv_at = GetCurrentTimestamp();
+		}
+
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-frame dispatch counter
+		 * so the cssd-frame loss point is attributable.  Removed before the
+		 * final push. */
+		{
+			static uint64 frame_diag_seq = 0;
+
+			if ((frame_diag_seq++ % 20) == 0)
+				ereport(LOG,
+						(errmsg("TEMP tier1 recv frame: peer=%d type=%u "
+								"plen=%u seq=%llu",
+								peer_id, (unsigned)env.msg_type,
+								(unsigned)env.payload_length,
+								(unsigned long long)frame_diag_seq)));
 		}
 
 		/*

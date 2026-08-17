@@ -60,6 +60,7 @@
 #include "cluster/cluster_cssd.h"	/* cluster_cssd_start / wait_for_ready (2.5 Sprint A) */
 #include "cluster/cluster_qvotec.h" /* cluster_qvotec_start / wait_for_ready (spec-2.6 Step 3 D8) */
 #include "cluster/cluster_diag.h"	/* cluster_diag_start / wait_for_ready (1.13 Sprint A) */
+#include "cluster/cluster_epoch.h"	/* cluster_epoch_get_current (RF-ROOT P6 diag) */
 #include "cluster/cluster_guc.h"	/* cluster_phase{1..4}_timeout (D2 F2) */
 #include "cluster/cluster_grd.h"
 #include "cluster/cluster_stats.h"	/* cluster_stats_start / wait_for_ready (1.14 Sprint A) */
@@ -381,8 +382,9 @@ cluster_serving_generation_current(const ClusterAuthorityBindingLocal *binding)
  * allowlist phase gate rejected this request" from "the binding itself is
  * stale". */
 static bool
-cluster_authority_binding_components_current(
-	const ClusterAuthorityBindingLocal *binding, bool serving)
+cluster_authority_binding_components_current_internal(
+	const ClusterAuthorityBindingLocal *binding, bool serving, bool require_seal,
+	bool require_member)
 {
 	if (binding == NULL || binding->boot_incarnation == 0
 		|| binding->lms_generation == 0
@@ -393,16 +395,26 @@ cluster_authority_binding_components_current(
 		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
 			   != binding->boot_incarnation
 		|| cluster_lms_get_lms_restart_generation() != binding->lms_generation
+		|| (require_member && !cluster_membership_is_member(cluster_node_id))
 		|| (serving
 				? !cluster_serving_formation_current(binding)
 				: cluster_formation_classification_revalidate_nowait(
 					  binding->origin_thread, &binding->authority,
 					  &binding->formation)
 					  != CLUSTER_FORMATION_WITNESS_READY)
-		|| !cluster_grd_recovery_authority_is_current(
-			   binding->boot_incarnation, binding->lms_generation))
+		|| (require_seal
+			&& !cluster_grd_recovery_authority_is_current(
+				binding->boot_incarnation, binding->lms_generation)))
 		return false;
 	return true;
+}
+
+static bool
+cluster_authority_binding_components_current(
+	const ClusterAuthorityBindingLocal *binding, bool serving)
+{
+	return cluster_authority_binding_components_current_internal(
+		binding, serving, true, true);
 }
 
 static bool
@@ -621,6 +633,73 @@ cluster_recovery_transport_is_current(void)
 											 "recovery_transport_stale");
 	}
 	return current;
+}
+
+/*
+ * cluster_recovery_transport_components_current -- RF-ROOT P6 (crash-rejoin).
+ *
+ *	The components-only transport proof:  identical to the strict
+ *	cluster_recovery_transport_is_current EXCEPT that it does not require
+ *	the GRD recovery-authority seal.  The seal is stamped only when the
+ *	phase-3 recovery-authority barrier reaches terminal SUCCESS, and the
+ *	barrier's cluster-wide convergence input is the survivor's inbound
+ *	REDECLARE_DONE key (the authority-axis done slots) — gating that
+ *	ingress on the seal is structurally circular on a rejoiner:
+ *
+ *	  boot_decided=0 -> self JOINING -> barrier request-current fails
+ *	  -> seal never stamped -> transport not current -> REDECLARE_DONE
+ *	  dropped -> join view never rebuilt -> boot_decided stays 0 ...
+ *
+ *	The REDECLARE_DONE arm of ges_readiness_allows_early_opcode is the
+ *	single consumer of this predicate;  every other opcode keeps the
+ *	strict seal requirement.  Safety:  a REDECLARE_DONE frame only
+ *	mutates the monotonic done arrays (and the authority-axis slots,
+ *	which additionally require an exact {epoch, dead-bitmap-hash} match
+ *	against the published request) — it has no serving-side effect, so
+ *	accepting it on component currency alone cannot open the serve gate.
+ */
+bool
+cluster_recovery_transport_components_current(void)
+{
+	ClusterAuthorityBindingLocal binding;
+
+	if (!cluster_authority_binding_copy(&binding))
+		return false;
+	if (binding.state == CLUSTER_AUTHORITY_RECOVERY_READY) {
+		/*
+		 * The durable admission (self_join_admitted, set by the quorum-
+		 * majority COMMITTED marker + publish-proof) is the membership
+		 * proof for the transport:  the LMON self-state byte can
+		 * transiently read JOINING while the boot-decided latch is still
+		 * held, and dropping the barrier-building DONE ingress during
+		 * those windows re-closes the deadlock this predicate exists to
+		 * break.  The formation revalidation is deliberately NOT part of
+		 * this proof either:  the admission path invalidates the fence
+		 * cache on every real membership flip, so a revalidation would
+		 * fail exactly while the re-declare barrier is converging — the
+		 * very frames it must admit.  REDECLARE_DONE only mutates the
+		 * monotonic done arrays (and the authority-axis slots, which
+		 * additionally require an exact {epoch, dead-bitmap-hash} match
+		 * against the published request);  it has no serving-side effect,
+		 * so component currency (cssd/qvotec/quorum/incarnation/LMS
+		 * generation/admission) is the correct strength for its gate.
+		 */
+		if (binding.boot_incarnation == 0 || binding.lms_generation == 0
+			|| cluster_cssd_get_status() != CLUSTER_CSSD_READY
+			|| cluster_qvotec_get_status() != CLUSTER_QVOTEC_READY
+			|| !cluster_qvotec_in_quorum()
+			|| cluster_qvotec_get_self_incarnation() != binding.boot_incarnation
+			|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
+				   != binding.boot_incarnation
+			|| cluster_lms_get_lms_restart_generation() != binding.lms_generation)
+			return false;
+		return cluster_lms_is_recovery_ready()
+			&& (cluster_membership_is_member(cluster_node_id)
+				|| cluster_reconfig_self_join_admitted());
+	}
+	if (binding.state != CLUSTER_AUTHORITY_STARTING)
+		return false;
+	return cluster_authority_binding_preseal_current(&binding);
 }
 
 bool
@@ -1350,12 +1429,44 @@ cluster_phase3_wait_for_live_formation(TimestampTz deadline,
 			attempt_ms = 100;
 		result = cluster_formation_witness_build_live_wait(
 			thread_id, attempt_ms, &witness);
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): witness result throttle —
+		 * log ONLY on result change so a spin cannot burn the cap.  Capped;
+		 * removed before the final push. */
+		{
+			static uint64 witness_diag_count = 0;
+			static int witness_last_result = -1;
+
+			if (result != witness_last_result) {
+				witness_last_result = (int)result;
+				if (witness_diag_count++ < 40)
+					ereport(LOG,
+							(errmsg("TEMP formation witness: result=%d change=%llu",
+									(int)result,
+									(unsigned long long)witness_diag_count)));
+			}
+		}
 		if (result == CLUSTER_FORMATION_WITNESS_READY) {
 			if (!cluster_formation_witness_copy_classification_v1(
 					witness, out_origin_thread, out_authority, out_snapshot))
 				result = CLUSTER_FORMATION_WITNESS_CORRUPT;
 			else
 				result = cluster_formation_witness_revalidate_nowait(witness);
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): build-READY but the
+			 * copy/revalidate leg failed.  Change-aware; removed before the
+			 * final push. */
+			{
+				static int reval_diag_count = 0;
+				static int reval_last_result = -1;
+
+				if (result != CLUSTER_FORMATION_WITNESS_READY
+					&& result != reval_last_result) {
+					reval_last_result = (int)result;
+					if (reval_diag_count++ < 20)
+						ereport(LOG,
+								(errmsg("TEMP witness revalidate fail: result=%d change=%d",
+										(int)result, reval_diag_count)));
+				}
+			}
 			cluster_formation_witness_destroy(&witness);
 			if (result == CLUSTER_FORMATION_WITNESS_READY) {
 				if (out_result != NULL)
@@ -1385,6 +1496,17 @@ cluster_phase3_wait_for_live_formation(TimestampTz deadline,
 	return false;
 }
 
+
+static void
+phase3_step_diag(const char *step, uint64 extra)
+{
+	static int step_diag_count = 0;
+
+	if (step_diag_count++ < 24)
+		ereport(LOG,
+				(errmsg("TEMP phase3 step: %s extra=%llu", step,
+						(unsigned long long)extra)));
+}
 
 static PhaseRunResult
 phase_3_handler(PhaseRunFailContext *fail_ctx)
@@ -1437,6 +1559,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"slow on this hardware, raise cluster.phase3_timeout.";
 		return PHASE_RUN_FATAL;
 	}
+	phase3_step_diag("cssd_ready", 0);
 
 	phase3_qvotec_pid = cluster_qvotec_start();
 	if (phase3_qvotec_pid <= 0) {
@@ -1455,6 +1578,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"is slow on this hardware, raise cluster.phase3_timeout.";
 		return PHASE_RUN_FATAL;
 	}
+	phase3_step_diag("qvotec_ready", 0);
 
 	if (cluster_phase4_wal_state_configured() && cluster_conf_node_count() > 1
 		&& !cluster_phase4_wait_for_quorum(phase3_deadline)) {
@@ -1464,6 +1588,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"quorum state before retrying startup.";
 		return PHASE_RUN_FATAL;
 	}
+	phase3_step_diag("quorum_ok", 0);
 
 	if (cluster_phase4_wal_state_configured()
 		&& !cluster_phase3_wait_for_live_formation(
@@ -1476,6 +1601,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 							"retrying startup.";
 		return PHASE_RUN_FATAL;
 	}
+	phase3_step_diag("formation_ready", (uint64)formation_result);
 
 	if (cluster_phase4_wal_state_configured()) {
 		if (!cluster_lms_enabled) {
@@ -1494,6 +1620,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 								"membership floor and retry startup.";
 			return PHASE_RUN_FATAL;
 		}
+		phase3_step_diag("begin_ok", 0);
 
 		phase3_lms_pid = cluster_lms_start();
 		if (phase3_lms_pid <= 0) {
@@ -1513,6 +1640,7 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 								"closed until phase 4.";
 			return PHASE_RUN_FATAL;
 		}
+		phase3_step_diag("lms_ready", 0);
 		/*
 		 * Bind the recovery LMS generation, then complete the GRD
 		 * recovery-authority barrier (AD-023 A2).  Both legs share one
@@ -1532,6 +1660,22 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 		for (;;)
 		{
 			lms_generation = cluster_lms_get_lms_restart_generation();
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): bind/barrier loop
+			 * iteration state.  Capped; removed before the final push. */
+			{
+				static int phase3_loop_diag_count = 0;
+
+				if (phase3_loop_diag_count++ < 12)
+					ereport(LOG,
+							(errmsg("TEMP phase3 loop: lms_gen=%llu self_fstate=%d "
+									"applied_new_epoch=%llu local_epoch=%llu cur_epoch=%llu",
+									(unsigned long long)lms_generation,
+									(int)formation_snapshot.membership.membership_state[cluster_node_id],
+									(unsigned long long)formation_snapshot.applied.new_epoch,
+									(unsigned long long)formation_snapshot.local_epoch,
+									(unsigned long long)
+										cluster_epoch_get_current())));
+			}
 			if (!cluster_authority_readiness_bind_recovery_generation(
 					lms_generation)) {
 				/* begin() only accepts OFF, so drop any stale STARTING
