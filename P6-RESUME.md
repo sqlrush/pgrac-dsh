@@ -62,3 +62,16 @@ cd src/test/cluster_tap && make check PROVE_TESTS='t/243_wal_thread_2node_shared
 ```
 
 **注意**：勿并行跑两个 make check（tmp_install 竞争会互毁）。
+
+---
+
+## 更正注（2026-08-18，P7-P9 会话，DSH 复审补记 14 要求）
+
+- §2 所述"3 个失败（10 个已知 pre-existing 断言 stale）"在 P7-P9 会话
+  P1 清理后更正为 **8 个**：reconfig 75/76 系 test 55 的掩盖性 TEMP 诊断块
+  泄漏 pending 状态所致（诊断块内含 poll 消费调用，同时掩盖 test 55 自身
+  在增量 5/16 语义下的 stale 断言）；test 55 已重写为当前语义，75/76 转绿
+  （reconfig 二进制复跑 ×2 实锤 90/92）。剩余：reconfig 77/92 +
+  r4_static_model 9-13 + r4_activation_record 50。
+- P0（cluster_regress clean_leave SIGABRT）归因 = stale build artifact
+  （views.o 旧于 header），非产品缺陷；全量重建后 regress 13/13。

@@ -84,17 +84,34 @@
 
 ## 8. 遗留清单（本会话开局时的已知红/未办）
 
-- [ ] **【P0 已归因，待全量重建验收】cluster_regress 崩溃回归**：
-  根因 = stale build artifact（views.o 旧于 cluster_clean_leave.h，
-  5861a6c700 使结构体变大 → 整结构拷贝写穿栈 canary → SIGABRT），
-  **非产品缺陷**；增量 10/12 无罪（见 DSH-REVIEW 补记 11）。处置：
-  全量 make clean + make 重建 → regress 13/13 → t243 复跑确认。
-- [ ] **【P1】TEMP 清理不完整**：P6 声称"137 点清零"，实际 26 个文件仍有
-  `TEMP ` 残留。其中 RF-ROOT P6 时代：`xlog.c`（5 处）、`checkpointer.c`
-  （3 处）、`cluster_lock_acquire.c`（1 处）；其余为更早 stage 遗留
-  （planner.c/catalog 等）。清 P6 时代的，其余登记待清。
-- [ ] 10 个 pre-existing 单测断言（reconfig 75/76/77/92 + r4_static_model
-      9-13 + r4_activation_record 50；若属 P7-P9 语义面则顺手修）
+- [x] **【P0 已修】cluster_regress 崩溃回归**（2026-08-18 本会话）：
+  归因（DSH 补记 11 背书）= stale build artifact，非产品缺陷：views.o
+  旧于 cluster_clean_leave.h（5861a6c700 加 shutdown_driven）→ 整结构
+  拷贝写穿栈 canary → SIGABRT（lldb 实锤）。处置：src/backend 全量
+  `make clean && make -j8` → cluster_regress **13/13 全绿**（含
+  cluster_clean_leave + cluster_node_remove）；t243 复跑见下。
+- [x] **【P1 已修】TEMP 清理**（2026-08-18 本会话）：实际 P6 时代残留 =
+  xlog.c 6 处（include + 4 个 cfx diag 块 + errdetail）、checkpointer.c
+  3 处；cluster_lock_acquire.c 的 "TEMP" 为合法注释（RELPERSISTENCE_TEMP
+  语义），DSH 误报。其余 26 文件为合法 PG 语义引用，登记即可。同步清理
+  7 个 dead 单测桩 + test 55 同步为增量 5/16 语义（原诊断块掩盖其 stale
+  断言并泄漏 pending 状态污染 75/76；重写后 reconfig 失败 4→2，75/76
+  转绿已用二进制复跑实锤 ×2）。TEMP 清理后构建的 t243 = **33/33 PASS**。
+- [x] **【补记 13-A】增量 17 已回退**（5074881fa7）：head gate 恢复
+  `owner != admitted`、捷径恢复无条件 `if (OPEN) return true;`、单测
+  删除假绿用例、specs-local 标注回退。recovery_duty 18/18 PASS。
+- [ ] **【补记 13-B 待裁决】增量 13**（CLOSED 进 OWNER_REJOIN，§17.4
+      偏离）：裁决未批前不动代码。若裁决 = clean-reopen 走 THREAD_OPEN：
+      ① 先实现 THREAD_OPEN 路由接通 L10；② t243 33/33 复证；③ 再摘除
+      OWNER_REJOIN 的 CLOSED 允许。当前 t243 绿依赖 CLOSED 路由——先接
+      新路再拆旧路。
+- [ ] **【补记 13-C】端到端 lifecycle 测试**（不打桩低层发布）：真实 shmem
+      控制根 + 真实 compare_and_publish；断言 ① OWNER_REJOIN 前态
+      RECOVERY_COMPLETE 成功；② 前态 OPEN/CLOSED 的 OWNER_REJOIN 被
+      patch_shape_valid 拒绝；③ THREAD_OPEN 的 CLOSED→OPEN 成功。
+- [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
+      r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
+      系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
 - [ ] P7 W6 退休 + 三 consumer 迁移 + census 0
 - [ ] P8 rebuild-first 编排
 - [ ] P9 fault legs + observability

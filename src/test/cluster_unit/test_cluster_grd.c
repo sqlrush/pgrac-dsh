@@ -298,38 +298,15 @@ cluster_cssd_get_status(void)
 	return 1; /* CLUSTER_CSSD_READY */
 }
 
-/* RF-ROOT P6 (TEMP diag refs in cluster_grd.o): the authority-barrier TEMP
- * diagnostics sample the phase word, the tier1 peer fds, the LMS recovery-
- * ready flag and the durable self-join admission.  Standalone fixture pins
- * them inert/positive; the barrier's own gates use the dedicated mocks. */
-int
-cluster_current_phase(void)
-{
-	return 4; /* CLUSTER_PHASE_3_RECOVERY */
-}
-
-int
-cluster_ic_tier1_get_peer_fd(int32 peer_id pg_attribute_unused())
-{
-	return 0;
-}
-
-bool
-cluster_lms_is_recovery_ready(void)
-{
-	return true;
-}
-
+/* Link-only stubs for cluster_grd.o's spec-5.16 join-fence predicates:
+ * the durable self-join admission + the clean-leave write-refusal gate.
+ * Standalone fixture pins them positive/inert; the barrier's own gates use
+ * the dedicated mocks. */
 bool
 cluster_reconfig_self_join_admitted(void)
 {
 	return true;
 }
-
-/* RF-ROOT P6: cluster_grd.o's recovery tick TEMP diag samples NBuffers, and
- * the leaver serving-rebind references the clean-leave write-refusal gate.
- * Standalone fixture pins both inert. */
-int NBuffers = 0;
 
 bool
 cluster_clean_leave_node_refuses_writes(void)

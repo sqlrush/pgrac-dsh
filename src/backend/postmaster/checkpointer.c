@@ -368,18 +368,6 @@ CheckpointerMain(void)
 		int			elapsed_secs;
 		int			cur_timeout;
 
-		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): prove the checkpointer's
-		 * main loop is live during phase 4 (run123 W2 deadlock hunt).
-		 * Capped; removed before the final push. */
-		{
-			static int ckpt_loop_diag = 0;
-
-			if (ckpt_loop_diag++ < 3)
-				ereport(LOG,
-						(errmsg("TEMP checkpointer loop: pid=%d shutdown_pending=%d",
-								(int)MyProcPid, ShutdownRequestPending ? 1 : 0)));
-		}
-
 		/* Clear any already-pending wakeups */
 		ResetLatch(MyLatch);
 
@@ -396,19 +384,6 @@ CheckpointerMain(void)
 		 */
 		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
 		{
-			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): run123 W2 deadlock
-			 * hunt.  Capped; removed before the final push. */
-			{
-				static int ckpt_flags_diag = 0;
-
-				if (ckpt_flags_diag++ < 3)
-					ereport(LOG,
-							(errmsg("TEMP checkpointer sees flags=%x pid=%d",
-									(unsigned)((volatile CheckpointerShmemStruct *)
-												   CheckpointerShmem)
-										->ckpt_flags,
-									(int)MyProcPid)));
-			}
 			do_checkpoint = true;
 			PendingCheckpointerStats.requested_checkpoints++;
 		}
@@ -631,12 +606,6 @@ HandleCheckpointerInterrupts(void)
 		 * back to the sigsetjmp block above
 		 */
 		ExitOnAnyError = true;
-
-#ifdef USE_PGRAC_CLUSTER
-		/* TEMP DIAGNOSTIC (RF-ROOT P6): pin the executed shutdown order.
-		 * Removed before the final push. */
-		ereport(LOG, (errmsg("TEMP contract1 order: ShutdownXLOG before drain")));
-#endif
 
 		/*
 		 * Close down the database.

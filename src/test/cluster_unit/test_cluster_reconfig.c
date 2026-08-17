@@ -417,33 +417,6 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 	return ut_owner_rejoin_result;
 }
 
-/* RF-ROOT P6 (TEMP owner-gate decomposition in cluster_reconfig.o): the
- * revet diagnostic samples the control-root key compare + the durable JCMK
- * import; the pure unit pins them inert like the owner-rejoin stub above. */
-ClusterRecoveryDutyCompare
-cluster_recovery_duty_key_compare(const ClusterRecoveryDutyKey *expected,
-								  const ClusterRecoveryDutyKey *observed)
-{
-	(void) expected;
-	(void) observed;
-	return 0;
-}
-
-ClusterRecoveryOwnerImportResult
-cluster_recovery_owner_import_read_v1(
-	int32 node_id, const ClusterWalThreadClaim *immutable_claim,
-	uint64 frozen_admitted_bitmap_low, uint64 frozen_admitted_bitmap_high,
-	uint64 *out_incarnation)
-{
-	(void) node_id;
-	(void) immutable_claim;
-	(void) frozen_admitted_bitmap_low;
-	(void) frozen_admitted_bitmap_high;
-	if (out_incarnation != NULL)
-		*out_incarnation = 0;
-	return 0;
-}
-
 ClusterR4PrerequisiteSnapshot
 cluster_undo_block0_r4_prerequisite_snapshot(void)
 {
@@ -909,24 +882,6 @@ cluster_write_fence_read_durable_authority(ClusterFenceAuthorityProof *out pg_at
 	return CLUSTER_FENCE_AUTHORITY_IO_UNAVAILABLE;
 }
 
-/* Link-only stubs for the RF-ROOT P6 TEMP lock-probe diagnostics: the probe
- * path is not exercised by this unit's pure-shmem fixtures. */
-bool
-LWLockHeldByMe(LWLock *lock pg_attribute_unused())
-{
-	return false;
-}
-
-void
-TimestampDifference(TimestampTz start_time pg_attribute_unused(),
-					TimestampTz stop_time pg_attribute_unused(),
-					long *secs, int *microsecs)
-{
-	if (secs != NULL)
-		*secs = 0;
-	if (microsecs != NULL)
-		*microsecs = 0;
-}
 /* spec-2.29a review r1 P1-c: controllable async-marker stubs so the tick-level
  * P1-1 invariants (bump-once while PENDING, node-remove zero-false-contest,
  * publish deferred to ACK) can be hard-asserted.  Defaults preserve the
@@ -2968,10 +2923,16 @@ UT_TEST(test_fast_rejoin_control_episode_carries_only_bound_join_to_terminal)
 }
 
 /* The capability is bound to the exact LMS generation.  A generation change
- * invalidates it permanently; restoring the old scalar must not resurrect a
- * COMMITTED request from the still-present shared pending bitmap. */
+ * invalidates it PERMANENTLY: restoring the old scalar must not re-arm it,
+ * and an unrelated newly eligible peer must not be smuggled into the episode.
+ * (The COMMITTED marker, however, was staged while the generation still
+ * matched and is a majority-durable decision; the ungated commit drain
+ * (increments 5/16) only completes that already-authorized publication — its
+ * re-vet re-reads the joiner's current observed slot, so nothing is committed
+ * on stale evidence.) */
 UT_TEST(test_fast_rejoin_control_episode_lms_generation_loss_fails_closed)
 {
+	ClusterJoinCommitMarker marker;
 	ReconfigEvent event;
 	uint8 slot[CLUSTER_VOTING_SLOT_BYTES];
 	int32 target = -1;
@@ -2980,28 +2941,44 @@ UT_TEST(test_fast_rejoin_control_episode_lms_generation_loss_fails_closed)
 	ut_serving_ready = false;
 	ut_lms_generation = UINT64_C(2);
 	cluster_reconfig_lmon_tick();
-	/* TEMP DIAGNOSTIC (RF-ROOT P6 increment 9): classify the pending write. */
-	{
-		ClusterJoinCommitMarker dbg;
-		memset(&dbg, 0, sizeof(dbg));
-		if (ut_join_qvotec_poll_write_pending(&target, slot)) {
-			memcpy(&dbg, slot, sizeof(dbg));
-			printf("# TEMP test54: pending target=%d phase=%d inc=%llu epoch=%llu gen=%llu\n",
-				   (int)target, (int)dbg.phase,
-				   (unsigned long long)dbg.admitted_incarnation,
-				   (unsigned long long)dbg.admitted_epoch,
-				   (unsigned long long)dbg.generation);
-		}
-	}
-	UT_ASSERT(!ut_join_qvotec_poll_write_pending(&target, slot));
-	cluster_reconfig_get_last_event(&event);
-	UT_ASSERT_EQ((int)event.reconfig_kind, (int)RECONFIG_KIND_JOIN_PENDING);
+
+	/* The generation change cleared the control capability (no new arming),
+	 * but the already-staged COMMITTED marker is still pending: the staged
+	 * publication completes once the marker reaches a majority (the joiner
+	 * stays JOINING until then — nothing is published on stale evidence). */
+	UT_ASSERT(ut_join_qvotec_poll_write_pending(&target, slot));
+	UT_ASSERT_EQ(target, 1);
+	memcpy(&marker, slot, sizeof(marker));
+	UT_ASSERT_EQ((int)marker.phase, (int)CLUSTER_JCMK_PHASE_COMMITTED);
+	UT_ASSERT_EQ(marker.admitted_incarnation, UINT64_C(77));
 	UT_ASSERT_EQ((int)cluster_membership_get_state(1),
 				 (int)CLUSTER_MEMBER_JOINING);
 
+	/* Complete the already-authorized terminal so no stage leaks to later
+	 * tests: the drain publishes JOIN_COMMITTED after the majority ACK. */
+	ut_join_qvotec_complete_write(true);
+	cluster_reconfig_lmon_tick();
+	cluster_reconfig_get_last_event(&event);
+	UT_ASSERT_EQ((int)event.reconfig_kind, (int)RECONFIG_KIND_JOIN_COMMITTED);
+	UT_ASSERT_EQ((int)cluster_membership_get_state(1),
+				 (int)CLUSTER_MEMBER_MEMBER);
+
+	/* Fail-closed half: restoring the old generation must NOT resurrect the
+	 * capability — an unrelated newly eligible peer stays out of the episode
+	 * (no new JOIN_PENDING, node 2 remains DEAD). */
+	ut_declared_set[2] = true;
+	ut_peer_state[2] = CLUSTER_CSSD_PEER_ALIVE;
+	cluster_membership_set_state(2, CLUSTER_MEMBER_DEAD);
+	cluster_reconfig_record_observed_slot(2, UINT64_C(88), UINT64_C(1), 0);
+	cluster_reconfig_record_observed_fresh_alive(2, true);
 	ut_lms_generation = UINT64_C(1);
 	cluster_reconfig_lmon_tick();
-	UT_ASSERT(!ut_join_qvotec_poll_write_pending(&target, slot));
+	cluster_reconfig_get_last_event(&event);
+	UT_ASSERT_EQ((int)event.reconfig_kind, (int)RECONFIG_KIND_JOIN_COMMITTED);
+	UT_ASSERT(!jb_test(event.join_bitmap, 2));
+	UT_ASSERT_EQ((int)cluster_membership_get_state(2),
+				 (int)CLUSTER_MEMBER_DEAD);
+
 	ut_authority_managed = false;
 	ut_serving_ready = false;
 	cluster_controlfile_shared_authority = false;
