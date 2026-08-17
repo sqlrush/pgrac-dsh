@@ -12,7 +12,7 @@ INTERVAL=45
 sig() {
   local h d
   h=$(git -C "$REPO" log -1 --pretty=%h 2>/dev/null)
-  d=$(git -C "$REPO" status --porcelain -- "$REPO/src" "$REPO/specs-local" 2>/dev/null | cksum | cut -d' ' -f1)
+  d=$(cd "$REPO" && git status --porcelain -- src specs-local 2>/dev/null | cksum | cut -d' ' -f1)
   echo "$h|$d"
 }
 

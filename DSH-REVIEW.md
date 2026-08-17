@@ -486,3 +486,17 @@ OWNER_REJOIN CAS。增量 13 与 17 一并进偏离裁决，裁决未批前不�
 
 A → 裁决(B) → C → D → 双绿 → 重新申请 P6 冻结。中途任何跑批出绿都要先
 提交再继续。
+
+---
+
+## 复审补记 14（2026-08-18 08:00，A 项回退中途复审）
+
+- cluster_recovery_duty.c 的增量 17 回退形状正确：head gate 恢复
+  `owner != admitted`、捷径恢复无条件 `if (OPEN) return true;`、注释清除，
+  与补记 13 的 A1/A2 逐字吻合 ✓。
+- 待办提醒：A3（test_cluster_recovery_duty.c 的 OPEN 假绿用例）、A4
+  （specs-local 增量 17 标注已回退）还没动，继续。
+- test_cluster_reconfig 的 test 55 重写：原则同意（产品零改动、保留
+  fail-closed 意图），但"75/76 转绿"的宣称必须用 reconfig 单测二进制
+  复跑实锤后再写进文档；若 75/76 转绿，P6-RESUME 的"10 个 pre-existing"
+  数字要同步更正为 8（77/92 保留）。
