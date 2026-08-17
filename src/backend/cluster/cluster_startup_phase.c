@@ -699,7 +699,32 @@ cluster_recovery_transport_components_current(void)
 	}
 	if (binding.state != CLUSTER_AUTHORITY_STARTING)
 		return false;
-	return cluster_authority_binding_preseal_current(&binding);
+	/*
+	 * RF-ROOT P6 (clean-reopen / THREAD_OPEN): the STARTING binding gets
+	 * the same components-only treatment.  The THREAD_OPEN root publish
+	 * needs the phase-3 clusterwide CF share-lock (S1 recovery-admission
+	 * gate), and the lock manager is only up once the LMS is recovery-
+	 * ready — but the GRD seal (which the strict preseal proof requires)
+	 * is the recovery-authority barrier's OUTPUT, while the survivor's
+	 * join-chain commit that would converge that barrier needs the
+	 * reopened root first.  Component currency (cssd/qvotec/quorum/
+	 * incarnation/LMS generation/admission, no seal, no formation
+	 * revalidation) is the correct strength for the recovery-time lock
+	 * admission;  the publish itself still re-validates the exact
+	 * expected lifecycle + token under the coordinated CF it acquires.
+	 */
+	if (binding.boot_incarnation == 0 || binding.lms_generation == 0
+		|| cluster_cssd_get_status() != CLUSTER_CSSD_READY
+		|| cluster_qvotec_get_status() != CLUSTER_QVOTEC_READY
+		|| !cluster_qvotec_in_quorum()
+		|| cluster_qvotec_get_self_incarnation() != binding.boot_incarnation
+		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
+			   != binding.boot_incarnation
+		|| cluster_lms_get_lms_restart_generation() != binding.lms_generation)
+		return false;
+	return cluster_lms_is_recovery_ready()
+		&& (cluster_membership_is_member(cluster_node_id)
+			|| cluster_reconfig_self_join_admitted());
 }
 
 bool
@@ -963,9 +988,21 @@ cluster_recovery_authority_request_allowed(const ClusterResId *resid,
 										   LOCKMODE mode,
 										   bool startup_process)
 {
+	/*
+	 * RF-ROOT P6 (clean-reopen / THREAD_OPEN): the recovery-time lock
+	 * admission accepts the components-only transport proof too.  The
+	 * strict authority proof requires the GRD seal, which the phase-3
+	 * recovery-authority barrier only stamps AFTER it converges — and the
+	 * THREAD_OPEN root reopen that feeds the survivor's join chain (and
+	 * therefore the barrier's convergence) itself needs the phase-3
+	 * clusterwide CF share-lock first.  Only the StartupProcess during
+	 * phase 3 is ever admitted, still restricted to the frozen
+	 * CF(S)/WALR(X) allowlist below.
+	 */
 	return startup_process
 		&& cluster_current_phase() == CLUSTER_PHASE_3_RECOVERY
-		&& cluster_recovery_authority_is_current()
+		&& (cluster_recovery_transport_components_current()
+			|| cluster_recovery_authority_is_current())
 		&& cluster_recovery_authority_resid_mode_allowed(resid, mode);
 }
 
@@ -1660,6 +1697,27 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 		for (;;)
 		{
 			lms_generation = cluster_lms_get_lms_restart_generation();
+			/*
+			 * RF-ROOT P6 (STOP-01 frozen THREAD_OPEN, the Oracle
+			 * clean-reopen mainline):  bind the LMS generation into the
+			 * STARTING binding, then retry the root reopen every
+			 * iteration until it lands.  The components-only transport
+			 * proof (which the S1 recovery lock admission uses for the
+			 * clusterwide CF share-lock) reads the bound generation, and
+			 * the phase-2 cross-node storage contract can verify late
+			 * (the survivor's cssd publishes its probe response on the
+			 * heartbeat cadence).  The CAS is idempotent:  after the
+			 * first success the root is OPEN and later expected-CLOSED
+			 * attempts fail closed as harmless no-ops;  first-formation /
+			 * crash / already-OPEN roots never match the expected CLOSED
+			 * lifecycle either.
+			 */
+			if (cluster_phase4_wal_state_configured()) {
+				(void)cluster_authority_readiness_bind_recovery_generation(
+					lms_generation);
+				(void)cluster_control_root_thread_open_publish(
+					cluster_qvotec_get_self_incarnation());
+			}
 			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): bind/barrier loop
 			 * iteration state.  Capped; removed before the final push. */
 			{

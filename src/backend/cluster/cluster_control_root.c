@@ -1520,6 +1520,28 @@ patch_shape_valid(const ClusterControlRootPatch *patch,
 			|| patch->desired.identity.origin_owner_incarnation == 0
 			|| patch->desired.identity.root_lineage_seq == 0))
 		return false;
+	/*
+	 * RF-ROOT P6 (STOP-01 frozen THREAD_OPEN / THREAD_CLEAN_CLOSE
+	 * transitions — Oracle clean-close/open mainline):  a clean shutdown
+	 * closes the redo thread (OPEN -> CLOSED, owner lineage unchanged) and
+	 * a normal restart reopens it (CLOSED -> OPEN with the fresh boot
+	 * incarnation and lineage+1).  Crash / immediate-stop paths never write
+	 * CLOSED and therefore never reach THREAD_OPEN (expected-lifecycle
+	 * mismatch fails the CAS);  they stay on the survivor-driven
+	 * failure-recovery FSM instead.
+	 */
+	if (reason == CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE
+		&& (patch->expected_lifecycle
+				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+			|| patch->desired.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED))
+		return false;
+	if (reason == CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN
+		&& (patch->expected_lifecycle
+				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
+			|| patch->desired.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+			|| patch->desired.identity.origin_owner_incarnation == 0
+			|| patch->desired.identity.root_lineage_seq == 0))
+		return false;
 	memset(&allowed, 0, sizeof(allowed));
 	if ((mask & CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE) != 0)
 		allowed.lifecycle = patch->desired.lifecycle;
@@ -1718,7 +1740,8 @@ cluster_control_root_compare_and_publish(const ClusterControlRootReadToken *expe
 				 || (primary->records[thread_id - 1].root_flags
 					 & patch->expected_flags_mask) != patch->expected_flags_value)
 			result = CLUSTER_CONTROL_ROOT_CAS_CONFLICT;
-		else if (reason == CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
+		else if ((reason == CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
+				  || reason == CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN)
 				 && (primary->records[thread_id - 1].identity.root_lineage_seq
 						 == UINT64_MAX
 					 || patch->desired.identity.root_lineage_seq

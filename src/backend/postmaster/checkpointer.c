@@ -41,6 +41,7 @@
 #include "access/xlogrecovery.h"
 #ifdef USE_PGRAC_CLUSTER
 #include "cluster/cluster_cf_enqueue.h"
+#include "cluster/cluster_recovery_duty.h" /* thread clean-close publish (RF-ROOT P6) */
 #include "cluster/cluster_wal_state.h"
 #endif
 #include "libpq/pqsignal.h"
@@ -618,6 +619,15 @@ HandleCheckpointerInterrupts(void)
 		 * CF(X).  Immediate and error exits never reach this call.
 		 */
 		cluster_wal_state_publish_stopped();
+		/*
+		 * RF-ROOT P6 (STOP-01 frozen THREAD_CLEAN_CLOSE, the Oracle
+		 * clean-close mainline):  with the shutdown checkpoint durable and
+		 * the STOPPED wal-state published, close this owner's own redo
+		 * thread (OPEN -> CLOSED, lineage unchanged).  Immediate / error
+		 * exits never reach here, so a crash never writes CLOSED and stays
+		 * on the survivor-driven failure-recovery FSM.
+		 */
+		(void)cluster_control_root_thread_clean_close_publish();
 #endif
 		pgstat_report_checkpointer();
 		pgstat_report_wal(true);

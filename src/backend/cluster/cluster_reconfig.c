@@ -3401,6 +3401,34 @@ cluster_reconfig_poll_join_commit_stage(void)
 	if (!join_commit_stage.async.has_staged_event)
 		return false;
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): commit-stage state machine
+	 * for the L5 second-rejoin wedge.  Change-aware; removed before the
+	 * final push. */
+	{
+		static int commit_stage_diag = 0;
+		static int commit_stage_last_sig = -1;
+		int csig = (join_commit_stage.fence_ready ? 100 : 0)
+			+ (join_commit_stage.submitted ? 10 : 0)
+			+ (cluster_marker_async_is_submitted(&join_commit_stage.async)
+				   ? 1
+				   : 0);
+
+		if (csig != commit_stage_last_sig) {
+			commit_stage_last_sig = csig;
+			if (commit_stage_diag++ < 12)
+				ereport(LOG,
+						(errmsg("TEMP commit stage: node=%d fence_ready=%d "
+								"submitted=%d async_submitted=%d",
+								join_commit_stage.node_id,
+								join_commit_stage.fence_ready ? 1 : 0,
+								join_commit_stage.submitted ? 1 : 0,
+								cluster_marker_async_is_submitted(
+									&join_commit_stage.async)
+									? 1
+									: 0)));
+		}
+	}
+
 	now = GetCurrentTimestamp();
 	if (join_commit_stage.fence_ready)
 		return cluster_reconfig_poll_join_fence_stage(now);
@@ -3456,6 +3484,52 @@ cluster_reconfig_poll_join_commit_stage(void)
 		|| !cluster_reconfig_prepare_join_commit(join_commit_stage.node_id,
 											 join_commit_stage.admitted_incarnation,
 											 join_commit_stage.async.staged_expect_epoch)) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): commit re-vet chain
+		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
+		 * before the final push. */
+		{
+			static int revalidate_diag = 0;
+			bool slot_ok;
+			uint64 obs_inc = 0;
+			uint64 obs_gen = 0;
+			ClusterJoinVerdict vet;
+			bool owner_ok;
+			int ms;
+			bool pending_bit;
+
+			slot_ok = cluster_reconfig_get_observed_slot(
+				join_commit_stage.node_id, &obs_inc, &obs_gen);
+			vet = cluster_membership_vet_joiner(
+				join_commit_stage.node_id, admitted_incarnation,
+				admitted_generation);
+			owner_ok = join_commit_stage.external_rejoin_consumed
+				|| cluster_recovery_owner_rejoin_v1(
+					join_commit_stage.node_id,
+					join_commit_stage.admitted_incarnation);
+			LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+			ms = (int)cluster_membership_get_state(
+				join_commit_stage.node_id);
+			pending_bit = dead_bitmap_test_bit(
+				ReconfigShmem->pending_join_bitmap,
+				join_commit_stage.node_id);
+			LWLockRelease(&ReconfigShmem->lock);
+			if (revalidate_diag++ < 12)
+				ereport(LOG,
+						(errmsg("TEMP commit revet: node=%d slot_ok=%d obs_inc=%llu "
+								"stage_inc=%llu vet=%d owner_ok=%d ms=%d "
+								"pending_bit=%d cur_epoch=%llu expect_epoch=%llu",
+								join_commit_stage.node_id, slot_ok ? 1 : 0,
+								(unsigned long long)obs_inc,
+								(unsigned long long)
+									join_commit_stage.admitted_incarnation,
+								(int)vet, owner_ok ? 1 : 0, ms, pending_bit ? 1
+																			: 0,
+								(unsigned long long)
+									cluster_epoch_get_current(),
+								(unsigned long long)
+									join_commit_stage.async
+										.staged_expect_epoch)));
+		}
 		pg_atomic_fetch_add_u64(&ReconfigShmem->join_reject_count, 1);
 		cluster_reconfig_release_join_commit_stage();
 		return true;
@@ -3580,6 +3654,20 @@ cluster_reconfig_drive_joins(int coordinator, int32 control_target,
 		if (!cluster_reconfig_external_rejoin_prepare_commit(
 				i, admitted_incarnation))
 			continue;
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): Phase-2 commit verdict for
+		 * the L5 second-rejoin wedge.  Capped; removed before the final push. */
+		{
+			static int commit_verdict_diag = 0;
+
+			if (commit_verdict_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP join commit: node=%d inc=%llu gen=%llu "
+								"control=%d ctrl_inc=%llu",
+								i, (unsigned long long)admitted_incarnation,
+								(unsigned long long)admitted_generation,
+								control_target,
+								(unsigned long long)control_incarnation)));
+		}
 		(void)cluster_reconfig_commit_member(i, admitted_incarnation);
 	}
 }
@@ -5368,6 +5456,34 @@ cluster_reconfig_offpath_rejoin_tick(void)
 	}
 
 	/*
+	 * RF-ROOT P6 (STOP-01 frozen THREAD_OPEN / THREAD_CLEAN_CLOSE, the
+	 * Oracle clean-reopen mainline):  a node that CLEANLY closed its own
+	 * redo thread (shutdown checkpoint durable + CLOSED root, so
+	 * prior_unclean_death is false) and now restarts into a running
+	 * cluster is a clean REOPEN, not a crash-rejoin.  No self-fence, no
+	 * self_join_admitted demotion:  the thread was cleanly closed, so
+	 * there are no stale holder/buffer states a survivor must re-declare
+	 * for, and the phase gate + serving predicate keep writes closed
+	 * until the ordinary admission re-lands.  The THREAD_OPEN publish in
+	 * phase 3 reopens the root (CLOSED -> OPEN with the fresh boot
+	 * incarnation) so the survivor's join chain can commit.
+	 *
+	 * A crash / immediate-stop leaves the ALIVE bit set
+	 * (prior_unclean_death), so that path still takes the REJOIN arm
+	 * below with the full self-fence + re-declare barrier.
+	 */
+	if (cluster_reconfig_cluster_already_running()
+		&& !cluster_qvotec_prior_unclean_death()) {
+		cluster_grd_set_offpath_boot_decided();
+		offpath_decided_local = true;
+		ereport(LOG,
+				(errmsg("cluster membership: node %d clean reopen detected (cluster.online_join=off) "
+						"— thread clean-closed, no re-declare fence armed",
+						cluster_node_id)));
+		return;
+	}
+
+	/*
 	 * REJOIN when EITHER signal fires:
 	 *   already_running        -- a declared peer is observed past INITIAL (the
 	 *                             survivor already reconfigured; slow rejoin).
@@ -6138,20 +6254,34 @@ cluster_reconfig_lmon_tick(void)
 			fast_rejoin_control_actions ? fast_rejoin_control_incarnation : 0);
 	} else {
 		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the blocked
-		 * join-drive gate.  Capped; removed before the final push. */
+		 * join-drive gate.  Change-aware (log only on signature change) so
+		 * the L5 second-rejoin window cannot burn the cap in earlier legs;
+		 * removed before the final push. */
 		static int join_gate_diag_count = 0;
+		static int join_gate_last_sig = -1;
+		int gsig = (runtime_join_allowed ? 1000000 : 0)
+			+ (ordinary_actions_allowed ? 100000 : 0)
+			+ (fast_rejoin_control_actions ? 10000 : 0)
+			+ ((self_id == coordinator) ? 1000 : 0)
+			+ (cluster_clean_leave_in_progress() ? 100 : 0)
+			+ (cluster_online_join ? 10 : 0)
+			+ (dead_bitmap_is_zero(new_failure_bitmap) ? 1 : 0)
+			+ (failure_generation_changed ? 2 : 0);
 
-		if (join_gate_diag_count++ < 8)
-			ereport(LOG,
-					(errmsg("TEMP join-drive blocked: runtime=%d ordinary=%d "
-							"control=%d coord_self=%d clean_leave=%d online=%d "
-							"new_fail_zero=%d gen_changed=%d",
-							runtime_join_allowed, ordinary_actions_allowed,
-							fast_rejoin_control_actions, self_id == coordinator,
+		if (gsig != join_gate_last_sig) {
+			join_gate_last_sig = gsig;
+			if (join_gate_diag_count++ < 16)
+				ereport(LOG,
+						(errmsg("TEMP join-drive blocked: runtime=%d ordinary=%d "
+								"control=%d coord_self=%d clean_leave=%d online=%d "
+								"new_fail_zero=%d gen_changed=%d",
+								runtime_join_allowed, ordinary_actions_allowed,
+								fast_rejoin_control_actions, self_id == coordinator,
 							cluster_clean_leave_in_progress(),
 							cluster_online_join,
 							dead_bitmap_is_zero(new_failure_bitmap),
 							failure_generation_changed)));
+		}
 		cluster_reconfig_external_rejoin_release_all();
 		if (join_commit_stage.external_rejoin_consumed)
 			cluster_reconfig_release_join_commit_stage();
@@ -7537,6 +7667,29 @@ cluster_reconfig_submit_join_marker_async(ClusterMarkerAsync *a, int32 target_no
 		|| !cluster_reconfig_stage_join_marker_locked(
 			target_node, CLUSTER_JOIN_MARKER_MAILBOX_WRITE_EXACT,
 			CLUSTER_JCMK_VERSION, m, sizeof(*m))) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): marker submit refusal
+		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
+		 * before the final push. */
+		{
+			static int marker_submit_diag = 0;
+
+			if (marker_submit_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP join marker submit fail: target=%d "
+								"kind=%d owner_reserved=%d busy=%d req=%llu "
+								"comp=%llu",
+								target_node, (int)kind,
+								join_marker_lmon_owner.reserved ? 1 : 0,
+								cluster_marker_async_mailbox_busy(
+									&ReconfigShmem->join_marker_request_seq,
+									&ReconfigShmem->join_marker_completion_seq)
+									? 1
+									: 0,
+								(unsigned long long)pg_atomic_read_u64(
+									&ReconfigShmem->join_marker_request_seq),
+								(unsigned long long)pg_atomic_read_u64(
+									&ReconfigShmem->join_marker_completion_seq))));
+		}
 		LWLockRelease(&ReconfigShmem->lock);
 		return false;
 	}

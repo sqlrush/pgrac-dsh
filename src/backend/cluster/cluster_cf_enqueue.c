@@ -35,6 +35,8 @@
 #include "cluster/cluster_conf.h"
 #include "cluster/cluster_guc.h"
 #include "cluster/cluster_lock_acquire.h"
+#include "cluster/cluster_startup_phase.h" /* TEMP diag: cluster_current_phase */
+#include "miscadmin.h"					  /* TEMP diag: AmStartupProcess */
 #include "storage/fd.h"
 #include "storage/lock.h"
 #include "utils/timestamp.h"
@@ -182,6 +184,18 @@ cluster_cf_lock(LOCKMODE mode)
 			 * could not be proven held: fail closed.  The caller raises the
 			 * appropriate FATAL/ERROR (CF correctness).
 			 */
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): CF acquire failure
+		 * decomposition for the THREAD_OPEN clean-reopen wedge.  Capped;
+		 * removed before the final push. */
+		{
+			static int cf_acquire_diag = 0;
+
+			if (cf_acquire_diag++ < 8)
+				ereport(LOG,
+						(errmsg("TEMP cf lock fail: mode=%d r=%d startup=%d phase=%d",
+								(int)mode, (int)r, AmStartupProcess() ? 1 : 0,
+								(int)cluster_current_phase())));
+		}
 		cluster_cf_counter_inc(CLUSTER_CF_FAILCLOSED);
 		return false;
 	}

@@ -11,7 +11,13 @@
  */
 #include "postgres.h"
 
+#include "cluster/cluster_cssd.h"		  /* TEMP diag */
+#include "cluster/cluster_lms.h"		  /* TEMP diag */
+#include "cluster/cluster_membership.h"  /* TEMP diag */
+#include "cluster/cluster_qvotec.h"	  /* TEMP diag */
+#include "cluster/cluster_reconfig.h"	/* TEMP diag */
 #include "cluster/cluster_recovery_duty.h"
+#include "cluster/cluster_startup_phase.h" /* TEMP diag */
 #include "cluster_control_root_private.h"
 #include "cluster/cluster_wal_thread.h"
 #include "common/cryptohash.h"
@@ -57,7 +63,9 @@ cluster_control_root_publish_authority_bind_v1(
 	ClusterControlRootPublishReason reason)
 {
 	if (root_publish_authority.active || expected_token == NULL || patch == NULL
-		|| reason != CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN)
+		|| (reason != CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE))
 		return false;
 	memset(&root_publish_authority, 0, sizeof(root_publish_authority));
 	root_publish_authority.active = true;
@@ -392,6 +400,228 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		   && published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 		   && published.identity.origin_owner_incarnation == admitted_incarnation
 		   && published.identity.root_lineage_seq == identity.root_lineage_seq + 1;
+}
+
+/*
+ * cluster_control_root_thread_clean_close_publish -- RF-ROOT P6 (STOP-01
+ * frozen THREAD_CLEAN_CLOSE, the Oracle clean-close mainline).
+ *
+ *	The OWNER of this node's thread closes its own redo thread after the
+ *	shutdown checkpoint is durable:  OPEN -> CLOSED with the owner lineage
+ *	UNCHANGED (the frozen 0x39 mask has no OWNER_LINEAGE bit).  Only the
+ *	checkpointer's clean-shutdown path reaches this (after ShutdownXLOG
+ *	and the STOPPED wal-state publish); crash / immediate-stop exits never
+ *	write CLOSED, so a later failure stays on the survivor-driven
+ *	failure-recovery FSM instead of the clean-reopen path.
+ */
+bool
+cluster_control_root_thread_clean_close_publish(void)
+{
+	ClusterControlRootIdentity identity;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootSnapshot published;
+	ClusterControlRootReadToken token;
+	ClusterControlRootReadToken published_token;
+	ClusterControlRootPatch patch;
+	ClusterControlRootResult root_result;
+
+	if (cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES)
+		return false;
+	root_result = cluster_control_root_lookup_owner_by_node_runtime(
+		cluster_node_id, &identity, &snapshot, &token);
+	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		|| !cluster_recovery_duty_key_valid_v1(&identity)
+		|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
+			   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
+		|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+		return false; /* not an open owner of this thread: nothing to close */
+
+	memset(&patch, 0, sizeof(patch));
+	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
+				 | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
+				 | CLUSTER_CONTROL_ROOT_PATCH_TAIL
+				 | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	patch.desired.root_flags = snapshot.root_flags;
+	patch.desired.checkpoint_tli = snapshot.checkpoint_tli;
+	patch.desired.checkpoint_source_kind = snapshot.checkpoint_source_kind;
+	patch.desired.checkpoint_lower_lsn = snapshot.checkpoint_lower_lsn;
+	patch.desired.checkpoint_record_crc32c = snapshot.checkpoint_record_crc32c;
+	patch.desired.tail_tli = snapshot.tail_tli;
+	patch.desired.tail_validation_kind = snapshot.tail_validation_kind;
+	patch.desired.validated_tail_lsn_exclusive =
+		snapshot.validated_tail_lsn_exclusive;
+	patch.desired.tail_last_record_lsn = snapshot.tail_last_record_lsn;
+	patch.desired.tail_last_record_crc32c = snapshot.tail_last_record_crc32c;
+	patch.desired.recovered_tli = snapshot.recovered_tli;
+	patch.desired.recovered_through_lsn_exclusive =
+		snapshot.recovered_through_lsn_exclusive;
+	patch.desired.recovered_last_record_lsn = snapshot.recovered_last_record_lsn;
+	patch.desired.recovered_last_record_crc32c =
+		snapshot.recovered_last_record_crc32c;
+
+	if (!cluster_control_root_publish_authority_bind_v1(
+			&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE))
+		return false;
+	root_result = cluster_control_root_compare_and_publish(
+		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE,
+		&published, &published_token);
+	cluster_control_root_publish_authority_clear_v1();
+	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED) {
+		ereport(LOG,
+				(errmsg("cluster control root: thread %u clean-closed by owner node %d "
+						"(owner incarnation " UINT64_FORMAT ")",
+						identity.origin_thread_id, cluster_node_id,
+						identity.origin_owner_incarnation)));
+		return true;
+	}
+	return false;
+}
+
+/*
+ * cluster_control_root_thread_open_publish -- RF-ROOT P6 (STOP-01 frozen
+ * THREAD_OPEN, the Oracle clean-reopen mainline).
+ *
+ *	A normally-restarted owner reopens its clean-closed redo thread with a
+ *	fresh boot incarnation:  CLOSED -> OPEN with owner = boot_incarnation
+ *	and lineage+1 (the frozen 0x3b mask carries OWNER_LINEAGE).  The
+ *	expected-lifecycle CAS fails closed when the root is NOT CLOSED (first
+ *	formation, rejoin-OPEN, or a crash path), so those flows are untouched.
+ *	The admission / serving gates downstream never consult this publish
+ *	directly;  the survivor's join chain re-validates the exact OPEN owner
+ *	plus the majority COMMITTED JCMK before committing.
+ */
+bool
+cluster_control_root_thread_open_publish(uint64 boot_incarnation)
+{
+	ClusterControlRootIdentity identity;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootSnapshot published;
+	ClusterControlRootReadToken token;
+	ClusterControlRootReadToken published_token;
+	ClusterControlRootPatch patch;
+	ClusterControlRootResult root_result;
+
+	if (cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES
+		|| boot_incarnation == 0)
+		return false;
+	root_result = cluster_control_root_lookup_owner_by_node_runtime(
+		cluster_node_id, &identity, &snapshot, &token);
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): THREAD_OPEN failure
+	 * decomposition.  Capped; removed before the final push. */
+	{
+		static int thread_open_diag = 0;
+
+		if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+			 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+			|| !cluster_recovery_duty_key_valid_v1(&identity)
+			|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
+				   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
+			|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
+			|| identity.root_lineage_seq == UINT64_MAX
+			|| boot_incarnation <= identity.origin_owner_incarnation) {
+			if (thread_open_diag++ < 8)
+				ereport(LOG,
+						(errmsg("TEMP thread open fail: root_result=%d lifecycle=%d "
+								"owner_inc=%llu boot_inc=%llu lineage=%llu key_valid=%d "
+								"transport_comp=%d phase=%d cssd=%d qvotec=%d quorum=%d "
+								"lms_rcv=%d member=%d sj_adm=%d",
+								(int)root_result, (int)snapshot.lifecycle,
+								(unsigned long long)identity.origin_owner_incarnation,
+								(unsigned long long)boot_incarnation,
+								(unsigned long long)identity.root_lineage_seq,
+								cluster_recovery_duty_key_valid_v1(&identity)
+									? 1
+									: 0,
+								cluster_recovery_transport_components_current() ? 1
+																			   : 0,
+								(int)cluster_current_phase(),
+								cluster_cssd_get_status() == CLUSTER_CSSD_READY ? 1
+																			 : 0,
+								cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY
+									? 1
+									: 0,
+								cluster_qvotec_in_quorum() ? 1 : 0,
+								cluster_lms_is_recovery_ready() ? 1 : 0,
+								cluster_membership_is_member(cluster_node_id) ? 1
+																			: 0,
+								cluster_reconfig_self_join_admitted() ? 1 : 0)));
+		}
+	}
+	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		|| !cluster_recovery_duty_key_valid_v1(&identity)
+		|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
+			   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
+		|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
+		|| identity.root_lineage_seq == UINT64_MAX
+		|| boot_incarnation <= identity.origin_owner_incarnation)
+		return false; /* not a clean-closed thread of this owner, or stale */
+
+	memset(&patch, 0, sizeof(patch));
+	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
+				 | CLUSTER_CONTROL_ROOT_PATCH_OWNER_LINEAGE
+				 | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
+				 | CLUSTER_CONTROL_ROOT_PATCH_TAIL
+				 | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	patch.desired.identity.origin_owner_incarnation = boot_incarnation;
+	patch.desired.identity.root_lineage_seq = identity.root_lineage_seq + 1;
+	patch.desired.root_flags = snapshot.root_flags;
+	patch.desired.checkpoint_tli = snapshot.checkpoint_tli;
+	patch.desired.checkpoint_source_kind = snapshot.checkpoint_source_kind;
+	patch.desired.checkpoint_lower_lsn = snapshot.checkpoint_lower_lsn;
+	patch.desired.checkpoint_record_crc32c = snapshot.checkpoint_record_crc32c;
+	patch.desired.tail_tli = snapshot.tail_tli;
+	patch.desired.tail_validation_kind = snapshot.tail_validation_kind;
+	patch.desired.validated_tail_lsn_exclusive =
+		snapshot.validated_tail_lsn_exclusive;
+	patch.desired.tail_last_record_lsn = snapshot.tail_last_record_lsn;
+	patch.desired.tail_last_record_crc32c = snapshot.tail_last_record_crc32c;
+	patch.desired.recovered_tli = snapshot.recovered_tli;
+	patch.desired.recovered_through_lsn_exclusive =
+		snapshot.recovered_through_lsn_exclusive;
+	patch.desired.recovered_last_record_lsn = snapshot.recovered_last_record_lsn;
+	patch.desired.recovered_last_record_crc32c =
+		snapshot.recovered_last_record_crc32c;
+
+	if (!cluster_control_root_publish_authority_bind_v1(
+			&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN))
+		return false;
+	root_result = cluster_control_root_compare_and_publish(
+		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN,
+		&published, &published_token);
+	cluster_control_root_publish_authority_clear_v1();
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): publish result.  Capped;
+	 * removed before the final push. */
+	{
+		static int thread_open_pub_diag = 0;
+
+		if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+			&& thread_open_pub_diag++ < 6)
+			ereport(LOG,
+					(errmsg("TEMP thread open publish fail: result=%d",
+							(int)root_result)));
+	}
+	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& published.identity.origin_owner_incarnation == boot_incarnation
+		&& published.identity.root_lineage_seq == identity.root_lineage_seq + 1) {
+		ereport(LOG,
+				(errmsg("cluster control root: thread %u reopened by owner node %d "
+						"(owner incarnation %llu -> " UINT64_FORMAT ", lineage "
+						UINT64_FORMAT ")",
+						identity.origin_thread_id, cluster_node_id,
+						(unsigned long long)identity.origin_owner_incarnation,
+						boot_incarnation,
+						identity.root_lineage_seq + 1)));
+		return true;
+	}
+	return false;
 }
 
 static bool

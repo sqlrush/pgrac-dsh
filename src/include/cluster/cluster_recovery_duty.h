@@ -132,6 +132,9 @@ extern ClusterRecoveryOwnerImportResult cluster_recovery_owner_import_read_v1(
 	uint64 *out_incarnation);
 extern bool cluster_recovery_owner_rejoin_v1(int32 node_id,
 									 uint64 admitted_incarnation);
+extern bool cluster_control_root_thread_clean_close_publish(void); /* RF-ROOT P6 */
+extern bool cluster_control_root_thread_open_publish(
+	uint64 boot_incarnation); /* RF-ROOT P6 */
 extern ClusterFormationWitnessResult cluster_formation_witness_decide_v1(
 	const ClusterFormationSnapshotV1 *f1, const ClusterFenceAuthorityProof *authority,
 	const ClusterFormationSnapshotV1 *f2, uint16 origin_thread, bool opening_new_duty);
