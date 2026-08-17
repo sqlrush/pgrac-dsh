@@ -225,6 +225,18 @@ cluster_cf_contract_persist(const char *pgdata, ClusterCfContractState state,
 	rec.authority_system_identifier = authority_sysid;
 	cluster_shared_fs_get_storage_uuid(rec.storage_uuid, sizeof(rec.storage_uuid));
 	rec.state = (uint32)state;
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): who overwrites the contract
+	 * anchor to LOCAL_PROBED during the L5 leg.  Capped; removed before the
+	 * final push. */
+	{
+		static int persist_diag = 0;
+
+		if (persist_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP cf contract persist: state=%d pid=%d backend=%d",
+							(int)state, (int)MyProcPid,
+							(int)MyBackendType)));
+	}
 	return write_contract_record(pgdata, &rec);
 }
 

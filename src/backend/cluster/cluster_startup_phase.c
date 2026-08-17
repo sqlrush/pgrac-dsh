@@ -57,6 +57,7 @@
 
 #include "cluster/cluster_elog.h"	/* cluster_phase legacy mirror (HC2) */
 #include "cluster/cluster_cf_enqueue.h"
+#include "cluster/cluster_cf_phase2.h" /* RF-ROOT P6: storage contract verify */
 #include "cluster/cluster_cssd.h"	/* cluster_cssd_start / wait_for_ready (2.5 Sprint A) */
 #include "cluster/cluster_qvotec.h" /* cluster_qvotec_start / wait_for_ready (spec-2.6 Step 3 D8) */
 #include "cluster/cluster_diag.h"	/* cluster_diag_start / wait_for_ready (1.13 Sprint A) */
@@ -1568,6 +1569,22 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 					 "QVOTEC pre-recovery formation gate");
 		return PHASE_RUN_OK;
 	}
+
+	/*
+	 * RF-ROOT P6 (L5/cast-leg contract wedge):  verify the phase-2
+	 * cross-node storage contract HERE, in postmaster context, BEFORE the
+	 * formation wait.  The phase-3 THREAD_OPEN root publish and the
+	 * cast-leg bootstrap CF role gate fail closed on an unverified
+	 * contract, while the StartupXLOG-side verify runs in the startup
+	 * process — which this postmaster phase machine does not fork until
+	 * phase 3 completes, so the startup verify can never precede the
+	 * formation wait.  Postmaster context has the loaded topology, so the
+	 * fresh nonce+ack rendezvous runs here; the StartupXLOG call remains
+	 * (idempotent — a second fresh rendezvous re-confirms and rewrites
+	 * the same CROSSNODE_VERIFIED state).
+	 */
+	if (cluster_phase4_wal_state_configured())
+		cluster_cf_phase2_verify_or_fail(DataDir);
 
 	/*
 	 * RF-ROOT P6 E2: recovery-time WAL retirement needs the same live

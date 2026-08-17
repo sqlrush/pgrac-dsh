@@ -280,10 +280,45 @@ cluster_cf_phase2_verify_or_fail(const char *pgdata)
 	uint64 nonce;
 	uint8 raw[8];
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): unconditional entry so the
+	 * guard values are visible.  Capped; removed before the final push. */
+	{
+		static int top_diag = 0;
+
+		if (top_diag++ < 6)
+			ereport(LOG,
+					(errmsg("TEMP cf phase2 verify top: pid=%d enabled=%d "
+							"node_count=%d shared_auth=%d startup=%d",
+							(int)MyProcPid, cluster_enabled ? 1 : 0,
+							cluster_conf_node_count(),
+							cluster_controlfile_shared_authority ? 1 : 0,
+							AmStartupProcess() ? 1 : 0)));
+	}
+
 	if (!cluster_controlfile_shared_authority)
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): why the fresh verify
+		 * never runs during t243.  Capped; removed before the final push. */
+		static int auth_off_diag = 0;
+
+		if (auth_off_diag++ < 4)
+			ereport(LOG,
+					(errmsg("TEMP cf phase2 verify: shared_authority off (pid=%d)",
+							(int)MyProcPid)));
 		return;
+	}
 	if (!cluster_enabled || cluster_conf_node_count() <= 1)
 		return; /* single-node: no cross-node contract needed */
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): verify entry.  Capped;
+	 * removed before the final push. */
+	{
+		static int entry_diag = 0;
+
+		if (entry_diag++ < 4)
+			ereport(LOG,
+					(errmsg("TEMP cf phase2 verify: entry pid=%d node_count=%d",
+							(int)MyProcPid, cluster_conf_node_count())));
+	}
 
 	/*
 	 * Always run a FRESH rendezvous on a multi-node bootstrap (do not short-
@@ -295,7 +330,17 @@ cluster_cf_phase2_verify_or_fail(const char *pgdata)
 	 */
 	peer_id = find_peer_node();
 	if (peer_id < 0)
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt).  Capped; removed before
+		 * the final push. */
+		static int no_peer_diag = 0;
+
+		if (no_peer_diag++ < 4)
+			ereport(LOG,
+					(errmsg("TEMP cf phase2 verify: no peer configured (pid=%d)",
+							(int)MyProcPid)));
 		return; /* no peer configured -> gate fails closed */
+	}
 
 	if (!pg_strong_random(raw, sizeof(raw)))
 		return; /* no fresh nonce -> leave unverified */
@@ -324,6 +369,19 @@ cluster_cf_phase2_verify_or_fail(const char *pgdata)
 			LOG,
 			(errmsg("cluster cf phase-2: cross-node storage rename contract verified with node %d",
 					peer_id)));
+	}
+	else
+	{
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): rendezvous failure leaves
+		 * the contract unverified.  Capped; removed before the final push. */
+		static int rendezvous_fail_diag = 0;
+
+		if (rendezvous_fail_diag++ < 6)
+			ereport(LOG,
+					(errmsg("TEMP cf phase2 verify: rendezvous failed peer=%d "
+							"timeout_ms=%d pid=%d",
+							peer_id, cluster_cf_enqueue_timeout_ms,
+							(int)MyProcPid)));
 	}
 }
 
