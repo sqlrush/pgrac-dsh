@@ -41,6 +41,7 @@
 #include "access/xlogrecovery.h"
 #ifdef USE_PGRAC_CLUSTER
 #include "cluster/cluster_cf_enqueue.h"
+#include "cluster/cluster_clean_leave.h" /* shutdown handoff drain (RF-ROOT P6) */
 #include "cluster/cluster_recovery_duty.h" /* thread clean-close publish (RF-ROOT P6) */
 #include "cluster/cluster_wal_state.h"
 #endif
@@ -367,6 +368,18 @@ CheckpointerMain(void)
 		int			elapsed_secs;
 		int			cur_timeout;
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): prove the checkpointer's
+		 * main loop is live during phase 4 (run123 W2 deadlock hunt).
+		 * Capped; removed before the final push. */
+		{
+			static int ckpt_loop_diag = 0;
+
+			if (ckpt_loop_diag++ < 3)
+				ereport(LOG,
+						(errmsg("TEMP checkpointer loop: pid=%d shutdown_pending=%d",
+								(int)MyProcPid, ShutdownRequestPending ? 1 : 0)));
+		}
+
 		/* Clear any already-pending wakeups */
 		ResetLatch(MyLatch);
 
@@ -383,6 +396,19 @@ CheckpointerMain(void)
 		 */
 		if (((volatile CheckpointerShmemStruct *) CheckpointerShmem)->ckpt_flags)
 		{
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): run123 W2 deadlock
+			 * hunt.  Capped; removed before the final push. */
+			{
+				static int ckpt_flags_diag = 0;
+
+				if (ckpt_flags_diag++ < 3)
+					ereport(LOG,
+							(errmsg("TEMP checkpointer sees flags=%x pid=%d",
+									(unsigned)((volatile CheckpointerShmemStruct *)
+												   CheckpointerShmem)
+										->ckpt_flags,
+									(int)MyProcPid)));
+			}
 			do_checkpoint = true;
 			PendingCheckpointerStats.requested_checkpoints++;
 		}
@@ -602,6 +628,24 @@ HandleCheckpointerInterrupts(void)
 		 */
 		ExitOnAnyError = true;
 
+#ifdef USE_PGRAC_CLUSTER
+		/*
+		 * RF-ROOT P6 (L5 clean-reopen mainline):  run the 5.13 cooperative
+		 * CF/GES remaster + holder handoff FIRST, while GES/LMON are still
+		 * alive, so the survivors confirm the new generation and their CF
+		 * shard stays NORMAL — the restarting owner then reopens its
+		 * clean-closed thread against a survivor-mastered CF instead of
+		 * wedging on the death-driven freeze.  Any handoff timeout, version
+		 * drift or holder-validation failure fails closed (returns false)
+		 * and the node falls back to the existing fail-stop path: the
+		 * THREAD_CLEAN_CLOSE publish below is then skipped so the survivors
+		 * treat this departure as an ordinary death (no fake clean-leave).
+		 */
+		bool clean_handoff_ok = cluster_clean_leave_shutdown_drain();
+#else
+		bool clean_handoff_ok = true;
+#endif
+
 		/*
 		 * Close down the database.
 		 *
@@ -626,8 +670,20 @@ HandleCheckpointerInterrupts(void)
 		 * thread (OPEN -> CLOSED, lineage unchanged).  Immediate / error
 		 * exits never reach here, so a crash never writes CLOSED and stays
 		 * on the survivor-driven failure-recovery FSM.
+		 *
+		 * The publish is gated on the 5.13 shutdown handoff above:  a
+		 * CLOSED record without the committed clean-leave would wedge the
+		 * next boot's THREAD_OPEN on the death-driven CF shard freeze, so
+		 * on a failed handoff the root stays OPEN and the restart takes
+		 * the ordinary crash-rejoin chain (fail-closed, 8.B).
 		 */
-		(void)cluster_control_root_thread_clean_close_publish();
+		if (clean_handoff_ok)
+			(void)cluster_control_root_thread_clean_close_publish();
+		else
+			ereport(LOG,
+					(errmsg("cluster clean-leave: shutdown handoff failed; "
+							"skipping THREAD_CLEAN_CLOSE so the survivors run "
+							"the ordinary fail-stop reconfiguration")));
 #endif
 		pgstat_report_checkpointer();
 		pgstat_report_wal(true);

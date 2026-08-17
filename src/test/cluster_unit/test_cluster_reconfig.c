@@ -695,6 +695,22 @@ cluster_clean_leave_in_progress(void)
 	return false;
 }
 
+/* RF-ROOT P6 (L5 wiring): unit stubs for symbols cluster_reconfig.o pulls in
+ * that the pure unit harness does not link. */
+volatile sig_atomic_t ShutdownRequestPending = false;
+
+uint64
+cluster_grd_recovery_done_epoch_for(int32 node pg_attribute_unused())
+{
+	return 0;
+}
+
+bool
+cluster_lmon_reconfig_suppressed(void)
+{
+	return false;
+}
+
 /* declared-peer set:  bit i set → node i is declared in cluster.conf. */
 static bool ut_declared_set[CLUSTER_MAX_NODES];
 static ClusterNodeInfo ut_dummy_node;

@@ -322,6 +322,10 @@ extern bool cluster_recovery_transport_components_current(void); /* RF-ROOT P6 *
 extern bool cluster_recovery_authority_is_current(void);
 extern bool cluster_serving_ready_is_current(void);
 extern bool cluster_authority_serving_rebind_lmon(void);
+/* RF-ROOT P6 (L5 shutdown handoff): the committed LEAVER's serving rebind
+ * (no local episode closes for its own departure; re-stamps from its own
+ * applied CLEAN_LEAVE evidence). */
+extern bool cluster_authority_serving_rebind_leaver(void);
 extern bool cluster_recovery_authority_resid_mode_allowed(
 	const ClusterResId *resid, LOCKMODE mode);
 extern bool cluster_recovery_authority_request_allowed(

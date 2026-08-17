@@ -70,6 +70,10 @@ Cache Fusion / GES / SCN / 集群恢复 / Active Data Guard）。
 
 ## 我的工作区（2026-08-16 建立）
 
+- **DSH 新角色（user 2026-08-17 指令）：审核编码会话（flash 模型）的代码，
+  发现问题立即投递到 `~/pgrac-dsh/DSH-REVIEW.md`（专用审核通道，与编码会话自维护的
+  RFROOT-PLAN.md 分离避免双写冲突）；审核合同六条见 DSH-REVIEW.md 头部。**
+
 - 本地：`~/pgrac-dsh` = git 仓库（main = 上游代码完整副本，59,657 提交）
 - 我的 GitHub 仓库：**https://github.com/sqlrush/pgrac-dsh**（公开）
 - remote：`origin` = pgrac-dsh（我的仓），`upstream` = sqlrush/pgrac（项目公开主仓）

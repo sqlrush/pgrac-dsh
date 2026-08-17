@@ -4739,38 +4739,51 @@ TerminateChildren(int signal)
 	if (PgArchPID != 0)
 		signal_child(PgArchPID, signal);
 #ifdef USE_PGRAC_CLUSTER
-	if (LmonPID != 0)
-		signal_child(LmonPID, signal);
-	if (LckPID != 0)
-		signal_child(LckPID, signal);
-	if (DiagPID != 0)
-		signal_child(DiagPID, signal);
-	if (ClusterStatsPID != 0)
-		signal_child(ClusterStatsPID, signal);
-	/* PGRAC: spec-3.13 — same TerminateChildren for Undo Cleaner. */
-	if (UndoCleanerPID != 0)
-		signal_child(UndoCleanerPID, signal);
-	if (CssdPID != 0)
-		signal_child(CssdPID, signal);
-	if (QvotecPID != 0) /* PGRAC spec-2.6 Step 3 D7 */
-		signal_child(QvotecPID, signal);
-	if (LmsPID != 0) /* PGRAC spec-2.18 Sprint A Step 1 */
-		signal_child(LmsPID, signal);
+	/*
+	 * RF-ROOT P6 (L5 shutdown handoff):  the clean-shutdown mainline must
+	 * hand its CF/GES resources over while the coordination stack is still
+	 * alive (the Oracle behavior boundary — a clean stop lets GES/LMON
+	 * finish, it does not tear them down first).  A FAST shutdown therefore
+	 * SIGTERMs only the ordinary children here; the retained coordination
+	 * stack is retired after the checkpointer exits cleanly (the
+	 * PM_SHUTDOWN_2 path).  Immediate shutdown (SIGQUIT/SIGKILL) still
+	 * kills everything at once, so the crash path is unchanged.
+	 */
+	if (signal != SIGTERM || Shutdown != FastShutdown)
 	{
-		int w; /* PGRAC: spec-7.3 D2 — broadcast to LMS DATA-plane workers */
+		if (LmonPID != 0)
+			signal_child(LmonPID, signal);
+		if (LckPID != 0)
+			signal_child(LckPID, signal);
+		if (DiagPID != 0)
+			signal_child(DiagPID, signal);
+		if (ClusterStatsPID != 0)
+			signal_child(ClusterStatsPID, signal);
+		/* PGRAC: spec-3.13 — same TerminateChildren for Undo Cleaner. */
+		if (UndoCleanerPID != 0)
+			signal_child(UndoCleanerPID, signal);
+		if (CssdPID != 0)
+			signal_child(CssdPID, signal);
+		if (QvotecPID != 0) /* PGRAC spec-2.6 Step 3 D7 */
+			signal_child(QvotecPID, signal);
+		if (LmsPID != 0) /* PGRAC spec-2.18 Sprint A Step 1 */
+			signal_child(LmsPID, signal);
+		{
+			int w; /* PGRAC: spec-7.3 D2 — broadcast to LMS DATA-plane workers */
 
-		for (w = 1; w < CLUSTER_LMS_MAX_WORKERS; w++)
-			if (LmsWorkerPIDs[w] != 0)
-				signal_child(LmsWorkerPIDs[w], signal);
+			for (w = 1; w < CLUSTER_LMS_MAX_WORKERS; w++)
+				if (LmsWorkerPIDs[w] != 0)
+					signal_child(LmsWorkerPIDs[w], signal);
+		}
+		if (LmdPID != 0) /* PGRAC spec-2.19 Sprint A Step 1 */
+			signal_child(LmdPID, signal);
+		if (MrpPID != 0) /* PGRAC spec-6.4 D1 */
+			signal_child(MrpPID, signal);
+		if (RfsPID != 0) /* PGRAC spec-6.4 D3 */
+			signal_child(RfsPID, signal);
+		if (SinvalBcastPID != 0) /* PGRAC spec-2.38 SI Broadcaster */
+			signal_child(SinvalBcastPID, signal);
 	}
-	if (LmdPID != 0) /* PGRAC spec-2.19 Sprint A Step 1 */
-		signal_child(LmdPID, signal);
-	if (MrpPID != 0) /* PGRAC spec-6.4 D1 */
-		signal_child(MrpPID, signal);
-	if (RfsPID != 0) /* PGRAC spec-6.4 D3 */
-		signal_child(RfsPID, signal);
-	if (SinvalBcastPID != 0) /* PGRAC spec-2.38 SI Broadcaster */
-		signal_child(SinvalBcastPID, signal);
 #endif
 }
 

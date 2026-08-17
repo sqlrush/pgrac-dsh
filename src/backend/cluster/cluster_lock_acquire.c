@@ -466,6 +466,21 @@ cluster_lock_acquire_s4_remote_request_wait(const ClusterLockAcquireRequest *req
 	case GES_REJECT_REASON_SHARD_FROZEN:
 		/* Master-side recovery gate (the requester-side gate makes this
 		 * a narrow race window) — same 53R9I retry surface. */
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): which master rejected
+		 * with a frozen shard.  Capped; removed before the final push. */
+		{
+			static int s4_frozen_diag = 0;
+
+			if (s4_frozen_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP s4 shard frozen reject: resid_type=%d "
+								"shard=%u master=%d self=%d",
+								(int)req->resid.type,
+								(unsigned)cluster_grd_shard_for_resource(
+									&req->resid),
+								(int)cluster_grd_lookup_master(&req->resid),
+								(int)cluster_node_id)));
+		}
 		return CLUSTER_LOCK_ACQUIRE_FAIL_SHARD_REMASTERING;
 	case GES_REJECT_REASON_FEATURE_NOT_SUPPORTED:
 		/* spec-5.3 — the cross-node CONVERT path is now live (TM table-lock
@@ -831,6 +846,28 @@ cluster_lock_acquire_seven_step(const ClusterLockAcquireRequest *req)
 		if (!ir_bootstrap_bypass && cluster_grd_shard_phase(gate_shard) != GRD_SHARD_NORMAL) {
 			TimestampTz gate_deadline;
 
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): requester-side freeze
+			 * gate entry for the THREAD_OPEN CF wedge.  Capped; removed
+			 * before the final push. */
+			{
+				static int freeze_gate_diag = 0;
+
+				if (freeze_gate_diag++ < 10)
+					ereport(LOG,
+							(errmsg("TEMP freeze gate: resid_type=%d shard=%u "
+									"phase=%d join_dir=%d episode_epoch=%llu "
+									"master=%d self=%d wait_ms=%d dontwait=%d",
+									(int)req->resid.type, (unsigned)gate_shard,
+									(int)cluster_grd_shard_phase(gate_shard),
+									cluster_grd_join_remaster_in_progress() ? 1
+																		   : 0,
+									(unsigned long long)
+										cluster_grd_recovery_episode_epoch_value(),
+									(int)cluster_grd_lookup_master(&req->resid),
+									(int)cluster_node_id,
+									(int)cluster_grd_remaster_wait_ms,
+									req->dontwait ? 1 : 0)));
+			}
 			if (req->dontwait)
 				return CLUSTER_LOCK_ACQUIRE_FAIL_SHARD_REMASTERING;
 

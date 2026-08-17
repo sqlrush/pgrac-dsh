@@ -335,6 +335,15 @@ static int phase_test_lms_start_calls = 0;
 static uint8 phase_test_formation_epoch = 1;
 static bool phase_test_expire_formation_during_lms = false;
 static bool phase_test_formation_expired = false;
+/* RF-ROOT P6 (L4/L5 wiring): steady-state defaults for the membership /
+ * reconfig / GRD accessor stubs added below. */
+static bool phase_test_membership_member = true;
+static bool phase_test_self_join_admitted = false;
+static uint64 phase_test_episode_epoch = 0;
+static bool phase_test_join_remaster = false;
+/* RF-ROOT P6 (contract-verify-early): the phase-3 handler passes DataDir to
+ * the verify stub; the pure unit harness has no data directory. */
+char *DataDir = NULL;
 
 static void
 record_phase4_event(char event)
@@ -584,6 +593,54 @@ cluster_grd_serving_authority_rebind_lmon(
 		&& formation->reserved[0] == phase_test_formation_epoch
 		&& boot_incarnation == 11
 		&& lms_generation == phase_test_lms_generation;
+}
+
+/* RF-ROOT P6 (L4/L5 wiring): unit stubs for the membership / reconfig / GRD
+ * accessors the startup-phase predicates consult.  Deterministic, mirroring
+ * the production semantics in the pure unit's single-process harness. */
+bool
+cluster_membership_is_member(int32 node_id pg_attribute_unused())
+{
+	return phase_test_membership_member;
+}
+
+bool
+cluster_reconfig_self_join_admitted(void)
+{
+	return phase_test_self_join_admitted;
+}
+
+uint64
+cluster_grd_recovery_episode_epoch_value(void)
+{
+	return phase_test_episode_epoch;
+}
+
+bool
+cluster_grd_join_remaster_in_progress(void)
+{
+	return phase_test_join_remaster;
+}
+
+/* RF-ROOT P6 (contract-verify-early + THREAD_OPEN wiring): unit stubs for the
+ * phase-3 handler's new collaborators.  Deliberate no-ops — the pure unit
+ * harness has no DataDir/control-root/epoch subsystem, and the phase4 event-
+ * sequence assertions above are exact strings. */
+void
+cluster_cf_phase2_verify_or_fail(const char *datadir pg_attribute_unused())
+{
+}
+
+bool
+cluster_control_root_thread_open_publish(uint64 boot_incarnation pg_attribute_unused())
+{
+	return false;
+}
+
+uint64
+cluster_epoch_get_current(void)
+{
+	return phase_test_formation_epoch;
 }
 
 /* spec-2.18 Sprint A stubs. */

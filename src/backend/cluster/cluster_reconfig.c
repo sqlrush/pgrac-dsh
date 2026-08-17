@@ -5588,18 +5588,6 @@ cluster_reconfig_lmon_tick(void)
 	uint8 new_failure_bitmap[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES] = { 0 };
 	uint8 alive_set[CLUSTER_RECONFIG_DEAD_BITMAP_BYTES] = { 0 };
 	int32 self_id;
-
-	/* RF-ROOT P6 fix (t/243 cast wedge): a shutdown-requested LMON must not
-	 * publish new reconfig events (fail-stop / join).  Publishing a FAIL_STOP
-	 * while the node is exiting drives the GRD into a recovery episode whose
-	 * non-current authority then rejects the checkpointer's shutdown-checkpoint
-	 * CF(X) -- the checkpointer dies without the clean STOPPED slot write and
-	 * the shared-root cast fixture fails.  Exit before any mutation once the
-	 * postmaster asked this LMON to stop. */
-	if (ShutdownRequestPending || cluster_lmon_reconfig_suppressed())
-		return;
-
-	/* Bounds checked below; keep the compiler quiet on the early return. */
 	int coordinator;
 	uint64 cssd_dead_generation;
 	uint64 event_id;
@@ -5632,7 +5620,26 @@ cluster_reconfig_lmon_tick(void)
 	 * those actions from STARTING or RECOVERY_AUTHORITY_READY. */
 	ordinary_actions_allowed
 		= !cluster_authority_readiness_managed()
-		  || cluster_authority_serving_rebind_lmon();
+		  || cluster_authority_serving_rebind_lmon()
+		  /* RF-ROOT P6 (L5 shutdown handoff): the committed LEAVER re-binds
+		   * its serving authority from its own applied CLEAN_LEAVE evidence
+		   * (no local episode closes for its own departure), so its shutdown
+		   * checkpoint / THREAD_CLEAN_CLOSE CF acquires keep working. */
+		  || cluster_authority_serving_rebind_leaver();
+
+	/*
+	 * RF-ROOT P6 (t/243 cast wedge + L5 shutdown handoff):  a shutdown-
+	 * requested / reconfig-suppressed LMON must not publish NEW reconfig
+	 * events (fail-stop / join) — publishing a FAIL_STOP while the node is
+	 * exiting drives the GRD into a recovery episode whose non-current
+	 * authority then rejects the checkpointer's shutdown-checkpoint CF(X).
+	 * The gate therefore runs BELOW the serving rebind:  the retained LMON
+	 * must keep re-confirming the serving authority (the shutdown handoff's
+	 * post-commit step depends on it) while only the event PUBLICATION paths
+	 * are silenced.
+	 */
+	if (ShutdownRequestPending || cluster_lmon_reconfig_suppressed())
+		return;
 	offpath_fast_rejoin_actions
 		= cluster_reconfig_fast_rejoin_actions_snapshot();
 	fast_rejoin_control_target

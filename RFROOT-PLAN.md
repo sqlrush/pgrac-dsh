@@ -294,3 +294,198 @@ unit 回归 24/24 + 91/91 + 94/94 全绿。run93/94 均止步于 **L5-recovery
 
 **遗留**：L5-recovery 二段 rejoin；cast-leg bootstrap CF FATAL 变体
 flake；全部 TEMP 诊断最终删除；shm 段清理（每轮 ipcrm）。
+
+---
+
+## L5 二段 rejoin：方案 D 实施进展（run99–110，提交 f87d539440）
+
+**根因**（run99 revet 分解铁证）：L4 rejoin CAS 后 root=OPEN(owner=L4-inc)；
+L5 clean stop 后 foreign-claim FATAL → root 停在 OPEN；node0 的 commit revet
+（`cluster_recovery_owner_rejoin_v1`）OPEN 分支要求 exact owner → L5-inc≠L4-inc
+→ 永久拒绝 → JOIN_COMMITTED 不发布。
+
+**Writer 裁决 = 方案 D（Oracle clean-close/open 主线）**，已接线：
+1. checkpointer：ShutdownXLOG + STOPPED 后发布 **THREAD_CLEAN_CLOSE**
+   （OPEN→CLOSED，lineage 不变；immediate/error 永不至此）——run100 实证
+   "thread 2 clean-closed" ✓。
+2. offpath 分类：`already_running && !prior_unclean_death` = **clean reopen**
+   （不 fence、不 demote sj_adm）；crash/immediate 仍走完整 REJOIN 臂——
+   run103+ 实证 "clean reopen detected" ✓。
+3. phase3 bind/barrier 循环：bind LMS generation 后重试 **THREAD_OPEN**
+   （CLOSED→OPEN，owner=新 boot incarnation，lineage+1）直到落地；CAS 幂等。
+4. `patch_shape_valid` + `compare_and_publish`：冻结 THREAD_OPEN/CLEAN_CLOSE
+   的 lifecycle 契约 + THREAD_OPEN 的 lineage/incarnation 单调性。
+5. S1 恢复锁门：components-only transport 证明（无 seal）+ postmaster
+   （phase3 驱动器）准入 CF(S)/WALR(X)。
+
+**剩余卡点（下一轮主攻）**：L5-recovery boot 里 root lookup 返回
+STORAGE_CONTRACT_UNVERIFIED——anchor 文件（$PGDATA/global/pgrac_cf_contract）
+实测 state=**LOCAL_PROBED**（被 provision 路径的
+`cluster_cf_contract_persist(LOCAL_PROBED)` 覆盖），而 phase2 的 fresh
+rendezvous（"cf phase-2 ... verified"）在 L5-recovery boot 从未成功——
+需定位哪个 boot 跑了 provision、为何 fresh verify 不重建
+CROSSNODE_VERIFIED（node0 在线且探针响应存在）。
+
+**验证状态**：L4 腿持续 GREEN（ok 18-19 跨 10+ run 稳定）；L5 卡点单一化。
+
+---
+
+## contract 验证时机修复（run112–117，提交 836e826fb6）
+
+**根因**：storage contract 的 fresh verify 在 StartupXLOG（startup process）里跑，
+而 postmaster 的 phase 机在 phase3 完成后才 fork startup process —— verify 永远
+晚于 formation wait；cast/L5 腿的 THREAD_OPEN（root 强读需 CROSSNODE_VERIFIED）
+与 bootstrap CF role gate 都 fail-closed → 早期变体（"cannot establish bootstrap
+shared control-file authority"）与 L5 变体同根。
+
+**修复**：phase_3_handler（postmaster 上下文、拓扑已载）开头先跑
+`cluster_cf_phase2_verify_or_fail`（fresh rendezvous）；StartupXLOG 的调用保留
+（幂等二次确认）。run117 实证两侧 "cross-node storage rename contract verified"，
+cast 腿从 bootstrap-CF FATAL 推进到 authority barrier（新卡点：barrier
+request-current result=2 + THREAD_OPEN 的 CF r=18/10——下一轮加分解诊断）。
+
+**phase=4 之谜（run118 结案，非 bug）**：diag 打印的是
+`cluster_current_phase()` 的原始枚举值，CLUSTER_PHASE_3_RECOVERY 的枚举值恰好
+= 4（PRE_INIT=0 … 3_RECOVERY=4, 4_NORMAL=5）。phase 机全程正常，是诊断
+可读性问题；后续 diag 用 phase 字符串或注明枚举语义。
+
+---
+
+## seed checkpointer TRAP 根因与修复（run118 铁证）
+
+**崩溃**：seed 成员 fast stop 时 checkpointer（90130）TRAP
+`failed Assert("!slot->held") cluster_cf_enqueue.c:126`，调用链 =
+`cluster_control_root_thread_clean_close_publish` → `lookup_owner_by_node_runtime`
+→ `cluster_cf_lock(ShareLock)`。后果：seed 停机变 abnormal →
+node0 二节点 boot 被判 "crash-rejoin (prior unclean shutdown)" →
+boot_decided=0 + witness 永不 settle → pg_ctl start 68s bail（run118）。
+
+**根因链（证据闭环）**：
+1. checkpointer 的 checkpoint WAL 删除 preflight（xlog.c:3874+ →
+   `wal_reuse_preflight_roots` → `cluster_control_root_read_canonical(STRONG)`）
+   在 fast-stop 排空窗口做了 CF(S) 协调获取；
+2. 该 STRONG 读结束时 `release_cf` → `cluster_cf_unlock_confirmed` 的 S6 release
+   无法确认 → 按 fail-closed 设计**保留 `slot->held=true`**（清掉会有双重授予
+   风险——设计正确）；
+3. 但 `cluster_cf_lock` 的非重入保护是 **Assert-only**（AGENTS.md 明令禁止的
+   反例）：下一次同进程 CF(S) 获取（clean-close publish）直接 TRAP。
+   `cluster_wal_state` 的 X 路径早有生产级 `cluster_cf_held()` 检查
+   （"Do not trip cluster_cf_lock's deliberate non-reentrant Assert"），
+   而 control-root 的 S 路径没有 —— 不对称漏洞。
+
+**修复（run119 验证中）**：`cluster_cf_lock` 把非重入断言换成生产级
+stale-hold drain：`slot->held` 时先 `cluster_cf_unlock_confirmed` 尝试确认释放
+（未协调 hold 会被清除 → 可继续；协调 hold 确认释放 → 可继续；仍 UNCONFIRMED
+→ 返回 false fail-closed，绝不 TRAP）。带 TEMP drain diag 验证排空在 shutdown
+窗口是否可确认（若不可确认则 clean-close 会合法失败，需另查 S6 失败源）。
+
+**下一轮**：run119 观察（a）drain 是否确认、seed 是否 clean stop；
+（b）cast 腿 barrier request-current 的逐项分解（done0=0/0 + epoch 0→2 +
+quorum 丢失——run118 被 seed TRAP 污染后的状态，需干净复跑重判）；
+（c）L5 腿 THREAD_OPEN 后 revet 全链。
+
+---
+
+## run119/120 证据与用户裁决：L5 clean-reopen CF 冻结死锁（方案 2）
+
+**run119/120 事实**（TRAP 修复后）：ok 1-21 全绿（cast 1-16 / L4 17-19 / L5
+拒绝 20-21），死点 = L5 recovery boot 62s bail。分解铁证：
+- `TEMP s4 shard frozen reject: resid_type=241 shard=1898 master=0` → 后
+  `TEMP freeze gate: phase=2(REBUILDING) master=1 episode_epoch=6`：CF shard
+  在 survivor 冻结（死 master 的 shard）→ remaster 后 joiner 本地 REBUILDING；
+- `TEMP request-current fail: epoch_ok=0(4/3)→(5/4)→(6/5)`：node0 持续推高
+  epoch（join commit 永不成功）；node0 侧 `commit revet owner_ok=0`（root 非
+  OPEN+L5-inc）；node0 join episode hash=H({1}) vs node1 H(0)（AD-023 §9.2.3
+  joiner applied 恒空）→ P7 永不收敛 → 解冻无望。
+- **5 环死锁**：THREAD_OPEN 需 coordinated CF(S/X)（STOP-01 §17.4 冻结明文）
+  → CF shard 冻结 → join 未 commit → epoch 动荡/冻结不解 → THREAD_OPEN 不落地
+  → revet owner_ok=0 → …（spec 内无 CF 豁免先例；IR_M5 只覆盖 fresh-epoch resid）。
+
+**用户裁决（方案 2，逐字要点）**：
+- 复用 5.13 clean-leave 的 cooperative remaster/holder handoff（D4），
+  **不得**另造 CF-only 移交协议；方案 1 的 IR_M5 类比不成立（CF 是跨
+  episode singleton resid；root=CLOSED 不证明 survivor 无 CF 持有；D3 拒绝
+  而非覆盖 → 无完整安全/活性证明；且已是第三层恢复期 gate 豁免 → 触发剥洋葱
+  重评）。
+- Oracle 行为边界：clean stop 必须在 GES/LMON 存活时把离开节点掌管的资源
+  交给 survivor，而非让重启节点穿透冻结门自救（Oracle RAC 管理文档）。
+- **冻结完成条件（序）**：停止新本地 CF 请求 → drain/移交 CF shard master +
+  完整 holder 集 → survivor 确认新 generation 且 shard=NORMAL → 完成
+  shutdown checkpoint / THREAD_CLEAN_CLOSE → 才允许实例退出。
+- 任何 handoff 超时 / generation 漂移 / holder 校验失败不得假 clean-leave
+  完成；fail-closed，回到既有 fail-stop reconfiguration。精确 wire/FSM 是
+  PGRAC adaptation，但行为方向与 Oracle 一致。
+
+**实施（本轮，run121 验证中）**：
+1. `cluster_clean_leave.h`：announce payload 命名 `producer_kind`
+   （OPERATOR=0/SHUTDOWN=1，原 _pad1[0] 字节，wire 兼容）+ 新入口
+   `cluster_clean_leave_shutdown_drain()` 声明；ClusterLeaveState +
+   `shutdown_driven` atomic。
+2. `cluster_clean_leave.c`：survivor disabled-NAK 仅对 OPERATOR producer
+   （shutdown mainline 非 opt-in 特性）；broadcast 盖 producer_kind；
+   operator bind 清 shutdown_driven；新 `cluster_clean_leave_shutdown_drain`：
+   门（enabled/managed/serving/IDLE/无 alive-peer 则 vacuous true）→ 绑 self
+   → REQUESTED marker durable → drive_drain → 阻塞等 COMMITTED（或
+   ABORT/ESCALATE/deadline fail-closed，barrier deadline 界）。
+3. `cluster_clean_leave_policy.c`：payload validator 拒 producer_kind>1。
+4. `checkpointer.c`：ShutdownRequestPending 块顶部（ShutdownXLOG 前）先跑
+   handoff；THREAD_CLEAN_CLOSE 仅 handoff_ok 时发布，失败 LOG 跳过
+   （root 留 OPEN → 重启走既有 crash-rejoin 链，fail-closed 不假绿）。
+5. `cluster_cf_enqueue.c`：leaver drain 期（REQUESTED..COMMITTED）非
+   checkpointer 的本地 CF 获取一律 fail-closed（"停止新本地 CF 请求"）。
+- 依赖既有 5.13 已 ship 机制：survivor ACK（announce handler 不被 GUC gate）、
+  coordinator 两阶段提交（COMMITTING→epoch bump CLEAN_LEAVE→COMMITTED）、
+  clean_departed 抑制二次 fail-stop（CL-I13）、join commit 清 clean_departed
+  （reconfig.c:3333）。t243 未开 clean_leave_enabled（冻结测试）→ shutdown
+  producer 两侧不受该 GUC gate。
+- 预期链：L5 fast stop → handoff commit（epoch bump + clean_departed[1]）→
+  CLOSED → FATAL 拒绝腿不变 → recovery boot THREAD_OPEN 从 survivor-mastered
+  NORMAL CF shard 拿锁 → reopen → revet owner_ok=1 → JOIN_COMMITTED → ok 22+。
+
+### 实施后逐轮剥洋葱（run121-131，全部日志实证）
+
+1. **run121**：handoff 已 commit（"committed departure of node 1 at epoch 1"），
+   但 test 的 node0 CHECKPOINT（handoff 后立即跑）撞 serving 过期窗口 →
+   CF(X) r=10 → 死。修：LEAVE_COMMITTED 发送门控在 survivor serving rebind。
+2. **run122**：首条 LEAVE_COMMITTED 在 `cl_drive_committed_marker_stage` 内
+   **未门控**（我只改了 step-2a 重发）+ leaver 自己 shutdown checkpoint 的
+   CF(X) 撞自己 serving 过期 FATAL。修：两处都门控 + leaver 侧等本地 rebind。
+3. **run123/128（cast 腿变体 C）**：node0 cast boot phase4 "Cluster Stats did
+   not publish READY"（26s）——W2 checkpoint 的 checkpointer CF(X) 阻塞
+   （sees flags 后无 "checkpoint starting"）。老 flake（计划书"剩余 flake：
+   W2 强制 checkpoint 挂 ~25s"）。
+4. **run127/129（cast 腿变体 B）**：node0 cast boot phase3 publish_recovery
+   竞态失败（diag 全好但 valid=false——join 事件在 barrier 与 publish 间推高
+   epoch）→ 重试 barrier gen=2 epoch 过期 → 双 phase3 互等 DONE → 68s bail。
+   老 flake（"L1/cast 腿时序 flake 家族"）。
+5. **run124**：cast 腿全过（ok 1-16+，证明 handoff 没破坏 cast 腿）→ 死在
+   test CHECKPOINT（第 2 层，修后 run131 验证）。
+6. **run126（rebind 根因铁证）**：survivor serving rebind 的 done-key 门要求
+   clean-departed 节点（dormant MEMBER）的 DONE（done gate fail: node=1
+   want=1）——离开节点永不广播 DONE；episode 自己的 P6 门跳过 dead set、
+   rebind 门不跳 → 不一致永堵。修：rebind 门镜像 episode 门跳过 applied
+   dead set（CL-I2 零 leftover → 跳过安全；FAIL_STOP 不受影响）。
+7. **run130/131（leaver 侧第三层）**：handoff COMMITTED 后 leaver 自己的
+   serving rebind **结构性不可能**（离开节点对自身 departure 永不 arm 本地
+   episode → `recovery_episode_epoch==epoch` 门永败）→ phase-2 等满 30s →
+   shutdown checkpoint CF(X) r=10 FATAL → abnormal → registry STOPPED 未写
+   → test "slot 2 not STOPPED (state=1)" bail。修（本轮）：
+   `cluster_grd_serving_authority_rebind_leaver`（无 episode/event-hash/peer-
+   done 门，凭自身 applied CLEAN_LEAVE 证据 + quorum/inc/lms/member/准入 +
+   map-current 重 stamp seal）+ `cluster_authority_serving_rebind_leaver`
+   （phase-state 锁下重捕获 binding formation）+ reconfig tick 双 rebind。
+   （未走 S1 allowlist 扩展——冻结 §8.3 只允许 CF(S)/WALR(X)，leaver 的
+   shutdown checkpoint 需要 CF(X)，不能动冻结 allowlist。）
+
+### 遗留（最终 GREEN 前）
+
+- **cast 腿变体 B/C flake 家族**（publish_recovery 竞态 / W2 checkpoint 挂）
+  ——老问题，run124/119/120 证明可过，最终需稳定化（P6 全绿要求）。
+- **unit 链接面**：test_cluster_startup_phase 已修（补 stub：membership/
+  sj_adm/episode/join_remaster/verify/thread_open/epoch/DataDir，24/24 过）；
+  test_cluster_reconfig 已补 stub（ShutdownRequestPending/grd_done_epoch_for/
+  lmon_reconfig_suppressed）但 **1/91 失败**（test_join_commit_root_gate_failure
+  ut_owner_rejoin_calls 2!=1——HEAD 已 stale，与本次改动无关，待核）；
+  grd/ges/grd_outbound/lock_acquire/wal_state_rmw/recovery_duty/formation_
+  witness/cf_*/cssd/debug 等链接失败 = TEMP diag 新符号 + HEAD 既有 stale——
+  TEMP 诊断清理时一并收敛。

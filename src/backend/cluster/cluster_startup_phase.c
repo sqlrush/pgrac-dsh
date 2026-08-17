@@ -321,7 +321,7 @@ cluster_authority_temp_log_predicate_mismatch(
 			(errmsg("TEMP predicate mismatch: caller=%s state=%d phase=%d "
 					"cssd=%d qvotec=%d quorum=%d self_inc=%llu/%llu "
 					"admitted=%llu lms_gen=%llu/%llu lms_rcv_ready=%d "
-					"formation=%d grd=%d",
+					"formation=%d grd=%d is_member=%d sj_adm=%d",
 					caller, (int)binding->state, (int)cluster_current_phase(),
 					cluster_cssd_get_status() == CLUSTER_CSSD_READY,
 					cluster_qvotec_get_status() == CLUSTER_QVOTEC_READY,
@@ -337,7 +337,9 @@ cluster_authority_temp_log_predicate_mismatch(
 					(int)formation_result,
 					cluster_grd_recovery_authority_is_current(
 						binding->boot_incarnation,
-						binding->lms_generation))));
+						binding->lms_generation),
+					cluster_membership_is_member(cluster_node_id),
+					cluster_reconfig_self_join_admitted())));
 }
 
 /* A sealed serving generation must continue to match the live formation, but
@@ -666,7 +668,8 @@ cluster_recovery_transport_components_current(void)
 
 	if (!cluster_authority_binding_copy(&binding))
 		return false;
-	if (binding.state == CLUSTER_AUTHORITY_RECOVERY_READY) {
+	if (binding.state == CLUSTER_AUTHORITY_RECOVERY_READY
+		|| binding.state == CLUSTER_AUTHORITY_STARTING) {
 		/*
 		 * The durable admission (self_join_admitted, set by the quorum-
 		 * majority COMMITTED marker + publish-proof) is the membership
@@ -685,47 +688,53 @@ cluster_recovery_transport_components_current(void)
 		 * so component currency (cssd/qvotec/quorum/incarnation/LMS
 		 * generation/admission) is the correct strength for its gate.
 		 */
-		if (binding.boot_incarnation == 0 || binding.lms_generation == 0
-			|| cluster_cssd_get_status() != CLUSTER_CSSD_READY
-			|| cluster_qvotec_get_status() != CLUSTER_QVOTEC_READY
-			|| !cluster_qvotec_in_quorum()
-			|| cluster_qvotec_get_self_incarnation() != binding.boot_incarnation
-			|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
-				   != binding.boot_incarnation
-			|| cluster_lms_get_lms_restart_generation() != binding.lms_generation)
-			return false;
-		return cluster_lms_is_recovery_ready()
-			&& (cluster_membership_is_member(cluster_node_id)
-				|| cluster_reconfig_self_join_admitted());
+		bool boot_ok = binding.boot_incarnation != 0;
+		bool lmsgen_ok = binding.lms_generation != 0;
+		bool cssd_ok = cluster_cssd_get_status() == CLUSTER_CSSD_READY;
+		bool qvotec_ok = cluster_qvotec_get_status()
+			== CLUSTER_QVOTEC_READY;
+		bool quorum_ok = cluster_qvotec_in_quorum();
+		bool inc_ok = cluster_qvotec_get_self_incarnation()
+			== binding.boot_incarnation;
+		bool admitted_ok
+			= cluster_membership_get_last_admitted_incarnation(
+				  cluster_node_id)
+			  == binding.boot_incarnation;
+		bool lms_match_ok = cluster_lms_get_lms_restart_generation()
+			== binding.lms_generation;
+		bool lms_rcv_ok = cluster_lms_is_recovery_ready();
+		bool member_ok = cluster_membership_is_member(cluster_node_id)
+			|| cluster_reconfig_self_join_admitted();
+
+		if (!(boot_ok && lmsgen_ok && cssd_ok && qvotec_ok && quorum_ok
+			  && inc_ok && admitted_ok && lms_match_ok && lms_rcv_ok
+			  && member_ok)) {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-check
+			 * decomposition of the components-only transport proof
+			 * (cast-leg THREAD_OPEN CF r=10 hunt).  Capped; removed
+			 * before the final push. */
+			static int transport_comp_diag = 0;
+
+			if (transport_comp_diag++ < 16)
+				ereport(LOG,
+						(errmsg("TEMP transport-comp fail: state=%d phase=%d "
+								"boot_ok=%d lmsgen_ok=%d cssd_ok=%d "
+								"qvotec_ok=%d quorum_ok=%d inc_ok=%d "
+								"admitted_ok=%d lms_match_ok=%d "
+								"lms_rcv_ok=%d is_member=%d sj_adm=%d",
+								(int)binding.state,
+								(int)cluster_current_phase(), boot_ok,
+								lmsgen_ok, cssd_ok, qvotec_ok, quorum_ok,
+								inc_ok, admitted_ok, lms_match_ok,
+								lms_rcv_ok,
+								cluster_membership_is_member(cluster_node_id),
+								cluster_reconfig_self_join_admitted())));
+		}
+		return boot_ok && lmsgen_ok && cssd_ok && qvotec_ok && quorum_ok
+			&& inc_ok && admitted_ok && lms_match_ok && lms_rcv_ok
+			&& member_ok;
 	}
-	if (binding.state != CLUSTER_AUTHORITY_STARTING)
-		return false;
-	/*
-	 * RF-ROOT P6 (clean-reopen / THREAD_OPEN): the STARTING binding gets
-	 * the same components-only treatment.  The THREAD_OPEN root publish
-	 * needs the phase-3 clusterwide CF share-lock (S1 recovery-admission
-	 * gate), and the lock manager is only up once the LMS is recovery-
-	 * ready — but the GRD seal (which the strict preseal proof requires)
-	 * is the recovery-authority barrier's OUTPUT, while the survivor's
-	 * join-chain commit that would converge that barrier needs the
-	 * reopened root first.  Component currency (cssd/qvotec/quorum/
-	 * incarnation/LMS generation/admission, no seal, no formation
-	 * revalidation) is the correct strength for the recovery-time lock
-	 * admission;  the publish itself still re-validates the exact
-	 * expected lifecycle + token under the coordinated CF it acquires.
-	 */
-	if (binding.boot_incarnation == 0 || binding.lms_generation == 0
-		|| cluster_cssd_get_status() != CLUSTER_CSSD_READY
-		|| cluster_qvotec_get_status() != CLUSTER_QVOTEC_READY
-		|| !cluster_qvotec_in_quorum()
-		|| cluster_qvotec_get_self_incarnation() != binding.boot_incarnation
-		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
-			   != binding.boot_incarnation
-		|| cluster_lms_get_lms_restart_generation() != binding.lms_generation)
-		return false;
-	return cluster_lms_is_recovery_ready()
-		&& (cluster_membership_is_member(cluster_node_id)
-			|| cluster_reconfig_self_join_admitted());
+	return false;
 }
 
 bool
@@ -924,6 +933,120 @@ cluster_authority_serving_rebind_lmon(void)
 	ClusterFormationSnapshotV1 current;
 	ClusterFormationSnapshotV1 verify;
 	bool rebound = false;
+	bool ext_cur;
+	bool gen_cur;
+	bool capture_ok;
+	bool moved;
+	bool grd_rebind_ok;
+	bool verify_ok;
+
+	if (!cluster_authority_binding_copy(&binding)
+		|| binding.state != CLUSTER_AUTHORITY_SERVING_READY)
+		return false;
+	ext_cur = cluster_authority_binding_external_current(&binding, true);
+	if (ext_cur)
+		return true;
+	gen_cur = cluster_serving_generation_current(&binding);
+	capture_ok = cluster_reconfig_capture_formation_snapshot_v1(
+		binding.origin_thread, &current);
+	moved = capture_ok
+		&& memcmp(&current, &binding.formation, sizeof(current)) != 0;
+	if (!gen_cur || !capture_ok || !moved) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind entry
+		 * decomposition.  Capped; removed before the final push. */
+		static int serving_rebind_diag = 0;
+
+		if (serving_rebind_diag++ < 16)
+			ereport(LOG,
+					(errmsg("TEMP serving rebind entry fail: state=%d ext_cur=%d "
+							"gen_cur=%d capture=%d moved=%d phase=%d",
+							(int)binding.state, ext_cur, gen_cur, capture_ok,
+							moved, (int)cluster_current_phase())));
+		return false;
+	}
+
+	/* The GRD helper accepts only the exact event already closed by the ordinary
+	 * LMON P0-P7 recovery driver; it does not start a second barrier. */
+	grd_rebind_ok = cluster_grd_serving_authority_rebind_lmon(
+		&current, binding.boot_incarnation, binding.lms_generation);
+	verify_ok = cluster_reconfig_capture_formation_snapshot_v1(
+					binding.origin_thread, &verify)
+		&& memcmp(&current, &verify, sizeof(current)) == 0;
+	if (!grd_rebind_ok || !verify_ok) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD stage
+		 * decomposition.  Capped; removed before the final push. */
+		static int serving_rebind_grd_diag = 0;
+
+		if (serving_rebind_grd_diag++ < 16)
+			ereport(LOG,
+					(errmsg("TEMP serving rebind grd fail: grd_ok=%d verify=%d "
+							"applied_event_id=%llu applied_new_epoch=%llu "
+							"local_epoch=%llu cur_epoch=%llu join_dir=%d "
+							"episode_epoch=%llu",
+							grd_rebind_ok, verify_ok,
+							(unsigned long long)current.applied.event_id,
+							(unsigned long long)current.applied.new_epoch,
+							(unsigned long long)current.local_epoch,
+							(unsigned long long)cluster_epoch_get_current(),
+							cluster_grd_join_remaster_in_progress() ? 1 : 0,
+							(unsigned long long)
+								cluster_grd_recovery_episode_epoch_value())));
+		return false;
+	}
+
+	if (!cluster_phase_state_lock_acquire(LW_EXCLUSIVE))
+		return false;
+	if ((ClusterAuthorityReadiness)pg_atomic_read_u32(
+			&cluster_phase_state->authority_readiness)
+			== CLUSTER_AUTHORITY_SERVING_READY
+		&& cluster_phase_state->authority_origin_thread
+			   == binding.origin_thread
+		&& cluster_phase_state->authority_boot_incarnation
+			   == binding.boot_incarnation
+		&& cluster_phase_state->authority_lms_generation
+			   == binding.lms_generation
+		&& memcmp(&cluster_phase_state->authority_formation,
+				  &binding.formation, sizeof(binding.formation)) == 0) {
+		cluster_phase_state->authority_formation = current;
+		rebound = true;
+	}
+	LWLockRelease(&cluster_phase_state->lwlock);
+
+	return rebound && cluster_serving_ready_is_current();
+}
+
+/*
+ * cluster_authority_serving_rebind_leaver -- RF-ROOT P6 (L5 shutdown
+ * handoff): the committed LEAVER's serving rebind.  The survivor rebind
+ * above requires the ordinary P0-P7 episode to close; the departed node
+ * never arms one for its own departure, so its serving binding would stay
+ * stale forever and its shutdown checkpoint / THREAD_CLEAN_CLOSE CF
+ * acquires would fail closed.  The GRD leaver rebind re-stamps the seal
+ * from the leaver's own applied CLEAN_LEAVE evidence; this wrapper then
+ * re-captures the binding formation under the phase-state lock, exactly
+ * like the survivor path.
+ */
+bool
+cluster_authority_serving_rebind_leaver(void)
+{
+	ClusterAuthorityBindingLocal binding;
+	ClusterFormationSnapshotV1 current;
+	ClusterFormationSnapshotV1 verify;
+	bool rebound = false;
+
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind entry.
+	 * Capped; removed before the final push. */
+	{
+		static int leaver_wrap_diag = 0;
+
+		if (leaver_wrap_diag++ < 60)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind wrap: managed=%d state=%d phase=%d quorum=%d",
+							cluster_authority_readiness_managed(),
+							(int)cluster_authority_readiness_get(),
+							(int)cluster_current_phase(),
+							cluster_qvotec_in_quorum())));
+	}
 
 	if (!cluster_authority_binding_copy(&binding)
 		|| binding.state != CLUSTER_AUTHORITY_SERVING_READY)
@@ -933,17 +1056,45 @@ cluster_authority_serving_rebind_lmon(void)
 	if (!cluster_serving_generation_current(&binding)
 		|| !cluster_reconfig_capture_formation_snapshot_v1(
 			   binding.origin_thread, &current)
-		|| memcmp(&current, &binding.formation, sizeof(current)) == 0)
-		return false;
+		|| memcmp(&current, &binding.formation, sizeof(current)) == 0) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind capture
+		 * gate.  Capped; removed before the final push. */
+		static int leaver_cap_diag = 0;
 
-	/* The GRD helper accepts only the exact event already closed by the ordinary
-	 * LMON P0-P7 recovery driver; it does not start a second barrier. */
-	if (!cluster_grd_serving_authority_rebind_lmon(
+		if (leaver_cap_diag++ < 60)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind capture fail: gen_cur=%d phase=%d",
+							cluster_serving_generation_current(&binding),
+							(int)cluster_current_phase())));
+		return false;
+	}
+
+	/* Only the committed leaver re-binds this way (the GRD helper re-checks
+	 * the applied CLEAN_LEAVE evidence + all fail-closed components). */
+	if (!cluster_grd_serving_authority_rebind_leaver(
 			&current, binding.boot_incarnation, binding.lms_generation)
 		|| !cluster_reconfig_capture_formation_snapshot_v1(
 			   binding.origin_thread, &verify)
-		|| memcmp(&current, &verify, sizeof(current)) != 0)
+		|| memcmp(&current, &verify, sizeof(current)) != 0) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind GRD/verify
+		 * stage.  Capped; removed before the final push. */
+		static int leaver_grd_diag = 0;
+
+		if (leaver_grd_diag++ < 20)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind grd fail: verify_cap=%d verify_eq=%d "
+							"fstate0=%d fstate1=%d ism0=%d ism1=%d dead0=%d dead1=%d",
+							cluster_reconfig_capture_formation_snapshot_v1(
+								binding.origin_thread, &verify),
+							memcmp(&current, &verify, sizeof(current)) == 0,
+							(int)current.membership.membership_state[0],
+							(int)current.membership.membership_state[1],
+							cluster_membership_is_member(0),
+							cluster_membership_is_member(1),
+							(current.applied.dead_bitmap[0] >> 0) & 1,
+							(current.applied.dead_bitmap[0] >> 1) & 1)));
 		return false;
+	}
 
 	if (!cluster_phase_state_lock_acquire(LW_EXCLUSIVE))
 		return false;
@@ -1740,10 +1891,11 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 			{
 				static int phase3_loop_diag_count = 0;
 
-				if (phase3_loop_diag_count++ < 12)
+				if (phase3_loop_diag_count++ < 16)
 					ereport(LOG,
-							(errmsg("TEMP phase3 loop: lms_gen=%llu self_fstate=%d "
+							(errmsg("TEMP phase3 loop: phase=%d lms_gen=%llu self_fstate=%d "
 									"applied_new_epoch=%llu local_epoch=%llu cur_epoch=%llu",
+									(int)cluster_current_phase(),
 									(unsigned long long)lms_generation,
 									(int)formation_snapshot.membership.membership_state[cluster_node_id],
 									(unsigned long long)formation_snapshot.applied.new_epoch,

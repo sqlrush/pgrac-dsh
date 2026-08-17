@@ -3056,13 +3056,33 @@ qvotec_poll_once(void)
 
 		/* spec-5.15 §2.6: ACK only after a strict majority of the same
 		 * disks complete write + durability + exact region-3 readback. */
-		if (have_join_submit)
-			cluster_reconfig_join_qvotec_complete(
-				join_marker_operation,
-				qvotec_join_marker_ack_proven_fds(
-					qvotec_fds, qvotec_n_disks, join_target_node,
-					join_marker_slot, join_disk_write_succeeded),
-				NULL);
+	if (have_join_submit)
+	{
+		bool proven;
+
+		proven = qvotec_join_marker_ack_proven_fds(
+			qvotec_fds, qvotec_n_disks, join_target_node,
+			join_marker_slot, join_disk_write_succeeded);
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): join-marker ack
+		 * decomposition for the L5 second-rejoin wedge.  Capped; removed
+		 * before the final push. */
+		{
+			static int join_ack_diag = 0;
+
+			if (join_ack_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP join marker ack: target=%d op=%d proven=%d "
+								"write_ok=%d/%d/%d disks=%d",
+								join_target_node, (int)join_marker_operation,
+								proven ? 1 : 0,
+								join_disk_write_succeeded[0] ? 1 : 0,
+								join_disk_write_succeeded[1] ? 1 : 0,
+								join_disk_write_succeeded[2] ? 1 : 0,
+								qvotec_n_disks)));
+		}
+		cluster_reconfig_join_qvotec_complete(
+			join_marker_operation, proven, NULL);
+	}
 
 		/*
 		 * spec-5.18 §2.5: ack the removal-marker submit.  It rode in the self-slot

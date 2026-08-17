@@ -55,9 +55,11 @@
 #include "cluster/cluster_ic_tier1.h"		 /* cluster_ic_tier1_get_peer_fd (RF-ROOT P6 diag) */
 #include "cluster/cluster_epoch.h"			 /* spec-4.6 D1 — accepted epoch reads */
 #include "cluster/cluster_external_fence.h" /* STOP04 rejoin cleanup cut */
+#include "cluster/cluster_clean_leave.h"	 /* RF-ROOT P6: leaver write-refusal gate */
 #include "cluster/cluster_reconfig.h"		 /* spec-4.6 D1 — reconfig event consume */
 #include "cluster/cluster_qvotec.h"
 #include "cluster/cluster_recovery_duty.h"
+#include "cluster/cluster_startup_phase.h" /* RF-ROOT P6 diag — cluster_current_phase */
 #include "cluster/cluster_thread_recovery.h" /* spec-4.11 D3 — unfreeze gate */
 #include "cluster/cluster_undo_resid.h"		 /* spec-5.22a D1-5 — undo-class hash-route guard */
 #include "storage/procsignal.h"				 /* spec-4.6 D3 — redeclare broadcast */
@@ -1251,8 +1253,27 @@ cluster_grd_serving_authority_rebind_lmon(
 		|| pg_atomic_read_u64(&cluster_grd_state->recovery_last_event_id)
 			   != formation->applied.event_id
 		|| pg_atomic_read_u64(&cluster_grd_state->recovery_episode_epoch)
-			   != epoch)
+			   != epoch) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD gate
+		 * decomposition (run125 grd_ok=0 hunt).  Capped; removed before the
+		 * final push. */
+		static int rebind_evt_diag = 0;
+
+		if (rebind_evt_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP grd rebind event gate fail: applied_event_id=%llu "
+							"last_event_id=%llu applied_new_epoch=%llu local=%llu "
+							"cur=%llu episode_epoch=%llu",
+							(unsigned long long)formation->applied.event_id,
+							(unsigned long long)pg_atomic_read_u64(
+								&cluster_grd_state->recovery_last_event_id),
+							(unsigned long long)formation->applied.new_epoch,
+							(unsigned long long)epoch,
+							(unsigned long long)cluster_epoch_get_current(),
+							(unsigned long long)pg_atomic_read_u64(
+								&cluster_grd_state->recovery_episode_epoch))));
 		return false;
+	}
 
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 		bool formation_member
@@ -1285,10 +1306,40 @@ cluster_grd_serving_authority_rebind_lmon(
 		|| pg_atomic_read_u64(
 			   &cluster_grd_state->recovery_event_bitmap_hash) != bitmap_hash
 		|| !cluster_grd_authority_map_is_current(
-			refresh, members_lo, members_hi))
+			refresh, members_lo, members_hi)) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind GRD hash
+		 * gate decomposition.  Capped; removed before the final push. */
+		static int rebind_hash_diag = 0;
+
+		if (rebind_hash_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP grd rebind hash gate fail: refresh=%llu "
+							"applied_hash=%llu event_hash=%llu map_cur=%d",
+							(unsigned long long)refresh,
+							(unsigned long long)bitmap_hash,
+							(unsigned long long)pg_atomic_read_u64(
+								&cluster_grd_state->recovery_event_bitmap_hash),
+							cluster_grd_authority_map_is_current(
+								refresh, members_lo, members_hi))));
 		return false;
+	}
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 		if (!cluster_grd_authority_member(members_lo, members_hi, i))
+			continue;
+		/*
+		 * RF-ROOT P6 (clean-leave serving rebind):  the applied event's dead
+		 * bitmap names this episode's departed set.  A clean-departed node
+		 * stays a dormant MEMBER (§3.7: the declared set is static) yet can
+		 * never announce a re-declare DONE for the departure that removed it
+		 * — mirror the episode's own P6 skip (the all_done gate skips
+		 * dead-bitmap nodes the same way) or every post-leave serving rebind
+		 * (and with it every CF admission on the survivor) wedges forever.
+		 * CL-I2 guarantees the departed node holds zero GES/PCM references,
+		 * so its missing DONE is provably vacuous.  For FAIL_STOP the crashed
+		 * node is not an authority member, so this skip never fires and the
+		 * failure-driven path is unchanged.
+		 */
+		if ((formation->applied.dead_bitmap[i / 8] >> (i % 8)) & 1)
 			continue;
 		/* A JOIN recipient held no pre-episode grants to re-declare; the
 		 * ordinary P6 gate deliberately excludes it.  Every survivor still
@@ -1298,8 +1349,27 @@ cluster_grd_serving_authority_rebind_lmon(
 			 || pg_atomic_read_u64(
 					&cluster_grd_state->recovery_done_bitmap_hash[i])
 					!= bitmap_hash)
-			&& !join_fence_is_recipient_for(i, epoch))
+			&& !join_fence_is_recipient_for(i, epoch)) {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): serving-rebind done-key
+			 * gate decomposition.  Capped; removed before the final push. */
+			static int rebind_done_diag = 0;
+
+			if (rebind_done_diag++ < 10)
+				ereport(LOG,
+						(errmsg("TEMP grd rebind done gate fail: node=%d "
+								"done_epoch=%llu want=%llu done_hash=%llu "
+								"want_hash=%llu fence_recipient=%d",
+								i,
+								(unsigned long long)pg_atomic_read_u64(
+									&cluster_grd_state->recovery_done_epoch[i]),
+								(unsigned long long)epoch,
+								(unsigned long long)pg_atomic_read_u64(
+									&cluster_grd_state
+										 ->recovery_done_bitmap_hash[i]),
+								(unsigned long long)bitmap_hash,
+								join_fence_is_recipient_for(i, epoch))));
 			return false;
+		}
 	}
 
 	/* Publish with the validity words cleared.  Readers that race this update
@@ -1337,6 +1407,211 @@ cluster_grd_serving_authority_rebind_lmon(
 
 	if (!cluster_grd_recovery_authority_is_current(
 			boot_incarnation, lms_generation)) {
+		grd_recovery_authority_clear_seal();
+		return false;
+	}
+	return true;
+}
+
+/*
+ * cluster_grd_serving_authority_rebind_leaver -- RF-ROOT P6 (L5 shutdown
+ * handoff): the committed LEAVER's serving rebind.
+ *
+ *	The survivor-side rebind above is gated on the ordinary P0-P7 episode
+ *	closing — but the departed node NEVER arms a recovery episode for the
+ *	departure that removed itself (its drain was cooperative and complete,
+ *	CL-I2 zero leftover, so there is nothing to rebuild or re-declare).  Its
+ *	serving binding still went stale (the CLEAN_LEAVE event moved the
+ *	formation), and the leaver's shutdown checkpoint + THREAD_CLEAN_CLOSE CF
+ *	acquires need the ordinary serving admission.  This rebind re-stamps the
+ *	authority seal from the leaver's OWN applied CLEAN_LEAVE evidence — no
+ *	episode gates, no event-hash gate (no episode ever stamped one), no peer
+ *	DONE keys (the survivors' DONE is irrelevant to a node that already
+ *	drained and is about to exit).  Fail-closed on everything that still
+ *	must hold: quorum, incarnation, LMS generation, membership/admission,
+ *	and a current, NORMAL-shard master map.
+ */
+bool
+cluster_grd_serving_authority_rebind_leaver(
+	const ClusterFormationSnapshotV1 *formation, uint64 boot_incarnation,
+	uint64 lms_generation)
+{
+	uint64 bitmap_hash;
+	uint64 epoch;
+	uint64 members_lo = 0;
+	uint64 members_hi = 0;
+	uint64 refresh;
+	int i;
+
+	if (formation == NULL || boot_incarnation == 0 || lms_generation == 0
+		|| cluster_grd_state == NULL || cluster_grd_entry_htab == NULL
+		|| !cluster_qvotec_in_quorum()
+		|| cluster_qvotec_get_self_incarnation() != boot_incarnation
+		|| cluster_lms_get_lms_restart_generation() != lms_generation
+		|| !cluster_membership_is_member(cluster_node_id)
+		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
+			   != boot_incarnation) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind head-gate
+		 * decomposition.  Capped; removed before the final push. */
+		static int leaver_rebind_head_diag = 0;
+
+		if (leaver_rebind_head_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind head fail: quorum=%d inc=%llu/%llu "
+							"lms=%llu/%llu is_member=%d admitted=%llu/%llu",
+							cluster_qvotec_in_quorum(),
+							(unsigned long long)
+								cluster_qvotec_get_self_incarnation(),
+							(unsigned long long)boot_incarnation,
+							(unsigned long long)
+								cluster_lms_get_lms_restart_generation(),
+							(unsigned long long)lms_generation,
+							cluster_membership_is_member(cluster_node_id),
+							(unsigned long long)
+								cluster_membership_get_last_admitted_incarnation(
+									cluster_node_id),
+							(unsigned long long)boot_incarnation)));
+		return false;
+	}
+
+	/*
+	 * Only the committed leaver re-binds this way.  Evidence = THIS node's
+	 * own clean-leave state + the settled epoch — NOT the applied reconfig
+	 * event:  AD-023 §9.2.3 mirrors to the leaver too (a node never applies
+	 * an event whose dead bitmap contains itself), so the leaver's applied
+	 * event is empty (kind=NONE, new_epoch=0) while its local epoch already
+	 * advanced via the epoch-observe path.  The write-refusal flag is on
+	 * from REQUESTED through COMMITTED, exactly the committed shutdown
+	 * window this rebind serves.
+	 */
+	if (!cluster_clean_leave_node_refuses_writes()
+		|| formation->local_epoch == 0
+		|| formation->local_epoch != cluster_epoch_get_current()) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind event-gate
+		 * decomposition.  Capped; removed before the final push. */
+		static int leaver_rebind_evt_diag = 0;
+
+		if (leaver_rebind_evt_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind event fail: kind=%d new_epoch=%llu "
+							"local=%llu cur=%llu dead_self=%d refuses=%d",
+							(int)formation->applied.reconfig_kind,
+							(unsigned long long)formation->applied.new_epoch,
+							(unsigned long long)formation->local_epoch,
+							(unsigned long long)cluster_epoch_get_current(),
+							(formation->applied.dead_bitmap[cluster_node_id / 8]
+							 >> (cluster_node_id % 8))
+								& 1,
+							cluster_clean_leave_node_refuses_writes())));
+		return false;
+	}
+	epoch = formation->local_epoch;
+
+	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
+		bool formation_member
+			= formation->membership.membership_state[i]
+			  == CLUSTER_MEMBER_MEMBER;
+
+		if (formation_member
+			&& (cluster_conf_lookup_node(i) == NULL
+				|| !cluster_membership_is_member(i)))
+			return false;
+		if (!formation_member && cluster_conf_lookup_node(i) != NULL
+			&& cluster_membership_is_member(i))
+			return false;
+		if (!formation_member)
+			continue;
+		if (i < 64)
+			members_lo |= UINT64_C(1) << i;
+		else
+			members_hi |= UINT64_C(1) << (i - 64);
+	}
+	if (!cluster_grd_authority_member(
+			members_lo, members_hi, cluster_node_id))
+		return false;
+
+	refresh = pg_atomic_read_u64(
+		&cluster_grd_state->master_map_refresh_count);
+	bitmap_hash = cluster_grd_dead_bitmap_hash(
+		formation->applied.dead_bitmap);
+	if (refresh == 0 || bitmap_hash == 0
+		|| !cluster_grd_authority_map_is_current(
+			refresh, members_lo, members_hi)) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind map-gate
+		 * decomposition.  Capped; removed before the final push. */
+		static int leaver_rebind_map_diag = 0;
+
+		if (leaver_rebind_map_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind map fail: refresh=%llu hash=%llu "
+							"map_cur=%d",
+							(unsigned long long)refresh,
+							(unsigned long long)bitmap_hash,
+							cluster_grd_authority_map_is_current(
+								refresh, members_lo, members_hi))));
+		return false;
+	}
+
+	/* Publish with the validity words cleared (same discipline as the
+	 * survivor rebind above). */
+	grd_recovery_authority_clear_seal();
+	pg_write_barrier();
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_formation_epoch, epoch);
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_bitmap_hash, bitmap_hash);
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_members[0], members_lo);
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_members[1], members_hi);
+	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
+		bool member = cluster_grd_authority_member(members_lo, members_hi, i);
+
+		pg_atomic_write_u64(
+			&cluster_grd_state->recovery_authority_done_epoch[i],
+			member ? epoch : 0);
+		pg_atomic_write_u64(
+			&cluster_grd_state->recovery_authority_done_hash[i],
+			member ? bitmap_hash : 0);
+	}
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_master_refresh, refresh);
+	pg_write_barrier();
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_boot_incarnation,
+		boot_incarnation);
+	pg_atomic_write_u64(
+		&cluster_grd_state->recovery_authority_lms_generation,
+		lms_generation);
+
+	if (!cluster_grd_recovery_authority_is_current(
+			boot_incarnation, lms_generation)) {
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): leaver-rebind stamp
+		 * re-validation decomposition.  Capped; removed before the final
+		 * push. */
+		static int leaver_stamp_diag = 0;
+
+		if (leaver_stamp_diag++ < 10)
+			ereport(LOG,
+					(errmsg("TEMP leaver rebind stamp fail: epoch=%llu cur=%llu "
+							"map_cur=%d is_member=%d admitted=%llu/%llu "
+							"quorum=%d inc=%llu/%llu lms=%llu/%llu",
+							(unsigned long long)epoch,
+							(unsigned long long)cluster_epoch_get_current(),
+							cluster_grd_authority_map_is_current(
+								refresh, members_lo, members_hi),
+							cluster_membership_is_member(cluster_node_id),
+							(unsigned long long)
+								cluster_membership_get_last_admitted_incarnation(
+									cluster_node_id),
+							(unsigned long long)boot_incarnation,
+							cluster_qvotec_in_quorum(),
+							(unsigned long long)
+								cluster_qvotec_get_self_incarnation(),
+							(unsigned long long)boot_incarnation,
+							(unsigned long long)
+								cluster_lms_get_lms_restart_generation(),
+							(unsigned long long)lms_generation)));
 		grd_recovery_authority_clear_seal();
 		return false;
 	}
@@ -2698,20 +2973,61 @@ grd_recovery_authority_request_current(uint64 request_generation)
 		&cluster_grd_state->recovery_authority_members[0]);
 	members_hi = pg_atomic_read_u64(
 		&cluster_grd_state->recovery_authority_members[1]);
-	if (boot_incarnation == 0 || lms_generation == 0 || refresh == 0
-		|| cluster_epoch_get_current() != epoch
-		|| cluster_grd_recovery_in_progress()
-		|| cluster_cssd_get_status() != CLUSTER_CSSD_READY
-		|| !cluster_qvotec_in_quorum()
-		|| cluster_qvotec_get_self_incarnation() != boot_incarnation
-		|| cluster_lms_get_lms_restart_generation() != lms_generation
-		|| cluster_membership_get_last_admitted_incarnation(cluster_node_id)
-			   != boot_incarnation
-		|| !cluster_grd_authority_member(
-			members_lo, members_hi, cluster_node_id)
-		|| !cluster_grd_authority_map_is_current(
-			refresh, members_lo, members_hi))
-		return false;
+	{
+		bool boot_ok = boot_incarnation != 0;
+		bool lmsgen_ok = lms_generation != 0;
+		bool refresh_ok = refresh != 0;
+		bool epoch_ok = cluster_epoch_get_current() == epoch;
+		bool progress_ok = !cluster_grd_recovery_in_progress();
+		bool cssd_ok = cluster_cssd_get_status() == CLUSTER_CSSD_READY;
+		bool quorum_ok = cluster_qvotec_in_quorum();
+		bool inc_ok = cluster_qvotec_get_self_incarnation()
+			== boot_incarnation;
+		bool lms_match_ok = cluster_lms_get_lms_restart_generation()
+			== lms_generation;
+		bool admitted_ok
+			= cluster_membership_get_last_admitted_incarnation(
+				  cluster_node_id)
+			  == boot_incarnation;
+		bool selfmember_ok = cluster_grd_authority_member(
+			members_lo, members_hi, cluster_node_id);
+		bool map_ok = cluster_grd_authority_map_is_current(
+			refresh, members_lo, members_hi);
+
+		if (!(boot_ok && lmsgen_ok && refresh_ok && epoch_ok && progress_ok
+			  && cssd_ok && quorum_ok && inc_ok && lms_match_ok
+			  && admitted_ok && selfmember_ok && map_ok)) {
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): per-check
+			 * decomposition of the authority-barrier request-current
+			 * head gate (cast-leg terminal result=2 hunt).  Capped;
+			 * removed before the final push. */
+			static int req_current_diag = 0;
+
+			if (req_current_diag++ < 16)
+				ereport(LOG,
+						(errmsg("TEMP request-current fail: phase=%d "
+								"boot_ok=%d lmsgen_ok=%d refresh_ok=%d "
+								"epoch_ok=%d(%llu/%llu) progress_ok=%d "
+								"cssd_ok=%d quorum_ok=%d inc_ok=%d "
+								"lms_match_ok=%d admitted_ok=%d "
+								"selfmember_ok=%d map_ok=%d "
+								"lms_rcv_ready=%d is_member=%d sj_adm=%d",
+								(int)cluster_current_phase(), boot_ok,
+								lmsgen_ok, refresh_ok, epoch_ok,
+								(unsigned long long)
+									cluster_epoch_get_current(),
+								(unsigned long long)epoch, progress_ok,
+								cssd_ok, quorum_ok, inc_ok, lms_match_ok,
+								admitted_ok, selfmember_ok, map_ok,
+								cluster_lms_is_recovery_ready(),
+								cluster_membership_is_member(cluster_node_id),
+								cluster_reconfig_self_join_admitted())));
+		}
+		if (!(boot_ok && lmsgen_ok && refresh_ok && epoch_ok && progress_ok
+			  && cssd_ok && quorum_ok && inc_ok && lms_match_ok
+			  && admitted_ok && selfmember_ok && map_ok))
+			return false;
+	}
 	for (i = 0; i < CLUSTER_MAX_NODES; i++) {
 		bool request_member
 			= cluster_grd_authority_member(members_lo, members_hi, i);
