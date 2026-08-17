@@ -541,8 +541,9 @@ extern bool cluster_clean_leave_verify_no_leftover(int32 leaving_node_id);
  * cluster_clean_leave_shutdown_drain -- RF-ROOT P6 (L5 clean-reopen mainline,
  * the STOP-01 shutdown-handoff wiring).
  *
- *	Run by the CHECKPOINTER at the top of the clean-shutdown sequence (fast
- *	stop), BEFORE the shutdown checkpoint and THREAD_CLEAN_CLOSE.  Reuses the
+ *	Run by the CHECKPOINTER inside the clean-shutdown sequence (fast stop),
+ *	AFTER the shutdown checkpoint and the STOPPED wal-state publish (STOP-01
+ *	I7 / RF-ROOT P6 contract 1) and BEFORE THREAD_CLEAN_CLOSE.  Reuses the
  *	frozen 5.13 cooperative remaster / holder handoff:  REQUESTED marker +
  *	announce (producer_kind=SHUTDOWN) → survivor ACKs → GES drain +
  *	remaster → GCS flush → barrier → survivor-coordinator two-phase commit

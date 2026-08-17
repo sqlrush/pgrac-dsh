@@ -1792,14 +1792,17 @@ cluster_clean_leave_drive_drain(void)
  * cluster_clean_leave_shutdown_drain -- RF-ROOT P6 (L5 clean-reopen mainline,
  * the STOP-01 shutdown-handoff wiring; contract in cluster_clean_leave.h).
  *
- *	Run by the CHECKPOINTER at the top of the clean-shutdown sequence (fast
- *	stop), BEFORE the shutdown checkpoint and THREAD_CLEAN_CLOSE.  Reuses the
- *	frozen 5.13 cooperative remaster/holder handoff verbatim: bind self as the
- *	leaver (no operator preflight — the SHUTDOWN producer is not GUC-gated),
- *	durable REQUESTED marker, the ordinary drive_drain phases, then block here
- *	until the survivor coordinator's two-phase commit reaches COMMITTED (the
- *	survivor-confirmed new generation, with the COMMITTED marker majority-
- *	durable — the §2.5 P1-V0.7 exit gate) or the handoff fails closed.
+ *	Run by the CHECKPOINTER inside the clean-shutdown sequence (fast stop),
+ *	AFTER the shutdown checkpoint and the STOPPED wal-state publish (STOP-01
+ *	I7 / RF-ROOT P6 contract 1: STOPPED occurs only after the clean shutdown
+ *	checkpoint and before coordination drain) and BEFORE THREAD_CLEAN_CLOSE.
+ *	Reuses the frozen 5.13 cooperative remaster/holder handoff verbatim: bind
+ *	self as the leaver (no operator preflight — the SHUTDOWN producer is not
+ *	GUC-gated), durable REQUESTED marker, the ordinary drive_drain phases,
+ *	then block here until the survivor coordinator's two-phase commit reaches
+ *	COMMITTED (the survivor-confirmed new generation, with the COMMITTED
+ *	marker majority-durable — the §2.5 P1-V0.7 exit gate) or the handoff
+ *	fails closed.
  *
  *	The node must NOT claim a clean-close unless this returns true (a failed
  *	handoff means the survivors treat the departure as an ordinary death and
@@ -1946,11 +1949,11 @@ cluster_clean_leave_shutdown_drain(void)
 		 * un-committed):  the clean-leave epoch advance moved this leaver's own
 		 * formation, so its serving binding is stale until the ordinary LMON
 		 * serving rebind re-confirms after the local GRD episode closes.  The
-		 * shutdown checkpoint that follows needs CF(X) through that binding, so
-		 * wait for the rebind (bounded by the same barrier deadline).  Past the
-		 * deadline the commit is still irrevocable — proceed with a warning
-		 * rather than fake a failure (the survivors already hold the durable
-		 * clean-departed evidence either way).
+		 * THREAD_CLEAN_CLOSE publish that follows needs CF(S) through that
+		 * binding, so wait for the rebind (bounded by the same barrier
+		 * deadline).  Past the deadline the commit is still irrevocable —
+		 * proceed with a warning rather than fake a failure (the survivors
+		 * already hold the durable clean-departed evidence either way).
 		 */
 		if (result) {
 			for (;;) {
