@@ -630,7 +630,21 @@ cssd_advance_liveness_tick(void)
 
 	if (CssdShmem == NULL)
 		return;
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): lock entry/exit
+	 * attribution.  Capped; removed before the final push. */
+	{
+		static int liveness_diag = 0;
+
+		if (liveness_diag++ < 4)
+			ereport(LOG, (errmsg("TEMP cssd liveness lock enter")));
+	}
 	LWLockAcquire(&CssdShmem->lwlock, LW_EXCLUSIVE);
+	{
+		static int liveness_diag2 = 0;
+
+		if (liveness_diag2++ < 4)
+			ereport(LOG, (errmsg("TEMP cssd liveness lock got")));
+	}
 	CssdShmem->last_liveness_tick_at = now;
 	CssdShmem->main_loop_iters++;
 	LWLockRelease(&CssdShmem->lwlock);
@@ -962,13 +976,44 @@ CssdMain(void)
 
 			CHECK_FOR_INTERRUPTS();
 
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): bisect between
+			 * CHECK_FOR_INTERRUPTS and shutdown_requested.  Capped; removed
+			 * before the final push. */
+			{
+				static int bisect_diag = 0;
+
+				if (bisect_diag++ < 4)
+					ereport(LOG, (errmsg("TEMP cssd post-interrupts")));
+			}
+
 			if (ConfigReloadPending) {
 				ConfigReloadPending = false;
 				ProcessConfigFile(PGC_SIGHUP);
 			}
 
+			{
+				static int bisect_diag2 = 0;
+
+				if (bisect_diag2++ < 4)
+					ereport(LOG, (errmsg("TEMP cssd pre-shutdown-check")));
+			}
+
 			if (ShutdownRequestPending || cssd_shutdown_requested())
 				break;
+
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): log the loop
+			 * liveness every 25th iteration + the shutdown/liveness lock
+			 * entries.  Capped; removed before the final push. */
+			{
+				static long long cssd_loop_diag = 0;
+
+				if ((cssd_loop_diag++ % 25) == 0 && cssd_loop_diag < 2500)
+					ereport(LOG,
+							(errmsg("TEMP cssd loop alive: iters=%lld "
+									"main_iters=%lld",
+									(long long)cssd_loop_diag,
+									(long long)CssdShmem->main_loop_iters)));
+			}
 
 			cssd_advance_liveness_tick();
 
@@ -1006,6 +1051,16 @@ CssdMain(void)
 						   WAIT_EVENT_CLUSTER_BGPROC_CSSD_MAIN_LOOP);
 			if (rc & WL_LATCH_SET)
 				ResetLatch(MyLatch);
+
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 cssd-freeze hunt): post-wait
+			 * liveness.  Capped; removed before the final push. */
+			{
+				static int wait_diag = 0;
+
+				if (wait_diag++ < 4)
+					ereport(LOG, (errmsg("TEMP cssd loop woke: rc=%d timeout_ms=%d",
+										 rc, timeout_ms)));
+			}
 		}
 	}
 
