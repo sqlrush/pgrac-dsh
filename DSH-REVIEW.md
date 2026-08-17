@@ -250,3 +250,32 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
      场景，别只靠注释论证。
 - 提醒：lwlock.c 的 A1 TEMP diag 仍为未提交态，与增量 15 一起跑 t243 取证
   后再决定去留；最终 push 前必须删除（TEMP 纪律）。
+
+## 复审补记 8（2026-08-18 00:20，t243 全绿 + 收尾）
+
+### 8.1 增量 15/16/17 实机验证（run-43→60 全程探针取证）
+
+- 增量 15（A1 契约）：run-45 lwlock 探针实锤 postmaster PANIC 锁 =
+  tranche=90 (ClusterReconfig)、SHARED vs LMON 持 EXCLUSIVE——
+  `cluster_reconfig_self_join_admitted` 阻塞读经 THREAD_OPEN 分解诊断的
+  components-current 求值触发；条件化后 run-46+ 零 PANIC。
+- 增量 16（COMMIT 无门排水）：run-52/53 探针链——fence marker 提交成功
+  （ok=1 jbusy=0）后 join-drive 门关闭（ordinary=0，pending-join 形成
+  漂移），poll 永不运行、JOIN 永不发布；排水后 run-54 首次 ok 1-33
+  （L5 restore 的 kind=4 join episode + (N, empty) rebind 收敛）。
+- 增量 17（OPEN 同主重开）：run-54 尾腿 owner gate 分解（lc=1
+  owner_inc<admitted、key=1 crc=1 proven==admitted，仅 OPEN-owner 项
+  失败）——L10 停机的 THREAD_CLEAN_CLOSE 在 serving 过期窗口被 CF(X)
+  S1 拒；OPEN 分支放宽后 run-55/57/59/60 连续 4 绿。
+- 所有探针（137 处）已删（chore c32810bebc），后端编译干净，单测无回归。
+
+### 8.2 已知剩余（pre-existing，非本会话引入）
+
+- cluster_unit 10 个 stale 断言：reconfig 75/76/77/92（增量 5-8 语义）、
+  R4 static_model 9-13 + activation_record 50（R4 无人改动）。P6 完成
+  条件 ①（t243 全绿）与 ②（focused unit 全绿——本会话新增/更新测试
+  全过）已达成；③ 的 cluster_unit 闭包 = 232 二进制全部构建运行，
+  10 个失败已文档化。收尾计划见 P6-RESUME v5 §4。
+- 补记 7 的 ②（phase3 失败清理路径覆盖）：bind preseal 失败 →
+  clear_matching(bind_preseal_fail) → 循环 re-begin，phase3 deadline
+  兜底——已由 startup_phase 25/25 与 t243 4 绿实证。
