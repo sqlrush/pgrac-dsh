@@ -5012,6 +5012,18 @@ cluster_reconfig_note_self_admitted(uint64 admitted_epoch)
  *	recovery-transport components predicate (crash-rejoin DONE ingress)
  *	uses it as the membership proof while the LMON self-state byte can
  *	transiently read JOINING under the boot-decided latch.
+ *
+ *	AD-023 A1 (specs-local STOP-01 increment 15): the postmaster drives
+ *	phase 3 without a PGPROC, and this accessor is reachable from its
+ *	transport/preseal/thread-open paths (e.g. the THREAD_OPEN failure
+ *	decomposition, which evaluates the components predicate while the
+ *	LMON may hold the reconfig lock EXCLUSIVE for a membership mutation).
+ *	A blocking shared acquire would PANIC in LWLockQueueSelf; the
+ *	no-PGPROC caller may only take an immediately available shared lock
+ *	and reads contention as not-yet-admitted (fail-closed — every
+ *	consumer is an AND gate that retries on the next tick/frame, and the
+ *	admission flag is a monotonic latch, so a transient false only
+ *	delays, never grants).
  */
 bool
 cluster_reconfig_self_join_admitted(void)
@@ -5020,7 +5032,11 @@ cluster_reconfig_self_join_admitted(void)
 
 	if (ReconfigShmem == NULL)
 		return false;
-	LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
+	if (MyProc == NULL) {
+		if (!LWLockConditionalAcquire(&ReconfigShmem->lock, LW_SHARED))
+			return false;
+	} else
+		LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
 	admitted = ReconfigShmem->self_join_admitted != 0;
 	LWLockRelease(&ReconfigShmem->lock);
 	return admitted;

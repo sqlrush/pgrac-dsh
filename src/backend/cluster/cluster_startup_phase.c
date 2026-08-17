@@ -631,7 +631,22 @@ cluster_recovery_transport_is_current(void)
 		 * destroy a binding on the phase gate alone. */
 		cluster_authority_temp_log_predicate_mismatch(&binding,
 													 "recovery_transport");
-		if (cluster_current_phase() == CLUSTER_PHASE_3_RECOVERY)
+		/*
+		 * RF-ROOT P6 (specs-local STOP-01 increment 15): a STARTING
+		 * binding with lms_generation == 0 is the postmaster's mid-bind
+		 * window — begin() can only create the binding before the LMS
+		 * process exists (live generation still 0), and the phase-3 loop
+		 * binds the generation on its next iteration.  The preseal fails
+		 * on that window by construction (lms_generation != 0 is one of
+		 * its terms), but destroying the binding here forces a full
+		 * re-begin on every peer DONE ingress and starves the loop;
+		 * the phase-3 loop owns that binding and clears it itself on its
+		 * own failure paths (bounded by the phase-3 deadline).  Only a
+		 * bound generation that drifted from the live formation is
+		 * genuinely stale.
+		 */
+		if (cluster_current_phase() == CLUSTER_PHASE_3_RECOVERY
+			&& binding.lms_generation != 0)
 			cluster_authority_clear_matching(&binding,
 											 "recovery_transport_stale");
 	}

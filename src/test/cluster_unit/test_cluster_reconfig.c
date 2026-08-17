@@ -1262,6 +1262,49 @@ UT_TEST(test_formation_snapshot_no_pgproc_never_blocks_on_reconfig_lock)
 }
 
 
+UT_TEST(test_self_join_admitted_no_pgproc_never_blocks_on_reconfig_lock)
+{
+	ClusterReconfigState *state;
+	PGPROC fake_proc;
+
+	reconfig_init_done = false;
+	cluster_reconfig_shmem_init();
+	state = (ClusterReconfigState *)reconfig_shmem_storage;
+
+	/* Postmaster phase 3 has no PGPROC (AD-023 A1, STOP-01 increment 15):
+	 * a contended reconfig lock must read not-yet-admitted without
+	 * entering LWLockQueueSelf. */
+	MyProc = NULL;
+	ut_lwlock_conditional_result = false;
+	ut_lwlock_blocking_calls = 0;
+	ut_lwlock_conditional_calls = 0;
+	UT_ASSERT(!cluster_reconfig_self_join_admitted());
+	UT_ASSERT_EQ(ut_lwlock_conditional_calls, 1);
+	UT_ASSERT_EQ(ut_lwlock_blocking_calls, 0);
+
+	/* The same no-PGPROC caller may take an immediately available shared
+	 * lock, still without using the blocking acquisition primitive. */
+	state->self_join_admitted = 1;
+	ut_lwlock_conditional_result = true;
+	ut_lwlock_blocking_calls = 0;
+	ut_lwlock_conditional_calls = 0;
+	UT_ASSERT(cluster_reconfig_self_join_admitted());
+	UT_ASSERT_EQ(ut_lwlock_conditional_calls, 1);
+	UT_ASSERT_EQ(ut_lwlock_blocking_calls, 0);
+	state->self_join_admitted = 0;
+
+	/* Ordinary processes retain the existing blocking read semantics. */
+	memset(&fake_proc, 0, sizeof(fake_proc));
+	MyProc = &fake_proc;
+	ut_lwlock_blocking_calls = 0;
+	ut_lwlock_conditional_calls = 0;
+	UT_ASSERT(!cluster_reconfig_self_join_admitted());
+	UT_ASSERT_EQ(ut_lwlock_conditional_calls, 0);
+	UT_ASSERT_EQ(ut_lwlock_blocking_calls, 1);
+	MyProc = NULL;
+}
+
+
 /* spec-5.15A: the node-local replacement episode is part of the existing
  * reconfig region and starts as the exact canonical empty image.  Together
  * with the v3 mailbox widening plus P04's volatile fast-rejoin evidence this
@@ -5432,6 +5475,7 @@ main(void)
 	UT_RUN(test_reconfig_shmem_size_positive);
 	UT_RUN(test_reconfig_shmem_init_idempotent);
 	UT_RUN(test_formation_snapshot_no_pgproc_never_blocks_on_reconfig_lock);
+	UT_RUN(test_self_join_admitted_no_pgproc_never_blocks_on_reconfig_lock);
 	UT_RUN(test_reconfig_replacement_episode_is_embedded_and_zero_initialized);
 	UT_RUN(test_reconfig_publish_increments_apply_counter);
 	UT_RUN(test_reconfig_publish_overwrites_event_seq_monotonically);

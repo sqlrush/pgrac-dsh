@@ -176,7 +176,10 @@ ges_readiness_allows_early_opcode(uint32 opcode)
 		allowed = cluster_recovery_transport_components_current();
 		/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): REDECLARE_DONE gate
 		 * verdict + component decomposition.  Capped; removed before the
-		 * final push. */
+		 * final push.  NB: uses the side-effect-free components predicate
+		 * — cluster_recovery_transport_is_current() clears a stale
+		 * STARTING binding, and a diagnostic must not destroy the
+		 * postmaster's mid-bind phase-3 binding (increment 15). */
 		{
 			static int gate_diag_count = 0;
 
@@ -191,7 +194,9 @@ ges_readiness_allows_early_opcode(uint32 opcode)
 								cluster_membership_is_member(cluster_node_id) ? 1
 																			 : 0,
 								cluster_lms_is_recovery_ready() ? 1 : 0,
-								cluster_recovery_transport_is_current() ? 1 : 0)));
+								cluster_recovery_transport_components_current()
+									? 1
+									: 0)));
 		}
 		return allowed;
 	}
