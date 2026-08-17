@@ -212,10 +212,19 @@ ges_readiness_allows_protocol_request(uint32 opcode,
 	if (opcode == GES_REQ_OPCODE_REDECLARE)
 		return cluster_recovery_transport_is_current()
 			&& cluster_recovery_authority_resid_mode_allowed(resid, mode);
+	/* RF-ROOT P6 (specs-local STOP-01 增量 3): the phase-3 recovery
+	 * CF(S)/WALR(X) REQUEST admission mirrors S1 — the postmaster phase-3
+	 * driver is admitted for the frozen allowlist on the components-only
+	 * transport proof (the GRD seal is the barrier's OUTPUT while the
+	 * THREAD_OPEN CF(S) is its INPUT).  The seal gate below is unchanged
+	 * for every other request. */
+	if (opcode == GES_REQ_OPCODE_REQUEST)
+		return cluster_recovery_authority_resid_mode_allowed(resid, mode)
+			&& (cluster_recovery_authority_is_current()
+				|| (cluster_current_phase() == CLUSTER_PHASE_3_RECOVERY
+					&& cluster_recovery_transport_components_current()));
 	if (!cluster_recovery_authority_is_current())
 		return false;
-	if (opcode == GES_REQ_OPCODE_REQUEST)
-		return cluster_recovery_authority_resid_mode_allowed(resid, mode);
 	if (opcode == GES_REQ_OPCODE_RELEASE)
 		return ges_recovery_release_resid_allowed(resid);
 	return false;
@@ -254,9 +263,13 @@ ges_readiness_allows_grant(const ClusterGrdGrantIdentity *grant,
 		return cluster_recovery_transport_is_current()
 			&& cluster_recovery_authority_resid_mode_allowed(resid,
 														grant->mode);
+	/* RF-ROOT P6 (specs-local STOP-01 增量 3): the phase-3 allowlist grant
+	 * mirror (see ges_readiness_allows_protocol_request). */
 	return grant->request_opcode == GES_REQ_OPCODE_REQUEST
-		&& cluster_recovery_authority_is_current()
-		&& cluster_recovery_authority_resid_mode_allowed(resid, grant->mode);
+		&& cluster_recovery_authority_resid_mode_allowed(resid, grant->mode)
+		&& (cluster_recovery_authority_is_current()
+			|| (cluster_current_phase() == CLUSTER_PHASE_3_RECOVERY
+				&& cluster_recovery_transport_components_current()));
 }
 
 static bool
@@ -274,8 +287,10 @@ ges_readiness_allows_local_origin(uint32 opcode, const ClusterResId *resid,
 			&& cluster_recovery_authority_resid_mode_allowed(resid, mode);
 	if (opcode != GES_REQ_OPCODE_REQUEST)
 		return false;
+	/* RF-ROOT P6 (specs-local STOP-01 增量 3): mirror S1 — the postmaster
+	 * phase-3 driver is admitted for the frozen CF(S)/WALR(X) allowlist. */
 	return cluster_recovery_authority_request_allowed(
-		resid, mode, AmStartupProcess());
+		resid, mode, AmStartupProcess() || !IsUnderPostmaster);
 }
 
 static bool
@@ -294,9 +309,13 @@ ges_readiness_allows_local_release_origin(const ClusterResId *resid)
 		: (resid->type == CLUSTER_WAL_RETENTION_RESID_TYPE
 			   ? ExclusiveLock
 			   : NoLock);
+	/* RF-ROOT P6 (specs-local STOP-01 增量 3): the release leg must admit
+	 * exactly the acquire leg's callers — an admitted acquire whose release
+	 * is refused leaves a ghost GRD holder that starves every later CF(X)
+	 * waiter (observed: W2 checkpoint wedge). */
 	return expected_mode != NoLock
 		&& cluster_recovery_authority_request_allowed(
-			resid, expected_mode, AmStartupProcess());
+			resid, expected_mode, AmStartupProcess() || !IsUnderPostmaster);
 }
 
 static inline bool
