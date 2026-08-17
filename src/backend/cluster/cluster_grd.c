@@ -2661,10 +2661,9 @@ grd_recovery_barrier_complete(uint64 gen, uint64 episode_epoch)
 				last_sig = sig;
 				ereport(LOG,
 						(errmsg("TEMP grd barrier stall: beid=%d pid=%d "
-								"backend=%d reg=%u acked=%llu acked_epoch=%llu "
+								"reg=%u acked=%llu acked_epoch=%llu "
 								"wait_event=%u gen=%llu epoch=%llu",
 								stall_beid, (int)stall_proc->pid,
-								(int)stall_proc->backendType,
 								(unsigned)pg_atomic_read_u32(
 									&stall_proc->cluster_grd_registered_count),
 								(unsigned long long)pg_atomic_read_u64(
