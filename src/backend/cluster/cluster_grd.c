@@ -2623,6 +2623,62 @@ grd_recovery_barrier_complete(uint64 gen, uint64 episode_epoch)
 	int beid;
 	pid_t self_pid = MyProcPid;
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 L4 hunt): first non-acked backend
+	 * decomposition (change-aware; removed before the final push). */
+	{
+		static int barrier_stall_diag = 0;
+		static int64 last_sig = INT64_MIN;
+		PGPROC *stall_proc = NULL;
+		int stall_beid = 0;
+
+		for (beid = 1; beid <= MaxBackends; beid++) {
+			PGPROC *proc = BackendIdGetProc((BackendId)beid);
+
+			if (proc == NULL)
+				continue;
+			if (proc->pid == 0 || proc->pid == self_pid)
+				continue;
+			if (pg_atomic_read_u32(&proc->cluster_grd_registered_count) == 0)
+				continue;
+			if (pg_atomic_read_u64(&proc->cluster_grd_redeclare_acked) >= gen
+				&& pg_atomic_read_u64(&proc->cluster_grd_redeclare_acked_epoch)
+					   == episode_epoch)
+				continue;
+			stall_proc = proc;
+			stall_beid = beid;
+			break;
+		}
+		if (stall_proc != NULL) {
+			int64 sig = (int64)stall_proc->pid * 16
+				+ (int64)pg_atomic_read_u32(
+					  &stall_proc->cluster_grd_registered_count)
+					  * 4
+				+ (int64)pg_atomic_read_u64(
+					  &stall_proc->cluster_grd_redeclare_acked)
+					  % 4;
+
+			if (barrier_stall_diag++ < 20 || sig != last_sig) {
+				last_sig = sig;
+				ereport(LOG,
+						(errmsg("TEMP grd barrier stall: beid=%d pid=%d "
+								"backend=%d reg=%u acked=%llu acked_epoch=%llu "
+								"wait_event=%u gen=%llu epoch=%llu",
+								stall_beid, (int)stall_proc->pid,
+								(int)stall_proc->backendType,
+								(unsigned)pg_atomic_read_u32(
+									&stall_proc->cluster_grd_registered_count),
+								(unsigned long long)pg_atomic_read_u64(
+									&stall_proc->cluster_grd_redeclare_acked),
+								(unsigned long long)pg_atomic_read_u64(
+									&stall_proc->cluster_grd_redeclare_acked_epoch),
+								(unsigned)pg_atomic_read_u32(
+									&stall_proc->wait_event_info),
+								(unsigned long long)gen,
+								(unsigned long long)episode_epoch)));
+			}
+		}
+	}
+
 	for (beid = 1; beid <= MaxBackends; beid++) {
 		PGPROC *proc = BackendIdGetProc((BackendId)beid);
 
