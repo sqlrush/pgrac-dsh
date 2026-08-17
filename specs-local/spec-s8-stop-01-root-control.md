@@ -1,0 +1,1207 @@
+# S8-STOP-01 — ROOT-CONTROL A.1 repair plus conditional no-generation carrier
+
+> **Status: A1 RELEASED AT `a5358e.../d7277614...` / SUCCESSOR BINDING SAME-HASH PENDING**
+>
+> The prior A1-only product/test release remains valid and is not revoked by this metadata-only parent
+> rebind. Non-A1 RF work remains stopped until Claude records the successor whole-bundle same-hash.
+> This is private design material for `sqlrush/pgrac-design`; it must never be copied or pushed publicly.
+
+| Item | Exact value |
+|---|---|
+| Acceptance ID | `S8-STOP-01 / SIG-01-A1-R / RF-A1-LIFECYCLE-REV1-A` |
+| Product evidence baseline | `f076653df977dfa67c1f8fdaa1f985daf0a240b4` |
+| Approved unified parent | `specs/spec-s8-seven-stop-unified-evaluation.md`; body `bb4c4abe610ba547f25230393fe1075d61d53c35091813508ddba17a7407fa29 / 79 / 5041` |
+| Exact implementation refinement | `25d6dfe18629ca15b016145701f1d120a9778689:talk_20260809-0218.md`; token `RF-A1-LIFECYCLE-REV1-A` |
+| CC adjudication | Gate 8 literal accepted in active talk; receipt commit `a391ba2e6c2be67f1aa08cf5672b2f082d1d6b9d` |
+| Scope | Existing `pgrac_wal_state` A1 repair plus exact no-generation root identity/carrier/migration contract |
+| Explicit exclusions | carrier/migration product activation before their evidence gates; STOP04 concrete provider; durable R8 receipt; post-carrier W6 mirror |
+| Coding order | existing A1 release: common → parallel W1, W2+W4, W5, W6 → W3 last → whole-A1 review → post-repair C2 |
+
+This successor keeps the A1 implementation byte-for-byte in semantic scope and adds the user-approved,
+conditionally inactive no-generation carrier/migration contract needed by the other six STOPs. It does not
+activate that carrier, add a scalar generation, or promote any uncommitted scratch object.
+
+<!-- NORMATIVE-BODY-BEGIN -->
+
+## R0. authority and the nine approved boundaries
+
+This is the single deduplicated W1+W2+W3+W4+W5a+W5b+W6 package. Its only product baseline is public
+`f076653df977dfa67c1f8fdaa1f985daf0a240b4` and the approved RF unified body
+`bb4c4abe610ba547f25230393fe1075d61d53c35091813508ddba17a7407fa29 / 79 / 5041`.
+Early/pre-recovery LMS, postmaster CF, and SIGHUP-triggered phase4 initialization are expressly rejected.
+
+This package is only the caller/lifecycle implementation refinement of approved `SIG-01-A1-R`; it adds no
+authority token, ticket, generation, actor, runtime GUC, shared-memory state, wire, catalog, disk field or
+disk version. The only new externally visible surface is W1's **frontend-initialization-only** initdb handoff
+`--pgrac-wal-state-root=ABSOLUTE_DIR`, which only passes the existing
+`pgrac-init --wal-threads-dir` value to the existing initdb child. It is not runtime or persistent authority
+and cannot be used for repair.
+
+The effects on the user's nine approved RF rows are exactly:
+
+1. Duty identity A is unchanged; no independent scalar generation is introduced.
+2. ROOT A1 repair is refined and implemented here; scope does not expand to a carrier.
+3. Carrier remains strictly gated by `A1 implemented + reviewed + post-C2 evidence` and has zero activation now.
+4. Migration remains strictly after carrier and has zero activation and zero old-format automatic migration now.
+5. STOP03 preserves existing IR/A2/REJOIN-B/A-prime; A1 W6 writes nothing, and a future mirror remains post-IR and separately gated.
+6. STOP04 selects no provider and remains `UNAVAILABLE`.
+7. `SIG-05-R` stack-only/no-ticket remains unchanged.
+8. R8 consumer A still has no durable receipt.
+9. Revised `SIG-09` remains unchanged.
+
+## R1. Oracle evidence boundary
+
+`ORACLE VERIFIED / HIGH`: Oracle uses the CF enqueue to serialize database-wide control-file writes;
+control files carry checkpoint/redo-thread state through create/mount/open lifecycle; public RAC material
+documents LMON/LMS background responsibilities, shared redo threads and survivor recovery; clean shutdown
+and abort/crash have different recovery consequences. Sources are the approved unified packet's Oracle 26
+*Managing Control Files*, *Wait Events*, *RAC Redo Threads*, and Oracle 21 *Introduction to RAC* and
+*Background Processes* references.
+
+`PUBLICLY UNKNOWN`: public sources do not disclose modern RAC control-file exact bytes/checksum/fsync/
+post-read, the exact phase/process that writes thread ACTIVE/STOPPED, exact LMS/CSSD/QVOTEC start order,
+PG-specific FPW sticky behavior, the exact instruction boundary for checkpoint publication, clean-shutdown
+coordination-stack handoff, or compatibility-mirror behavior.
+
+Therefore every exact caller/order/mask/error policy below is a `PGRAC ADAPTATION`. It imitates only the
+Oracle shape of explicit creation, validation before mount/open, CF-serialized control metadata, and clean
+close before coordination drain. It is not presented as Oracle internal implementation.
+
+## R2. common derived predicates and the sole formed-cluster RMW
+
+`REGISTRY_FORMED` is a derived condition, not new state: `cluster.enabled`, nonempty
+`cluster.wal_threads_dir`, and the existing valid v1 `pgrac_wal_state`
+(512-byte header + 128×512-byte slots = 66048 bytes) are all true.
+
+`CF_VERIFIED_X` is true only when all of the following are true: shared CF authority is enabled; LMS is
+enabled and `cluster_lms_is_ready()==true` (`wait_for_ready()==true` with DISABLED does not count); GRD CF
+master lookup is `>=0`; CF(X) acquisition succeeds; and the CF resource did not take
+`GES_REJECT_REASON_MASTER_DEAD_NATIVE/OK_NATIVE`. `cluster_lock_acquire_s4` must reject dead-master-native
+for `CLUSTER_CF_RESID_TYPE`; any `OK_NATIVE` in a formed registry is nonaffirmative. No new held bit is
+needed: these predicates plus the existing successful held state prove the coordinated hold.
+
+Every W2–W5 mutation of an existing formed registry uses this sole algorithm:
+
+1. obtain `CF_VERIFIED_X`;
+2. while locked, fresh-read the header and exact own slot and validate size, header CRC, slot CRC, thread,
+   node and state;
+3. copy the fresh image and change only the caller's frozen field mask;
+4. recompute the CRC over `[0,504)`, issue an exact 512-byte `pwrite`, reject short write, and fsync the file;
+5. use a distinct buffer for a fresh `pread`, reclassify it, and validate field-by-field that masked values
+   equal their requested values and every byte outside the mask equals fresh-before;
+6. unlock.
+
+No failure may unlink, truncate, rename, empty-rebuild or issue a compensating overwrite. A physical
+partial/torn image may remain CORRUPT, but post-read and successor readers must detect it fail-closed and
+preserve it.
+
+W1's only mutation is explicit offline creation before the cluster is formed. It uses O_EXCL plus offline
+formation proof and cannot coexist with a live writer. Once formed, W1 runtime has no writer and therefore
+does not bypass the common CF domain.
+
+## R3. exact phase and caller table
+
+| ID | Exact caller/phase | Oracle fact/unknown | PGRAC adaptation, field mask and failure | Performance/reliability |
+|---|---|---|---|---|
+| W1-create | `pgrac-init`-driven initdb frontend finalization, after `initialize_data_directory()` succeeds and before initdb `fsync_pgdata`/success return | VERIFIED: control files are explicitly created; UNKNOWN: Oracle bytes/creator syscall | R4; only fresh/offline root O_EXCL creation of existing v1 66048-byte registry, full-file post-read; failure exits nonzero and preserves partial evidence | one 66 KiB write plus file/root fsync; no runtime cost |
+| W1-runtime | initial postmaster, crash-shmem reinitialization `cluster_wal_thread_init`, and configured single-user gate | VERIFIED: control metadata is readable before mount/open; UNKNOWN: Oracle exact process | runtime read-only validate; missing/wrong-size/corrupt/foreign evidence is FATAL `53RA2`, preserving inode/bytes; configured `postgres --single` is FATAL before StartupXLOG because coordinated CF service is absent; flat/noncluster is unchanged | one startup read; removes runtime create/unlink risk |
+| W2 | phase4 initial ClusterStats child after `InitAuxiliaryProcess` gives it PGPROC, at SPAWNING→READY | VERIFIED: thread/control state precedes open/serving; UNKNOWN: Oracle writer process/order | Stats performs existing durable self-fence; self-fenced skips W2/checkpoint then becomes READY under existing policy; otherwise `CF_VERIFIED_X`, fresh EMPTY or valid own slot, CORRUPT/FOREIGN FATAL; mask=`identity,state=ACTIVE,tli,started_at,last_updated,highest_lsn,highest_scn,refresh_interval_ms,merge_recovered_lsn=0`, preserving checkpoint/fpw/reserved; unlock after post-read | one CF+512-byte fsync per incarnation; failure prevents Stats READY and admission |
+| W5b-EOR | StartupXLOG end-of-recovery `UpdateFullPageWrites` caller | FPW is PG-specific | EOR never writes registry; off→on enables immediately in PG-safe order; true→desired-false returns closed/deferred, leaves `Insert->fullPageWrites=true`, and emits no false WAL; if replay says historical `lastFullPageWrites=false`, read-only validation must prove valid own slot sticky=1, otherwise Startup FATAL | no CF wait; conservative FPW may add WAL but cannot lower safety |
+| W5b-steady | only non-EOR `CreateCheckPoint`, after outer checkpoint CF acquire/fresh shared-control read and before that function's first `START_CRIT_SECTION()`; SIGHUP never initializes phase4 | Oracle exact behavior unknown; PG-specific | borrow outer `CF_VERIFIED_X`, never re-enter; when desired=false and Insert=true, own slot must be OK+ACTIVE; sticky=1 is no-write success, otherwise mask only `fpw_was_off:0→1`, fsync/post-read; only then enter PG critical, emit `XLOG_FPW_CHANGE(false)`, set Insert=false; failure leaves true, emits no false WAL, warns/returns closed, lets checkpoint continue, and retries at next non-EOR checkpoint; desired true enables immediately; SIGHUP desired false only leaves mismatch | no loop-head/SIGHUP CF storm; at most one extra 512-byte fsync when first setting sticky; failure degrades to FPW on |
+| W5a | non-EOR online/forced/shutdown `CreateCheckPoint`, after durable `UpdateControlFile()`'s corresponding `END_CRIT_SECTION()` and before `SyncPostCheckpoint`/WAL recycle | VERIFIED: control file carries checkpoint progress and is CF-serialized; UNKNOWN: exact order/caller | EOR has no advert; borrow outer `CF_VERIFIED_X`; mask only `checkpoint_redo_lsn=checkPoint.redo`, preserve all else, fsync/post-read; false warns, advertises nothing new, keeps old value, lets checkpoint continue, retries next checkpoint | at most one 512-byte fsync per non-EOR checkpoint; stale/zero causes extra replay/fail-closed, never skip |
+| phase4 ACK | Stats releases CF after W2, then calls `RequestCheckpoint(CHECKPOINT_IMMEDIATE|CHECKPOINT_FORCE|CHECKPOINT_WAIT)` and becomes READY only after return | Oracle exact ACK unknown | done_cv proves PG checkpoint completion only, not W5a/W5b helper success; W5 effects are judged directly from slot/FPW tests, with no receipt/bit/counter; checkpoint ERROR keeps Stats not READY; RequestCheckpoint's done_cv has no independent timeout, while the shared admission deadline causes honest FATAL/teardown on expiry and adds no cancellation protocol | one forced checkpoint per startup |
+| W4 | Stats only after initial W2; READY main loop and RUNNING respawn | Oracle thread/control telemetry shape VERIFIED; cadence/fields UNKNOWN | initial Stats enters loop only after W2; RUNNING respawn validates own OK+ACTIVE but never repeats W2/forced checkpoint; each tick obtains `CF_VERIFIED_X`; mask only `tli,last_updated,highest_lsn,highest_scn,refresh_interval_ms`, never state/started_at/checkpoint/fpw/W6/reserved; failure is typed skip, LOG once plus existing refresh-fail counter, with no overwrite retry | at most one CF+512-byte fsync per stats cadence; no transaction hot path |
+| W3 | clean smart/fast checkpointer after `ShutdownXLOG()` returns, before checkpointer `proc_exit(0)` | VERIFIED: clean close differs from crash recovery; UNKNOWN: exact Oracle actor/stack order | checkpointer has PGPROC and obtains `CF_VERIFIED_X`; fresh own ACTIVE, or own STOPPED idempotent no-op; mask=`state=STOPPED,last_updated,tli,highest_lsn,highest_scn`, preserving identity/started_at/checkpoint/fpw/W6/reserved; EMPTY/CORRUPT/FOREIGN/CF/I/O false warns, leaves ACTIVE/evidence, and lets shutdown continue; immediate/fatal never call W3 | one CF+512-byte fsync per clean shutdown; failure conservatively appears crashed next start |
+| W6 | cold xlogrecovery, online recovery orchestrator, and every correctness reader | VERIFIED: survivor reads/replays failed redo; UNKNOWN: Oracle/PGRAC mirror | delete/disable both A1 writers; historical/forged nonzero `merge_recovered_lsn` is exactly zero to every correctness reader and cannot create a skip; retained evidence/replay stays real; W2 may clear own bytes; W4/W5 preserve; diagnostics may show `raw_ignored` only; no post-carrier mirror code/activation | removes write/skip risk; may cause conservative extra replay |
+
+## R4. exact W1 offline provisioning
+
+1. Reject `initdb -c/--set + IsBootstrapProcessingMode` as creator identity: initdb `--check` probes and
+   the real `--boot` share that mode, while later standalone is NormalProcessing. That seam can write too
+   early or make a later probe FATAL before finalization.
+2. Before touching ROOT, `pgrac-init --wal-threads-dir=ROOT --node-id=N` performs a read-only preflight:
+   ROOT is absolute/canonical with no symlink escape; if registry is absent, ROOT is fresh and empty and
+   this PGDATA is fresh. It creates only exact `ROOT/thread_(N+1)` and passes both `-X` and
+   `--pgrac-wal-state-root=ROOT` to the same initdb child. Existing registry means join verify-only.
+3. First-node formation with absent registry is serialized: immediately before finalization, any ROOT entry
+   or thread other than this direct child `thread_(N+1)` fails. Concurrent first creates allow the O_EXCL
+   winner to finish; a loser may verify only a complete valid file. Partial evidence fails immediately and
+   is never waited on or repaired.
+4. After `initialize_data_directory()` succeeds, initdb frontend O_CREAT|O_EXCL creates canonical
+   `ROOT/pgrac_wal_state` owner-only, writes the existing header plus 128 all-zero slots, exact 66048 bytes,
+   fsyncs file and ROOT, then close/reopen/stat/full-preads and byte-validates header plus zero slots.
+   `--no-sync` does not exempt either registry fsync.
+5. `EEXIST` is read-only verify: exact size/header and every slot must be all-zero or a valid self-described
+   CRC slot. Partial/corrupt/foreign evidence exits initdb/pgrac-init nonzero and remains unchanged. There is
+   no temp, rename, unlink cleanup or truncate.
+6. `pgrac-init` writes `cluster.node_id/cluster.wal_threads_dir` only after finalizer success, so initdb
+   backend probes do not enter the runtime registry gate.
+7. A1 changes runtime `cluster_wal_state_ensure` to validate-only open/read and removes every
+   `O_RDWR|O_CREAT|O_EXCL`, unlink, and “remove then rebuild” hint.
+8. Upgrade is not auto-migration. Before A1, the entire cluster must be offline, a valid v1 registry must
+   be proved and backed up. A missing registry in an old deployment can only be created while still on f076
+   under full-cluster stop and controlled single-node validation, or restored from known-valid backup.
+   A1 never creates or repairs it. Plain initdb and flat PostgreSQL remain unchanged.
+
+## R5. exact startup, admission and shutdown sequencing
+
+The sole registry-configured initial/crash-reinit phase4 order is:
+
+```text
+startup process succeeds; checkpointer is alive with PGPROC
+pmState may be PM_RUN for child plumbing, but connsAllowed/PM READY/systemd READY remain false
+DIAG spawn -> exact READY
+CSSD spawn -> exact READY
+QVOTEC spawn -> exact READY -> existing strict multi-node in-quorum proof
+LMS spawn -> cluster_lms_is_ready()==true; DISABLED is failure
+existing node-id/voting/shared-CF validators
+Stats spawn -> SPAWNING
+  durable self-fence direct read
+  fenced: no W2/no checkpoint -> READY
+  unfenced: W2 CF RMW/post-read -> unlock -> FORCE|WAIT checkpoint returns -> READY
+postmaster finalize advances RUNNING
+only now connsAllowed=true and READY advertisement
+```
+
+The registry-configured hot-standby path also cannot advertise ordinary/read-only readiness early. PG
+internal pmState may remain, but ordinary admission waits for this commit. `cluster.enabled=false` or an
+unconfigured registry keeps the vanilla path.
+
+Clean smart/fast shutdown has this sole order:
+
+```text
+first wave stops ordinary backends plus Stats/W4, LMD, Sinval, Undo, DIAG, LCK, and peers
+retain exactly LMON + CSSD + QVOTEC + LMS through checkpoint/W3
+PM_WAIT_BACKENDS clean predicate exempts only those retained PIDs
+checkpointer ShutdownXLOG -> shutdown W5a -> W3 -> exit(0)
+postmaster reaps successful checkpointer
+postmaster SIGTERMs retained stack in reverse: LMS -> QVOTEC -> CSSD -> LMON
+PM_SHUTDOWN_2 waits for retained PIDs plus archiver/walsenders to reach zero, then normal exit
+```
+
+Checkpointer fork failure/abnormal exit, clean→immediate upgrade and FatalError SIGQUIT the retained stack,
+perform no W3, and cannot leak or hang. The old postmaster W3 caller is removed; postmaster never waits on a
+CF condition variable.
+
+## R6. frozen invariants
+
+- I1. Postmaster has no PGPROC and never acquires remote/verified CF; every CF caller is a PGPROC actor.
+- I2. Registry-configured phase4 never advertises ordinary admission/readiness before commit.
+- I3. Formed-registry mutation has no native fallback, unknown master or stale full-slot write.
+- I4. W2/W3/W4/W5 masks are explicit; W4↔W5a/W5b and W2↔W5 interleavings preserve the union.
+- I5. `fpw_was_off` is monotone; sticky fsync+post-read happens before false WAL and Insert=false.
+- I6. W5a advertises only a durable checkpoint and does so before cleanup/recycle; EOR never advertises.
+- I7. STOPPED occurs only after clean shutdown checkpoint and before coordination drain; abort/crash stays ACTIVE.
+- I8. W6 is zero/nonauthority before carrier; forged nonzero cannot reduce replay.
+- I9. Missing/partial/corrupt evidence is never automatically deleted, empty-created or overwritten.
+- I10. Disk path/layout/version/CRC remain `pgrac_wal_state` v1/66048/[0,504).
+- I11. A self-fenced node performs no W2/W4/W5 activation mutation; existing D5 write fence is unchanged.
+- I12. Checkpoint done ACK proves PG checkpoint completion only, never W5 helper success.
+
+## R7. failure and FATAL boundaries
+
+- W1 finalizer/verify exits command nonzero; runtime initial/crash validation is FATAL `53RA2`; configured
+  single-user is FATAL before StartupXLOG. All evidence is preserved.
+- DIAG/CSSD/QVOTEC/LMS exact-ready, quorum, validators, CF, W2, Stats or PG-checkpoint failure/shared-deadline
+  expiry is startup FATAL with no admission. A checkpoint completing after the deadline is not GREEN; normal
+  postmaster teardown applies and no default 30-second success promise is introduced.
+- Self-fence preserves the existing nonfatal write-fenced policy and makes no registry advert.
+- W4 is typed skip/LOG-once/counter with no admission or correctness effect.
+- W5b persistence false lets checkpoint continue, leaves FPW true, emits no false WAL, and retries next non-EOR checkpoint.
+- W5a persistence false lets checkpoint continue, retains the old/zero advert, and retries next checkpoint.
+- Existing outer shared-control CF acquire/read failure remains PG checkpoint ERROR; it is not swallowed as a W5 helper false.
+- W3 false warns, leaves ACTIVE and allows shutdown to continue; the next start treats recovery as required.
+
+## R8. minimum immutable RED/GREEN matrix
+
+1. **W1:** fresh pgrac-init creates exact bytes; second-node join is verify-only; absent nonfresh root,
+   wrong size, bad header, bad slot, injected short write/fsync/post-read all exit nonzero and preserve
+   inode/bytes; initial/crash/single runtime cannot create/unlink/truncate; plain initdb/noncluster unchanged;
+   `--check/--boot/standalone` cannot trigger early.
+2. **CF:** LMS DISABLED-but-wait-true, GRD master=-1 and CF dead-master-native all reject; local/remote
+   coordinated grant works; postmaster CF call count is zero.
+3. **phase4:** exact order and one shared deadline; connsAllowed/READY remain false until Stats READY;
+   Stats owns PGPROC; self-fenced performs no W2/checkpoint; initial/crash-reinit gate runs; RUNNING Stats
+   respawn only validates and does not repeat W2.
+4. **W2:** EMPTY/own-valid/own-prior-ACTIVE crash-incarnation succeed; CORRUPT/FOREIGN are preserved and
+   FATAL; post-read mismatch is FATAL; bytes outside mask are unchanged and W6 clears to zero.
+5. **W5b:** EOR desired-false stays true with no false WAL; historical false+sticky1 passes and sticky0/
+   corrupt is FATAL; non-EOR injected pre-sticky failure emits no false WAL; only sticky fsync/post-read
+   permits false WAL/flag; failure still completes checkpoint and next checkpoint retries; off→on is immediate.
+6. **W5a:** EOR writes zero; online/phase4/shutdown writes after durable-control END_CRIT and before cleanup/
+   recycle, borrows outer CF without re-entry; failure preserves old value and completes checkpoint; next retries.
+7. **W4:** pre-ACTIVE no-op; ACTIVE changes exactly five telemetry fields; CF failure typed-skip/LOG-once;
+   deterministic W4↔W5a/W5b and W2↔W5 schedules preserve unions without sticky/checkpoint lost update.
+8. **W3:** Stats stops first; LMON/CSSD/QVOTEC/LMS remain alive and READY through ShutdownXLOG/W5a/W3;
+   drain begins only after STOPPED post-read; immediate/fatal/checkpoint failure stays ACTIVE and reaps all;
+   W3 CF failure stays ACTIVE while clean exit does not hang.
+9. **W6:** cold and online writer call count is zero; forged nonzero yields skip bound zero in xlogrecovery,
+   cluster_hw_remaster, cluster_recovery_merge, cluster_recovery_worker and orchestrator; retained evidence is
+   actually replayed; diagnostic labels raw_ignored.
+10. **Performance:** startup adds one forced checkpoint only; steady W2/W3=0, W5=checkpoint cadence,
+    W4≤stats cadence; no transaction-path call and no SIGHUP/loop retry storm. Unit/TAP GREEN is not the
+    destination; whole ROOT-A1 review plus post-C2 precedes later formal 4×1×3/rate gates.
+
+The minimum existing test surfaces to extend are
+`src/bin/pgrac/t/001_init.pl`, `src/bin/initdb/t/001_initdb.pl`, cluster_unit wal_state/cf_enqueue/
+xlog/startup_phase/stats/recovery families, and TAP 064/107/243/244/247/248/288.
+
+## R9. exact allowed implementation scope and order
+
+After this exact private body receives same-hash, the public product candidate is limited to:
+
+- `src/bin/pgrac/pgrac-init`;
+- `src/bin/initdb/initdb.c`;
+- `src/include/cluster/cluster_wal_state.h`;
+- `src/backend/cluster/cluster_wal_state.c`, `cluster_startup_phase.c`, `cluster_stats.c`,
+  `cluster_lock_acquire.c`, and only necessary internal headers;
+- `src/backend/access/transam/xlog.c`, `xlogrecovery.c`;
+- `src/backend/postmaster/checkpointer.c`, `postmaster.c`;
+- W6 correctness consumers `cluster_hw_remaster.c`, `cluster_recovery_merge.c`,
+  `cluster_recovery_worker.c`, `cluster_thread_recovery_orchestrator.c`;
+- only the exact existing test surfaces named in R8 and the cluster_unit Makefile entries needed to link them.
+
+No carrier/root-sidecar/migration/STOP04/R8 code may enter this diff. The implementation DAG is:
+
+```text
+common verified-CF + fresh-read/mask/CRC/write/fsync/post-read API
+  -> parallel W1, W2+W4, W5, W6
+  -> combine those exact lanes
+  -> W3 last
+  -> focused/full verification
+  -> one whole-A1 CC code review; P0/P1 only scoped rereview
+  -> post-repair C2
+```
+
+`cluster_wal_state.[ch]` has one common owner. `src/test/cluster_unit/Makefile` has one integration owner.
+W2 and W4 share one lane; W5a and W5b share one lane; W3 is last because its checkpointer/postmaster
+lifecycle depends on W2/W4 and W5. Every production change follows immutable RED → observed expected
+failure → minimal GREEN. Existing unmodified tests that are already green are not RED evidence.
+
+## R10. rollout, rollback and conditional successors
+
+- Rollout is cluster-wide offline: validate and back up v1 registry, then start every node on one A1 build.
+  Mixed f076/A1 is forbidden because f076 writers lack common CF and still treat W6 as authority.
+- Before the first A1 W2, full-cluster shutdown may revert binaries. Once any A1 activation/W2 occurs,
+  including W6 clear, roll forward or roll back only to another A1-compliant build. Automatic f076 rollback
+  is forbidden; a disaster-only f076 return requires a new full-cluster-offline user/CC boundary and a
+  validated backup.
+- Disk v1 is not migrated. Partial/corrupt evidence is never empty-created under rollback or repair language.
+- Carrier remains inactive until A1 is implemented, reviewed and post-repair C2 evidence passes. Its exact
+  sidecar path/ABI/copies/rename contract is a separate frozen gate.
+- Migration remains inactive until the carrier's own evidence gate passes. Its capability/body-digest/round/
+  cutover/no-return contract is separate and there is no automatic old-format migration.
+- STOP04 provider remains `UNAVAILABLE`; post-carrier W6 compatibility mirror has no code or activation here.
+
+## §17 2026-08-08 exact no-generation carrier and publication amendment
+
+### §17.1 Precedence, selected shape, and authority
+
+This section supersedes old §§0.2, 4.2–4.6, 5.2–5.5, 6.2–6.4, 8.1, 9.5, 10.3–10.5,
+11, 14, 16 and Appendix A.1 wherever they conflict.  Non-conflicting identity, range, CRC, lifecycle,
+Oracle-evidence and census rules remain in force.
+
+The one user decision is:
+
+```text
+SIG-01-BUNDLE-V1 = A
+
+A = dedicated 66048-byte control-root sidecar
+  + exact no-generation v1 ABI below
+  + W1-W5 field-RMW repair and pre-critical FPW sticky publication
+  + same-round permanent W6 retirement
+  + existing R4 phase-ACK carrier with exact round/image digest
+  + bit22 root-authority cutover and stated rollback/no-return boundary.
+```
+
+The user-approved RF package selects A.  Until the final eight-body hash set receives CC same-hash agreement,
+`PRODUCT AUTHORIZATION=0`.  No public code, file, wire byte or activation record may be changed.  This
+bundle adds no per-origin generation, WAL record, message kind, daemon, lease, ticket or persistent FSM.
+
+Oracle publicly verifies shared per-instance redo threads, control-file redo-thread/checkpoint/incarnation
+sections, CF-enqueue serialization of shared control-file writes and a control-file transaction sequence.
+Oracle does not publish modern RAC control-file bytes, CRC/copy selection, crash-write protocol or PGRAC
+rename/R4 receipt details.  The carrier, LE layout, CRC/SHA, `.bak`, CF API and R4 migration below are
+therefore `PGRAC ADAPTATION`, not descriptions of Oracle internals.
+
+### §17.2 Duty identity and explicit no-generation replacement
+
+The sole durable duty identity is the 80-byte `ClusterControlRootIdentity` below; its semantic encoding is
+74 padding-free LE bytes. This exact type/alias is shared by STOP02–05/08/09:
+
+```c
+typedef struct ClusterControlRootIdentity {
+    uint64 system_identifier;          /* 0 */
+    uint8  storage_uuid[16];           /* 8 */
+    uint8  authority_uuid[16];         /* 24 */
+    uint16 origin_thread_id;           /* 40 */
+    uint16 reserved42;                 /* 42: zero */
+    int32  origin_node_id;             /* 44 */
+    int64  thread_claim_created_at;    /* 48 */
+    uint32 thread_claim_crc32c;         /* 56 */
+    uint32 reserved60;                 /* 60: zero */
+    uint64 origin_owner_incarnation;   /* 64 */
+    uint64 root_lineage_seq;           /* 72 */
+} ClusterControlRootIdentity;          /* 80 */
+
+typedef ClusterControlRootIdentity ClusterRecoveryDutyKey;
+```
+
+Static assertions freeze `sizeof=80` and every shown offset. Semantic encoding concatenates
+`system_identifier,storage_uuid,authority_uuid,origin_thread_id,origin_node_id,thread_claim_created_at,
+thread_claim_crc32c,origin_owner_incarnation,root_lineage_seq` in that order, with integers LE and no C
+padding/reserved words, yielding exactly 74 bytes. Runtime padding is never hashed or written.
+
+`root_lineage_seq` changes only for a newly admitted owner lineage.  Failure detection, coordinator,
+recoverer, process/node succession and unrelated formation changes do not change it.  Timeline is recovery
+window evidence and is not an identity field.
+
+The old scalar-generation ABI is removed before first activation:
+
+```c
+#define CLUSTER_CONTROL_ROOT_FORMAT_ROOT_V1               UINT64_C(0x01)
+/* format bit 0x02 is forbidden/reserved-zero in v1 */
+#define CLUSTER_CONTROL_ROOT_FORMAT_R14_BOUND_V1           UINT64_C(0x04)
+#define CLUSTER_CONTROL_ROOT_FORMAT_MIGRATION_BINDING_V1   UINT64_C(0x08)
+#define CLUSTER_CONTROL_ROOT_FORMAT_FLAGS_V1               UINT64_C(0x0d)
+
+/* root flag 0x00000002 is forbidden in v1 */
+#define CLUSTER_CONTROL_ROOT_FLAGS_V1                      UINT32_C(0x000001fd)
+
+/* patch bit 0x04 is forbidden in v1 */
+#define CLUSTER_CONTROL_ROOT_PATCH_ALL_V1                  UINT64_C(0xfb)
+```
+
+The v1 reader accepts exact header flags `0x0d` only.  A header with old `0x07/0x0f`, root flag `0x2`,
+patch bit `0x04` or any unknown bit is `BAD_VERSION/BAD_RESERVED`, never a compatibility input.  Because no
+root image has product authority yet, there is no dual reader.  Discovery of a deployed old image stops
+activation and requires a separately approved versioned migration.
+
+These disk/runtime slots retain their widths and become required-zero reserved bytes; they must never be
+renamed or rebound to marker/CSSD/local counters:
+
+| carrier | exact required-zero slot |
+|---|---|
+| `ClusterControlRootDiskV1` | offsets `88..95`, `200..207`, `216..223` |
+| `ClusterControlRootSnapshot` | offsets `96`, `160`, `208` |
+| `ClusterControlRootReadToken` | offset `32` |
+| `ClusterControlRootPatch` | offset `24` |
+
+All remain covered by their enclosing CRC/equality checks.  Their implementation names are
+`reserved88/reserved200/reserved216`, `reserved96/reserved160/reserved208`, `reserved32` and `reserved24`.
+Every writer emits zero; every reader/publisher rejects nonzero.
+
+The complete runtime projections are:
+
+```c
+typedef struct ClusterControlRootSnapshot {
+    ClusterControlRootIdentity identity; /* 0..79 */
+    uint32 lifecycle;                    /* 80 */
+    uint32 root_flags;                   /* 84 */
+    uint64 root_publish_seq;             /* 88 */
+    uint64 reserved96;                   /* 96: zero */
+    uint32 checkpoint_tli;               /* 104 */
+    uint32 tail_tli;                     /* 108 */
+    uint32 recovered_tli;                /* 112 */
+    uint16 checkpoint_source_kind;       /* 116 */
+    uint16 tail_validation_kind;         /* 118 */
+    uint16 conservative_bound_kind;      /* 120 */
+    uint16 reserved122;                  /* 122: zero */
+    uint32 reserved124;                  /* 124: zero */
+    uint64 checkpoint_lower_lsn;         /* 128 */
+    uint64 validated_tail_lsn_exclusive; /* 136 */
+    uint64 recovered_through_lsn_exclusive; /* 144 */
+    uint64 conservative_commit_scn;      /* 152 */
+    uint64 reserved160;                  /* 160: zero */
+    uint64 tail_last_record_lsn;         /* 168 */
+    uint64 recovered_last_record_lsn;    /* 176 */
+    int64  published_at_usec;            /* 184 */
+    uint32 tail_last_record_crc32c;       /* 192 */
+    uint32 checkpoint_record_crc32c;      /* 196 */
+    uint32 recovered_last_record_crc32c;  /* 200 */
+    uint32 lifecycle_reason;             /* 204 */
+    uint64 reserved208;                  /* 208: zero */
+} ClusterControlRootSnapshot;            /* 216 */
+
+typedef struct ClusterControlRootReadToken {
+    uint8  authority_uuid[16];       /* 0 */
+    uint16 origin_thread_id;         /* 16 */
+    uint8  source;                   /* 18 */
+    uint8  lifecycle;                /* 19 */
+    uint32 reserved20;               /* 20: zero */
+    uint64 root_lineage_seq;         /* 24 */
+    uint64 reserved32;               /* 32: zero */
+    uint64 file_txn_seq;             /* 40 */
+    uint64 root_publish_seq;         /* 48 */
+    uint32 record_crc32c;             /* 56 */
+    uint32 root_flags;               /* 60 */
+} ClusterControlRootReadToken;       /* 64 */
+
+typedef struct ClusterControlRootPatch {
+    uint64 mask;                     /* 0 */
+    uint32 expected_lifecycle;       /* 8 */
+    uint32 expected_flags_mask;      /* 12 */
+    uint32 expected_flags_value;     /* 16 */
+    uint32 reserved20;               /* 20: zero */
+    uint64 reserved24;               /* 24: zero */
+    ClusterControlRootSnapshot desired; /* 32 */
+} ClusterControlRootPatch;           /* 248 */
+```
+
+Static assertions freeze every shown size/offset. Sources are PRIMARY=1, BAK_BLOCKED=2 and
+BOOTSTRAP_PRIMARY=3; only PRIMARY from a STRONG read can authorize publication. Callers never persist a
+snapshot/token/patch, and only fields named by `mask` are semantically read; every unmasked desired byte and
+all reserved fields must still be zero.
+
+```c
+#define CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE          UINT64_C(0x01)
+#define CLUSTER_CONTROL_ROOT_PATCH_OWNER_LINEAGE      UINT64_C(0x02)
+/* bit 0x04 is forbidden/reserved */
+#define CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT         UINT64_C(0x08)
+#define CLUSTER_CONTROL_ROOT_PATCH_TAIL               UINT64_C(0x10)
+#define CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS  UINT64_C(0x20)
+#define CLUSTER_CONTROL_ROOT_PATCH_FPW_STICKY         UINT64_C(0x40)
+#define CLUSTER_CONTROL_ROOT_PATCH_CONSERVATIVE_BOUND UINT64_C(0x80)
+#define CLUSTER_CONTROL_ROOT_PATCH_ALL_V1             UINT64_C(0xfb)
+```
+
+`FAILURE_DUTY_OPEN` uses exact patch mask `0xb1`:
+
+```text
+LIFECYCLE | TAIL | RECOVERY_PROGRESS | CONSERVATIVE_BOUND
+```
+
+Its atomic effects are `OPEN→RECOVERY_REQUIRED`, clear TAIL/Tail-last-record, zero tail TLI/LSN/witnesses,
+reset recovered-through to checkpoint lower, and clear conservative flag/kind/value.  Identity, owner and
+lineage remain unchanged.  Reopening the same already-REQUIRED full identity is an adopt/no-write result.
+`FAILURE_TAIL_VALIDATED` remains a TAIL-only publish and readiness is
+`RECOVERY_REQUIRED + TAIL_VALID + exact witnesses`; no scalar equality exists.  Conservative bound validity
+is the same full identity plus expected whole-record token CAS/readback; failure-open and owner-rejoin clear
+it atomically.
+
+Feature bit 22 is renamed without changing its numeric position:
+
+```c
+#define PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1 \
+        (UINT64_C(1) << 22)
+```
+
+The old `...FAILURE_GENERATION_V1` name has zero live declarations.  Bit 22 selects the root carrier and
+full-lineage duty semantics; bit 23 remains IR serialization and bit 24 external fencing.
+
+### §17.3 Exact carrier and storage contract
+
+```c
+#define CLUSTER_CONTROL_ROOT_REL_PATH       "global/pgrac_control_root"
+#define CLUSTER_CONTROL_ROOT_BAK_REL_PATH   "global/pgrac_control_root.bak"
+#define CLUSTER_CONTROL_ROOT_FILE_BYTES     UINT32_C(66048)
+#define CLUSTER_CONTROL_ROOT_HEADER_BYTES   UINT16_C(512)
+#define CLUSTER_CONTROL_ROOT_RECORD_BYTES   UINT16_C(512)
+#define CLUSTER_CONTROL_ROOT_RECORD_COUNT   UINT16_C(128)
+```
+
+All integers use explicit little-endian codecs; raw struct casts/native padding are forbidden. Every reserved
+byte is written zero and nonzero is `BAD_RESERVED`. Magic/version/enum/flags are exact, CRC is PostgreSQL
+CRC32C, an empty record is exactly 512 zero bytes, and a zero prefix with any nonzero remainder is corrupt.
+
+The 512-byte header is:
+
+| offset | width | exact field/rule |
+|---:|---:|---|
+| 0 | 4 | ASCII `PGCH` |
+| 4 | 2 | format version 1 |
+| 6 | 2 | header bytes 512 |
+| 8 | 2 | record bytes 512 |
+| 10 | 2 | record count 128 |
+| 12 | 4 | endian tag `0x01020304` after LE decode |
+| 16 | 8 | nonzero `file_txn_seq`, checked increment, no wrap |
+| 24 | 8 | nonzero PostgreSQL system identifier |
+| 32 | 16 | canonical storage UUID raw bytes |
+| 48 | 16 | immutable authority UUIDv4 raw bytes |
+| 64 | 8 | exact format flags `0x0d` |
+| 72 | 2 | minimum reader version 1 |
+| 74 | 2 | minimum writer version 1 |
+| 76 | 4 | PREPARED=1 or ACTIVE=2 |
+| 80 | 8 | created-at microseconds, observability only |
+| 88 | 8 | published-at microseconds, observability only |
+| 96 | 4 | body CRC32C over bytes `[512,66048)` |
+| 100 | 32 | immutable migration-round SHA-256 |
+| 132 | 32 | exact source wal-state SHA-256 |
+| 164 | 8 | nonzero migration PREPARE generation P |
+| 172 | 8 | migration transition epoch |
+| 180 | 8 | source feature bitmap |
+| 188 | 8 | target feature bitmap including bit22 |
+| 196 | 308 | zero reserved |
+| 504 | 4 | header CRC32C over `[0,504)` |
+| 508 | 4 | zero pad |
+
+Lifecycle values are UNUSED=0, OPEN=1, RECOVERY_REQUIRED=2, RECOVERY_COMPLETE=3, CLOSED=4 and RETIRED=5.
+Bound kind is NONE=0 or R14_M1_PARTITION_S_V1=1. Record flags are CLAIM_VALID=0x1,
+CHECKPOINT_VALID=0x4, TAIL_VALID=0x8, RECOVERED_VALID=0x10, FPW_WAS_OFF=0x20,
+CONSERVATIVE_SCN_VALID=0x40, TAIL_LAST_RECORD_VALID=0x80 and RECOVERED_LAST_RECORD_VALID=0x100; the exact
+known mask is `0x1fd`, with `0x2` forbidden. `FPW_WAS_OFF` is lineage-sticky 0→1 and never cleared by an
+ordinary lifecycle transition.
+
+Each nonempty 512-byte `ClusterControlRootDiskV1` record is:
+
+| offset | width | exact field/rule |
+|---:|---:|---|
+| 0 | 4 | ASCII `PGRT` |
+| 4 | 2 | record version 1 |
+| 6 | 2 | record bytes 512 |
+| 8 | 2 | origin thread 1..128, equal to record index+1 |
+| 10 | 1 | lifecycle 1..5 |
+| 11 | 1 | zero pad |
+| 12 | 4 | origin node 0..127, immutable in lineage |
+| 16 | 8 | nonzero checked `root_publish_seq` |
+| 24 | 8 | nonzero checked `root_lineage_seq` |
+| 32 | 8 | system identifier equal header |
+| 40 | 16 | storage UUID equal header |
+| 56 | 16 | authority UUID equal header |
+| 72 | 8 | exact claim-created-at |
+| 80 | 8 | nonzero admitted owner incarnation |
+| 88 | 8 | `reserved88`, zero |
+| 96 | 4 | checkpoint TLI |
+| 100 | 4 | tail TLI |
+| 104 | 4 | recovered TLI |
+| 108 | 4 | root flags subset of `0x1fd` |
+| 112 | 8 | inclusive checkpoint lower LSN |
+| 120 | 8 | validated tail LSN exclusive |
+| 128 | 8 | recovered-through LSN exclusive |
+| 136 | 8 | conservative commit SCN |
+| 144 | 8 | nonzero last publisher incarnation, audit only |
+| 152 | 4 | publisher node 0..127, audit only |
+| 156 | 4 | exact publish reason |
+| 160 | 8 | published-at microseconds, observability only |
+| 168 | 4 | exact claim CRC32C |
+| 172 | 4 | checkpoint record `xl_crc` |
+| 176 | 8 | tail last-record start LSN |
+| 184 | 4 | tail last-record `xl_crc` |
+| 188 | 4 | recovered last-record `xl_crc` |
+| 192 | 2 | tail kind 1=`WAL_RECORD_SCAN_V1` |
+| 194 | 2 | checkpoint source 1=`NATIVE_CHECKPOINT_V1`, 2=`RECOVERY_ANCHOR_V1` |
+| 196 | 2 | conservative bound kind 0 or 1 |
+| 198 | 2 | zero reserved |
+| 200 | 8 | `reserved200`, zero |
+| 208 | 8 | recovered last-record start LSN |
+| 216 | 8 | `reserved216`, zero |
+| 224 | 280 | zero reserved |
+| 504 | 4 | record CRC32C over `[0,504)` |
+| 508 | 4 | zero pad |
+
+For every nonempty record, `checkpoint_lower <= recovered_through <= validated_tail`. Equal endpoints require
+the corresponding last-record flag/LSN/CRC to be zero; a greater endpoint requires the named native-valid
+WAL record to end exactly there and follow timeline ancestry. `RECOVERY_REQUIRED + TAIL_VALID + exact
+witnesses` is tail-ready; no scalar equality participates. A conservative bound requires kind 1, valid SCN
+and a full-key/token CAS; otherwise kind/value are zero. Failure-open and owner-rejoin clear the bound.
+
+Both canonical names are beneath `<cluster.shared_data_dir>/global`, in the same verified storage/rename
+domain as the shared `pg_control` authority.  Before every create/STRONG read/publish:
+
+1. current nonzero storage UUID equals header, claims and per-node CF identity anchor;
+2. multi-node requires `CLUSTER_CF_CONTRACT_CROSSNODE_VERIFIED`; single-node requires the existing local
+   rename probe;
+3. canonical paths and call-created temp final components are regular, non-symlink objects;
+4. temp is same-directory, mode `0600`, `O_CREAT|O_EXCL`, named
+   `pgrac_control_root[.bak].tmp.<node>.<pid>.<16-lowercase-hex>` using eight `pg_strong_random` bytes;
+5. write-all 66048, fsync file, close, `durable_rename`, fsync parent, then fresh open/read/validate;
+6. cleanup may unlink only the exact temp successfully O_EXCL-created by this call; it never unlinks a
+   canonical primary or `.bak`.
+
+Publication is exactly `CF-serialized + crash-classifiable canonical replacement`, not a sector/whole-file
+atomicity claim.  For an update, `.bak` is first replaced with the fresh-validated old primary; the new image
+then replaces primary.  The linearization point is primary `durable_rename`; success additionally requires
+parent fsync, fresh primary readback and confirmed CF release.  Initial PREPARED creation publishes identical
+`.bak` then primary while R4 keeps both source and target admission closed.  `.bak` never self-promotes after
+restart and never authorizes action.
+
+Header bytes `0..99` and `504..511` retain their old meanings except exact `format_flags=0x0d`.  Old
+`reserved[404]` is replaced by:
+
+| offset | width | exact field/rule |
+|---:|---:|---|
+| 100 | 32 | `migration_round_sha256`, immutable |
+| 132 | 32 | `source_wal_state_sha256`, immutable exact source bytes after drain |
+| 164 | 8 | `migration_prepare_record_generation=P`, nonzero |
+| 172 | 8 | `migration_transition_epoch` |
+| 180 | 8 | source feature bitmap |
+| 188 | 8 | target feature bitmap, includes bit22 |
+| 196 | 308 | zero reserved |
+| 504 | 4 | header CRC32C over `[0,504)` |
+| 508 | 4 | zero pad |
+
+`source_wal_state_sha256` is exactly `SHA-256` over the 66048 bytes, with no domain prefix or pathname,
+read from the existing canonical `<cluster.wal_threads_dir>/pgrac_wal_state` after the same-round W1–W6
+close/drain and while holding coordinated CF(X).  The reader requires exact file size, validates the 512-byte
+`ClusterWalStateHeader`, and classifies each of the 128 slots with the f076 validator: every slot is either
+all-zero/unassigned or CRC-valid, self-describing and exactly matched to its immutable thread claim; every
+assigned slot is STOPPED, has nonzero checkpoint, and has `merge_recovered_lsn==0`.  Short read, trailing byte,
+ACTIVE/foreign/corrupt slot, claim drift or a byte change across a second full read aborts the round.  The
+coordinator hashes the first validated image and requires the second read to be byte-identical before creating
+PREPARED.  Every PREPARED/ACTIVE ACK independently reopens, fully validates and hashes the same canonical file
+and compares all 32 bytes.  A rollback test likewise compares a fresh validated 66048-byte image; metadata,
+mtime, per-slot digests or a hash of decoded fields cannot substitute.
+
+### §17.4 Runtime tokens and result surface
+
+```c
+typedef enum ClusterControlRootReadMode {
+    CLUSTER_CONTROL_ROOT_READ_STRONG = 1,
+    CLUSTER_CONTROL_ROOT_READ_BOOTSTRAP_VALIDATE = 2
+} ClusterControlRootReadMode;
+
+typedef enum ClusterControlRootPublishReason {
+    CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT = 1,
+    CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN = 2,
+    CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE = 3,
+    CLUSTER_CONTROL_ROOT_PUBLISH_FAILURE_DUTY_OPEN = 4,
+    CLUSTER_CONTROL_ROOT_PUBLISH_FAILURE_TAIL_VALIDATED = 5,
+    CLUSTER_CONTROL_ROOT_PUBLISH_RECOVERY_PROGRESS = 6,
+    CLUSTER_CONTROL_ROOT_PUBLISH_RECOVERY_COMPLETE = 7,
+    CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN = 8,
+    CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_RETIRE = 9,
+    CLUSTER_CONTROL_ROOT_PUBLISH_CONSERVATIVE_BOUND = 10,
+    CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE = 11,
+    CLUSTER_CONTROL_ROOT_PUBLISH_FPW_STICKY = 12,
+    CLUSTER_CONTROL_ROOT_PUBLISH_COPY_REPAIR = 13
+} ClusterControlRootPublishReason;
+
+typedef enum ClusterControlRootResult {
+    CLUSTER_CONTROL_ROOT_OK_PRIMARY = 0,
+    CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED = 1,
+    CLUSTER_CONTROL_ROOT_OK_BAK_BLOCKED = 2,
+    CLUSTER_CONTROL_ROOT_ABSENT = 3,
+    CLUSTER_CONTROL_ROOT_BAD_SIZE = 4,
+    CLUSTER_CONTROL_ROOT_BAD_MAGIC = 5,
+    CLUSTER_CONTROL_ROOT_BAD_VERSION = 6,
+    CLUSTER_CONTROL_ROOT_BAD_ENDIAN = 7,
+    CLUSTER_CONTROL_ROOT_BAD_HEADER_CRC = 8,
+    CLUSTER_CONTROL_ROOT_BAD_BODY_CRC = 9,
+    CLUSTER_CONTROL_ROOT_BAD_RECORD_CRC = 10,
+    CLUSTER_CONTROL_ROOT_BAD_RESERVED = 11,
+    CLUSTER_CONTROL_ROOT_IDENTITY_MISMATCH = 12,
+    CLUSTER_CONTROL_ROOT_LIFECYCLE_INVALID = 13,
+    CLUSTER_CONTROL_ROOT_RANGE_INVALID = 14,
+    CLUSTER_CONTROL_ROOT_COPY_DIVERGENT = 15,
+    CLUSTER_CONTROL_ROOT_MIXED_VERSION = 16,
+    CLUSTER_CONTROL_ROOT_LOCK_UNAVAILABLE = 17,
+    CLUSTER_CONTROL_ROOT_IO_ERROR = 18,
+    CLUSTER_CONTROL_ROOT_POSTREAD_FAILED = 19,
+    CLUSTER_CONTROL_ROOT_STALE_TOKEN = 20,
+    CLUSTER_CONTROL_ROOT_CAS_CONFLICT = 21,
+    CLUSTER_CONTROL_ROOT_SEQUENCE_EXHAUSTED = 22,
+    CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT = 23,
+    CLUSTER_CONTROL_ROOT_STORAGE_CONTRACT_UNVERIFIED = 24,
+    CLUSTER_CONTROL_ROOT_HASH_MISMATCH = 25,
+    CLUSTER_CONTROL_ROOT_MIGRATION_ROUND_MISMATCH = 26,
+    CLUSTER_CONTROL_ROOT_RELEASE_UNCERTAIN = 27
+} ClusterControlRootResult;
+```
+
+Exact reason masks are THREAD_OPEN=`0x3b`, THREAD_CLEAN_CLOSE=`0x39`, FAILURE_DUTY_OPEN=`0xb1`,
+FAILURE_TAIL_VALIDATED=`0x10`, RECOVERY_PROGRESS=`0x20`, RECOVERY_COMPLETE=`0x21`, OWNER_REJOIN=`0x3b`,
+THREAD_RETIRE=`0x01`, CONSERVATIVE_BOUND=`0x80`, CHECKPOINT_ADVANCE=`0x38` and FPW_STICKY=`0x40`.
+MIGRATION_IMPORT is internal to create; COPY_REPAIR cannot alter primary bytes/sequences. Extra/missing masks,
+wrong lifecycle, forbidden bit `0x04`, unknown reason or nonzero reserved input returns INVALID_ARGUMENT before
+CF/file I/O.
+
+```c
+extern ClusterControlRootResult cluster_control_root_read_canonical(
+    uint16 origin_thread_id,
+    const ClusterControlRootIdentity *expected_identity,
+    ClusterControlRootReadMode mode,
+    ClusterControlRootSnapshot *out_snapshot,
+    ClusterControlRootReadToken *out_token);
+extern ClusterControlRootResult cluster_control_root_lookup_owner_by_node_runtime(
+    int32 old_node_id,
+    ClusterControlRootIdentity *out_identity,
+    ClusterControlRootSnapshot *out_snapshot,
+    ClusterControlRootReadToken *out_token);
+extern ClusterControlRootResult cluster_control_root_compare_and_publish(
+    const ClusterControlRootReadToken *expected_token,
+    const ClusterControlRootPatch *patch,
+    ClusterControlRootPublishReason reason,
+    ClusterControlRootSnapshot *out_snapshot,
+    ClusterControlRootReadToken *out_token);
+extern ClusterControlRootResult cluster_control_root_revalidate(
+    const ClusterControlRootReadToken *token,
+    const ClusterControlRootIdentity *expected_identity,
+    ClusterControlRootSnapshot *out_snapshot);
+extern bool cluster_control_root_identity_equal(
+    const ClusterControlRootIdentity *left,
+    const ClusterControlRootIdentity *right);
+extern bool cluster_control_root_feature_bitmap_is_known(uint64 active_feature_bitmap);
+```
+
+STRONG requires nonnull expected identity and coordinated CF(S). BOOTSTRAP_VALIDATE permits null identity only
+for migration/status and returns no authority token. Runtime lookup is the sole REJOIN-B discovery exception:
+`old_node=N` maps only to thread `N+1`, validates claim/record/full identity, never scans/guesses/caches, and
+only results 0/1 initialize outputs. All APIs zero outputs first on nonauthoritative/error returns.
+Compare-and-publish requires a PRIMARY strong token, owns CF(X), fresh-rereads, exact-token CASes, writes one
+validated patch, durable-readbacks and confirms release. Slow revalidate runs outside IR/PAGE/SIDE/WALR.
+
+```c
+typedef struct ClusterControlRootMigrationImage {
+    uint64 system_identifier;                /* 0 */
+    uint8  storage_uuid[16];                 /* 8 */
+    uint8  authority_uuid[16];               /* 24 */
+    int64  created_at_usec;                  /* 40 */
+    uint32 assigned_record_count;            /* 48 */
+    uint32 reserved52;                       /* 52: zero */
+    ClusterControlRootSnapshot records[128]; /* 56 */
+} ClusterControlRootMigrationImage;          /* 27704 */
+
+typedef struct ClusterControlRootMigrationRoundV1 {
+    uint8  magic[4];                 /* 0: PCRM */
+    uint16 version;                  /* 4: 1 */
+    uint16 bytes;                    /* 6: 80 */
+    uint64 prepare_generation;       /* 8 */
+    uint64 transition_epoch;         /* 16 */
+    uint64 source_feature_bitmap;    /* 24 */
+    uint64 target_feature_bitmap;    /* 32 */
+    uint64 admitted_bitmap_low;      /* 40 */
+    uint64 admitted_bitmap_high;     /* 48 */
+    uint64 capability_sample_digest; /* 56 */
+    uint64 coordinator_incarnation;  /* 64 */
+    uint32 coordinator_node_id;      /* 72 */
+    uint32 reserved76;               /* 76: zero */
+} ClusterControlRootMigrationRoundV1; /* 80 */
+```
+
+The migration token is replaced, not extended in parallel:
+
+```c
+typedef struct ClusterControlRootFileToken {
+    uint8  authority_uuid[16];
+    uint64 file_txn_seq;
+    uint32 body_crc32c;
+    uint32 header_crc32c;
+    uint32 activation_state;
+    uint16 format_version;
+    uint16 record_count;
+    uint64 system_identifier;
+    uint8  image_sha256[32];       /* SHA-256 exact 66048 bytes */
+} ClusterControlRootFileToken;     /* 80 bytes */
+
+StaticAssertDecl(sizeof(ClusterControlRootFileToken) == 80,
+                 "ClusterControlRootFileToken ABI");
+StaticAssertDecl(offsetof(ClusterControlRootFileToken, file_txn_seq) == 16,
+                 "ClusterControlRootFileToken sequence offset");
+StaticAssertDecl(offsetof(ClusterControlRootFileToken, image_sha256) == 48,
+                 "ClusterControlRootFileToken image hash offset");
+```
+
+The digest is equality/integrity evidence, not authentication. The complete result enum is frozen above.
+
+Migration APIs are exact:
+
+```c
+extern ClusterControlRootResult cluster_control_root_create_prepared(
+    const ClusterControlRootMigrationImage *image,
+    const ClusterControlRootMigrationRoundV1 *round,
+    ClusterControlRootFileToken *out_token);
+extern ClusterControlRootResult cluster_control_root_activate_prepared(
+    const ClusterControlRootFileToken *expected_token,
+    const uint8 expected_round_sha256[32],
+    ClusterControlRootFileToken *out_token);
+extern ClusterControlRootResult cluster_control_root_discard_inactive(
+    const ClusterControlRootFileToken *expected_token,
+    const uint8 expected_round_sha256[32]);
+```
+
+`discard_inactive` is callable only by the existing R4 abort/revert callback while both admissions are
+closed, majority R4 selects source, bit22 is not OPEN and token/round match.  It is permanently denied after
+bit22 OPEN.
+
+### §17.5 CF acquire/release result
+
+```c
+typedef enum ClusterCfReleaseResult {
+    CLUSTER_CF_RELEASE_NOT_HELD = 0,
+    CLUSTER_CF_RELEASE_CONFIRMED = 1,
+    CLUSTER_CF_RELEASE_UNCONFIRMED = 2
+} ClusterCfReleaseResult;
+
+extern bool cluster_cf_held_is_clusterwide(LOCKMODE mode);
+extern ClusterCfReleaseResult cluster_cf_unlock_confirmed(LOCKMODE mode);
+```
+
+Multi-node root/wal-state authority requires actual coordinated CF S/X.  `OK_NATIVE` releases any local
+hold and returns lock-unavailable.  CONFIRMED consumes the actual local-master/S6 release result and alone
+clears hold state.  Timeout, queue-full, dropped reply, remaster or unknown is UNCONFIRMED: set
+`release_uncertain=true`, return no authority output/success, keep admission closed and terminate the owning
+process through existing `58R13`.  A later actual coordinated grant, not local bookkeeping, proves the old
+holder is gone.
+
+### §17.6 Existing R4 carrier, exact round and digest
+
+No new ACK kind, HELLO bit, receipt file or second durable round carrier is created.  Reuse existing R4
+phase ACK and `ClusterSemanticZeroProof`.
+
+`ClusterControlRootMigrationRoundV1` hashes this exact 80-byte LE preimage:
+
+```text
+0  "PCRM"; 4 u16 version=1; 6 u16 bytes=80;
+8  u64 PREPARE generation P; 16 u64 transition epoch;
+24 u64 source bitmap; 32 u64 target bitmap;
+40 u64 admitted low; 48 u64 admitted high;
+56 u64 capability sample digest; 64 u64 coordinator incarnation;
+72 u32 coordinator node; 76 u32 zero.
+```
+
+`migration_round_sha256=SHA256(exact 80 bytes)`.  Each PREPARED/ACTIVE ACK first validates exact file size,
+format `0x0d`, zero reserved bytes, CRC hierarchy, identities, round/source SHA and full image SHA.  It then
+uses the existing 24-byte `ClusterSemanticZeroProof` with `debt_count=0`, current R4 generation and
+`sample_digest=read_le64(SHA256(RACK-preimage)[0..7])`, mapping zero to one.  The RACK preimage is exact 96
+bytes:
+
+| offset | width | exact RACK field |
+|---:|---:|---|
+| 0 | 4 | ASCII `RACK` |
+| 4 | 2 | u16le version `1` |
+| 6 | 2 | u16le length `96` |
+| 8 | 8 | u64le phase: `1=PREPARED`, `2=ACTIVE` |
+| 16 | 8 | u64le current R4 generation |
+| 24 | 8 | u64le migration PREPARE generation `P` |
+| 32 | 8 | u64le transition epoch |
+| 40 | 8 | u64le admitted-membership bitmap low |
+| 48 | 8 | u64le admitted-membership bitmap high |
+| 56 | 8 | u64le capability sample digest |
+| 64 | 32 | exact root image SHA-256 |
+
+The encoder is manual and has no implicit C padding.  Existing full-member ACK rows remain bound to
+node/boot/incarnation/CONTROL connection/capability generation/epoch; any drift clears the whole round.
+
+Normative cutover order:
+
+```text
+majority R4 PREPARE(P)
+ -> all-member W1-W6 close/drain
+ -> under CF(X) capture exact source SHA
+ -> create PREPARED root bound to round/source
+ -> all-member PREPARED digest ACK
+ -> majority R4 COMMIT(P+1)
+ -> token-CAS activate root
+ -> all-member ACTIVE digest ACK
+ -> majority R4 OPEN(P+2, bit22)
+ -> each member fresh-reads same ACTIVE root before target admission.
+```
+
+Coordinator restart resumes only from majority R4 plus exact root/token/round relation: PREPARE may adopt a
+byte-identical PREPARED image; COMMIT+PREPARED activates; COMMIT+ACTIVE recollects ACK; OPEN with absent,
+non-ACTIVE or wrong-round root is HOLD/FATAL and never falls back to wal-state.
+
+### §17.7 W1-W6 final replacement
+
+W1–W5 use the existing 64-byte field patch as a `static` implementation detail of
+`cluster_wal_state.c`; no whole-slot public replacement API exists.  Append update results
+`RELEASE_UNCERTAIN=9` and `SOURCE_CLOSED=10`.
+
+`RF-A1-LIFECYCLE-REV1-A` is the sole pre-cut lifecycle.  It rejects early/pre-recovery LMS,
+postmaster CF acquisition, `initdb -c/--set + IsBootstrapProcessingMode`, SIGHUP-triggered phase-4
+initialization and any formed-cluster empty rebuild.  The only new externally visible input is the
+frontend-initialization-only initdb handoff `--pgrac-wal-state-root=ABSOLUTE_DIR`; it carries the existing
+`pgrac-init --wal-threads-dir` value to the one initdb child and is neither runtime nor persistent authority.
+
+W1 has two disjoint modes:
+
+1. **Fresh offline create.** `pgrac-init --wal-threads-dir=ROOT --node-id=N` first proves ROOT is absolute,
+   canonical and not a symlink escape.  If the registry is absent, ROOT and PGDATA are fresh and ROOT contains
+   no entry except this child-created `thread_(N+1)`.  After `initialize_data_directory()` has succeeded and
+   before initdb `fsync_pgdata`/success return, the frontend creates exact
+   `ROOT/pgrac_wal_state` with `O_CREAT|O_EXCL`, owner-only mode, the existing v1 header and 128 all-zero slots,
+   exact size 66048.  It writes all bytes, fsyncs the file and ROOT even under `--no-sync`, closes, reopens,
+   stats and fully preads, and validates header plus every zero slot.  There is no temp, rename, unlink,
+   truncate or repair.  An `EEXIST` loser may only read-validate an already complete valid file; a partial or
+   corrupt winner is preserved and both callers fail.  Only after this finalizer succeeds may `pgrac-init`
+   publish `cluster.node_id` and `cluster.wal_threads_dir`.  Existing registry/join is verify-only.
+2. **Runtime verify.** Initial postmaster, crash shmem reinitialization and configured single-user mode only
+   open/read/validate the existing exact registry.  Missing, wrong-size, short, corrupt or foreign evidence is
+   `53RA2` FATAL before StartupXLOG/admission, with inode and bytes unchanged.  Plain/noncluster initdb and flat
+   PostgreSQL are unchanged.  `cluster_wal_state_ensure` has zero create/unlink/truncate/remove-rebuild paths.
+
+Upgrade into this lifecycle is cluster-wide offline: validate and back up an existing v1 registry while the
+old build still runs, then start one A1 build everywhere.  A missing old-deployment registry is created only
+by a separately controlled all-stopped provisioning run or restored known-valid backup; A1 runtime never
+creates it.  Mixed f076/A1 is forbidden.  Before the first A1 W2, all-stopped binary rollback is allowed;
+after any W2 (including W6 clear), only an A1-compliant build may run unless a new user/CC adjudication defines
+an all-stopped rollback from verified backup.
+
+The exact formed-cluster caller table is:
+
+| ID | sole actor and point | exact mask/result |
+|---|---|---|
+| W2 | Initial ClusterStats child after `InitAuxiliaryProcess` supplies PGPROC, within phase-4 `SPAWNING→READY` | after its existing durable self-fence: a fenced node skips W2/checkpoint and follows the existing fenced policy; otherwise actual `CF_VERIFIED_X`, fresh EMPTY or valid own slot, field RMW of identity + ACTIVE state + TLI/times/highest LSN/SCN/refresh, and `merge_recovered_lsn=0`; corrupt/foreign/CF/I/O/post-read failure prevents READY and is startup FATAL |
+| W5b-EOR | StartupXLOG end-of-recovery `UpdateFullPageWrites` | no registry write; off→on stays immediate; desired false keeps `Insert->fullPageWrites=true` and emits no false WAL.  If replay says historical `lastFullPageWrites=false`, own slot must read valid sticky=1 or startup is FATAL |
+| W5b-steady | non-EOR `CreateCheckPoint`, after its outer coordinated CF acquire/fresh control read and before that function's first `START_CRIT_SECTION()` | borrow, never reacquire, outer `CF_VERIFIED_X`; when desired=false and Insert=true, validate own ACTIVE slot and set only sticky `fpw_was_off:0→1`, fsync/post-read, then enter critical section, emit false `XLOG_FPW_CHANGE`, and set Insert false.  Failure keeps true, emits no false WAL, warns and retries at the next non-EOR checkpoint; SIGHUP desired=false only leaves a mismatch |
+| W5a | non-EOR online/forced/shutdown `CreateCheckPoint`, after durable `UpdateControlFile()` and its `END_CRIT_SECTION()`, before `SyncPostCheckpoint` and WAL recycle | borrow outer `CF_VERIFIED_X`; update only `checkpoint_redo_lsn=checkPoint.redo`, fsync/post-read.  Failure warns, preserves the old conservative value, lets checkpoint finish and retries next checkpoint.  EOR call count is zero |
+| phase-4 ACK | ClusterStats after W2 releases CF | request `CHECKPOINT_IMMEDIATE|CHECKPOINT_FORCE|CHECKPOINT_WAIT`; completion proves only PG checkpoint completion, not W5 helper success; phase-4 shared admission deadline expiry tears startup down and never counts a late checkpoint as GREEN |
+| W4 | ClusterStats only after initial W2; later READY loop/RUNNING respawn | initial child proceeds after W2; respawn only fresh-validates own ACTIVE slot.  Each tick uses `CF_VERIFIED_X` and modifies only TLI, last-updated, highest LSN/SCN and refresh interval.  Failure is typed skip + LOG-once/existing counter; no overwrite retry |
+| W3 | checkpointer after `ShutdownXLOG()` returns and before its own `proc_exit(0)` on smart/fast clean shutdown | while coordination stack is still READY, reacquire `CF_VERIFIED_X`; ACTIVE→STOPPED modifies only state/last-updated/TLI/highest LSN/SCN, with fsync/post-read; own STOPPED is idempotent.  Failure warns and leaves ACTIVE.  Immediate/fatal/checkpointer failure has zero W3 calls |
+| W6 | both old writers and all correctness readers | both writers are disabled; every historical/raw nonzero `merge_recovered_lsn` is diagnostic `raw_ignored` and semantically zero for every skip bound.  W2 clears it; W4/W5 preserve it |
+
+The phase-4 order is fixed: Startup succeeds while ordinary admission/READY advertisement remains closed;
+DIAG READY → CSSD READY → QVOTEC READY with strict multi-node quorum → LMS exact READY (DISABLED fails) →
+existing node/voting/shared-CF validators → ClusterStats SPAWNING/W2 → forced checkpoint completion → Stats
+READY → LMON startup/catch-up → COMMIT phase-4 → ordinary admission and READY advertisement.  ClusterStats
+failure reaps it and tears down LMS→QVOTEC→CSSD→DIAG.  On clean shutdown Stats is stopped first; LMON/CSSD/
+QVOTEC/LMS stay ready through `ShutdownXLOG`/W5a/W3, then are reaped in reverse.  Postmaster never waits on or
+acquires remote CF.  Abnormal/immediate paths SIGQUIT the retained stack, do not run W3 and leave ACTIVE.
+
+The implementation must prove: all coordinated CF callers own PGPROC; admission remains closed through the
+phase-4 sequence; formed mutation has no native fallback; W2/W3/W4/W5 masks preserve their union under every
+interleaving; sticky fsync/post-read happens-before false WAL; W5a advertises only durable checkpoint and
+precedes recycle; STOPPED follows a clean shutdown checkpoint; W6 cannot shorten replay; and missing/corrupt
+registry evidence is never deleted, recreated or overwritten.  Exact RED/GREEN covers both W1 modes, every
+phase transition/failure, W2 EMPTY/own/corrupt/foreign cases, W4↔W5 and W2↔W5 schedules, EOR/steady W5b, W5a
+position/retry, W3 clean/abnormal order, both W6 writers plus every reader, postmaster-CF call count zero and
+steady-state call/fsync cadence.  These gates are prerequisite evidence, not the formal campaign.
+
+W6 is permanently retired, not mirrored:
+
+1. a transition-capable binary returns `SOURCE_CLOSED` from both cold
+   `xlogrecovery.c:2919-2927` and online orchestrator `:390-408` wrappers without pwrite;
+2. R4 PREPARE is denied until every old binary/worker/W6 holder exits, every failed duty is terminal,
+   every replay slot drains and every source `merge_recovered_lsn` is zero;
+3. the all-member CLOSED ACK binds those facts to the same migration round;
+4. after bit22, both W6 production callers and every wal-state correctness reader/writer are statically
+   unreachable; no compatibility mirror, handoff ledger, CF-under-IR exception or second enqueue exists;
+5. STOP03 publishes immutable resource proof under IR, then after confirmed release the root finalizer alone
+   publishes progress/completion.
+
+Thus the old STOP03 requirement for W6 under matching IR and any proposed post-release mirror are both
+superseded.  The availability cost is explicit: a transition binary cannot service a new failed-origin duty
+between W6 closure and bit22 OPEN; that event aborts/blocks the migration and requires source recovery before
+a fresh cutover round.
+
+### §17.8 Restart, rollback and no-return
+
+- Source R4 OPEN: repaired wal-state remains selected; root absent/PREPARED/ACTIVE is not authority.
+- PREPARE/COMMIT: both admissions closed; restart follows majority R4 and exact root relation only.
+- Target OPEN: root-only, no fallback, old/no-cap binary refuses startup/join.
+- PREPARE abort may discard inactive root only after majority source selection.  COMMIT-before-OPEN may use
+  the existing closed R4 revert protocol, then discard.
+- Post-OPEN symmetric rollback is allowed only while every imported record is still CLOSED,
+  `root_publish_seq==1`, no root-only checkpoint/FPW/progress/bound/lineage publication occurred, source SHA
+  still matches, and all members ACK the same rollback round.
+- First root record publish, owner reopen, source digest drift or failed duty makes no-return permanent.
+  Afterwards invalid primary requires cluster-consistent restore plus WAL reconciliation; `.bak` is never
+  auto-promoted or replaced by an empty image.
+
+### §17.9 Mandatory exact gates
+
+At minimum tests must cover: stale W4/W5b lost update; W5b failure before critical section; every
+temp/fsync/rename crash cut; storage UUID/symlink/rename-contract refusal; local/native CF refusal and
+unconfirmed release; LE/layout/reserved/CRC/SHA golden vectors; stale file token/round/image CAS; one-member
+PREPARED or ACTIVE digest mismatch; membership/boot/connection drift; coordinator crash at all five R4
+phases; `.bak` nonpromotion; rollback no-return; marker generation injection unable to alter duty/root;
+format `0x0d` and zero generation slots; bit22 old/new binary refusal; both W6 callers zero; and a static
+complete census proving post-bit22 wal-state correctness reader/writer count exactly zero.
+
+The exact f076 census includes W1 `cluster_wal_state.c:166-265`, W2 startup, W3 postmaster, W4 stats, W5a
+checkpoint, W5b `xlog.c:8706`, both W6 callers, and correctness readers
+`xlogrecovery.c:2451-2467`, `cluster_hw_remaster.c:470-487`,
+`cluster_recovery_merge.c:941-965,1115-1127`, `cluster_recovery_plan.c:178-223`,
+`cluster_recovery_worker.c:181-195,233-254` and orchestrator `:541-573`.
+
+### §17.10 Exact approval literal
+
+```text
+APPROVE SIG-01-BUNDLE-V1=A: use the dedicated control-root sidecar and exact
+no-generation v1 ABI (format 0x0d; generation slots/bits reserved-zero); use
+the existing R4 ACK carrier with the exact round/image digests; repair W1-W5,
+retire W6 and every wal-state correctness edge in the same all-member cutover;
+open bit22 only after PREPARED/ACTIVE full-member ACKs; accept the stated
+storage, CF-release, migration, rollback/no-return and temporary availability
+boundaries; add no generation carrier, wire kind, actor, ticket or persistent FSM.
+```
+
+## R18. RF-B single-node OWNER→EOR handoff amendment
+
+**Status:** `AGREED / FROZEN`, CC + Codex rule-28.7 token
+`RF-B-OWNER-EOR-HANDOFF-A-MIN` (2026-08-09).
+
+This section supersedes only the prior claim that the already-proven single-node OWNER write permission may
+remain entirely process-local to StartupXLOG.  It does not create or relax OWNER authority.  JOIN,
+authority identity, W5 read-only EOR semantics, normal CF locking, W1-W6, no-ticket rules and every other RF
+clause remain unchanged.  The exact boot-local transport atomic below is the sole consequence for R0's
+no-new-shared-memory-state wording: R0 still forbids every other shared state, and the phase is never an
+authority source.
+
+### R18.1 Oracle evidence and confidence
+
+- `ORACLE VERIFIED / HIGH (🟢)`: a surviving RAC instance performs failed-instance recovery; with no
+  survivor, the next opener performs the required recovery.  After all RAC instances fail, the first open
+  automatically recovers terminated redo threads.  Oracle control files contain checkpoint information and
+  remain writable while the database is open.
+- `INFERENCE / MEDIUM (🟡)`: the no-survivor next-opener reaches a durable recovery-completion point before
+  open succeeds.  The public outcome does not reveal the exact writer process or handoff boundary.
+- `PUBLICLY UNKNOWN (⚫)`: modern RAC's exact writer actor, startup order and handoff bytes.
+- `PGRAC ADAPTATION / AGREED`: transport only the existing proven
+  `cluster_conf_node_count()==1` OWNER decision from StartupXLOG to the existing EOR checkpointer that must
+  perform the two existing control-file writes.  This is not presented as an Oracle internal mechanism.
+
+Official sources:
+
+1. [Oracle RAC 26ai — Administering Database Instances and Cluster Databases](https://docs.oracle.com/en/database/oracle/oracle-database/26/racad/administering-database-instances-and-cluster-databases.html)
+2. [Oracle Database 12c — Instance Recovery](https://docs.oracle.com/database/121/CNCPT/startup.htm)
+3. [Oracle Database 19c — Managing Control Files](https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/managing-control-files.html)
+
+### R18.2 Exact minimal lifecycle and authority boundary
+
+Add only one `pg_atomic_uint32 owner_eor_phase` to the existing per-postmaster CF stats shmem region.  The
+only states and edges are:
+
+```text
+EMPTY -> INSTALLED -> ACTIVE -> DONE -> EMPTY
+```
+
+1. **INSTALL / StartupXLOG only:** after existing `node_count==1` OWNER storage/identity/role gates and
+   before its first authority write, require `JOIN=false` and `EMPTY`, install `INSTALLED`, and retain the
+   existing process-local Startup OWNER permission.  Duplicate/conflicting install fails closed.
+2. **CONSUME / EOR checkpointer only:** require `AmCheckpointerProcess()` and
+   `CHECKPOINT_END_OF_RECOVERY`; after existing EOR sanity and before checkpoint I/O, freshly recheck
+   authority enabled, one-node role, existing sysid/storage-UUID contract and `JOIN=false`; only an atomic
+   `INSTALLED->ACTIVE` enables a distinct process-local EOR OWNER permission.
+3. **WRITE:** `cluster_cf_write_permitted()` accepts only held CF(X), process-local Startup OWNER, or
+   process-local EOR OWNER.  Shared phase alone never grants write permission.  OWNER EOR bypasses CF(X),
+   never sets write-skip, and performs both existing control-file writes under existing `ControlFileLock`.
+   Normal, shutdown, restartpoint and phase-4 checkpoints never consume and retain real CF(X).
+4. **COMPLETE:** only after the whole EOR checkpoint succeeds may checkpointer atomically
+   `ACTIVE->DONE`, then clear its local permission.  Startup's synchronous WAIT must observe `DONE` before
+   recovery-claim release.  Final existing bootstrap close performs `DONE->EMPTY`, then clears Startup-local
+   permission.  A clean nondelegated path may perform `INSTALLED->EMPTY` at that same close point.
+5. **ABORT:** checkpointer top-level error recovery clears its local EOR permission without throw or I/O;
+   shared `ACTIVE` is retained and cannot be consumed, cleared or retried in that postmaster.  Normal teardown
+   destroys boot-local shmem.  A fresh postmaster starts `EMPTY`; `found=true` attach never resets live phase.
+
+Only StartupXLOG writes INSTALL/CLEAR and only the EOR checkpointer writes ACTIVE/DONE.  No phase transition
+encloses CF, `ControlFileLock`, WAL, logging or I/O.  Existing normal lock order remains
+`CF(X) -> ControlFileLock`; the agreed one-node bootstrap exception takes no CF lock.
+
+### R18.3 Negative, scope, acceptance and rollback gates
+
+- Actor, EOR flag, phase, JOIN, authority-enabled, one-node role and existing sysid/storage-UUID identity
+  negatives must all refuse consume/local permission.  Phase alone grants no write.
+- Units prove the exact success traversal, abort-local-clear with `ACTIVE` retained, `found=true` attach
+  preservation and fresh-postmaster `EMPTY`.
+- Existing t/244 `84ab40b...` remains the immutable semantic RED.  Its positive path starts sticky=1, keeps
+  EOR W5 writes zero and proves the next steady SQL `CHECKPOINT` takes real CF(X).  Reuse fault injection only
+  if it already exists at the exact boundary; add no injection framework/GUC/API.
+- Supported OWNER scope is only `cluster_conf_node_count()==1`.  Declared-multi-node/all-down remains
+  fail-closed because early fencing/sole-liveness is unproved.
+- There is no ticket, generation, request/request-id, lease, counter, GUC, actor, shmem region, wait-for
+  relation, durable identity record, disk/WAL/wire/catalog/`ControlFileData` field, version or migration
+  addition.  Product scope is only existing CF stats/enqueue/storage, `xlog.c`, checkpointer cleanup and
+  existing units/t/244.
+- Rollback is full stop, binary revert and fresh-shmem restart only; hot mixed-binary rollback is forbidden.
+- Product/fixture work remains held until CC completes one same-hash review of this finished private spec
+  object.  These deterministic gates are prerequisites, not a campaign run.
+
+
+<!-- NORMATIVE-BODY-END -->
+
+| Fingerprint metadata | Exact value |
+|---|---|
+| body_sha256 | `e68aece83209c032e88c64354b9e89f8c8bb3b88d5105b71ab703658d8753141` |
+| body_lines | `1077` |
+| body_bytes | `69679` |
+
+## Change record
+
+- 2026-08-09 RF-B amendment: adds the agreed minimal boot-local single-node OWNER→EOR handoff, superseding
+  only the process-local-only OWNER claim; all JOIN/W5/normal-CF/multi-node/RF boundaries remain unchanged.
+- 2026-08-09 REV1 reseal: replaces the obsolete carrier-era normative body with the exact Gate-8-approved
+  A1-only lifecycle/serialization contract. It preserves the existing v1 disk format, freezes W1–W6,
+  excludes carrier/migration/STOP04/R8, and authorizes no public write before same-hash.
+- 2026-08-09 seven-STOP successor: adds the approved no-generation 80-byte duty identity and exact
+  carrier/migration ABI inside the marker; carrier/migration remain conditional and inactive.
+
+## Final RF disposition（marker-external）
+
+| Item | Final state |
+|---|---|
+| `SIG-01-A1-R` / `RF-A1-LIFECYCLE-REV1-A` | `APPROVED / A1-ONLY SAME-HASH AGREED AT a5358e...` |
+| `RF-B-OWNER-EOR-HANDOFF-A-MIN` | `AGREED / PRIVATE SPEC SAME-HASH REVIEW PENDING` |
+| Public implementation | common then W1, W2+W4, W5, W6, W3-last; predecessor A1 release remains active |
+| Carrier | `INACTIVE` until A1 implemented + whole review + post-repair C2 |
+| Migration | `INACTIVE` until carrier evidence gate |
+| STOP04 provider / post-carrier W6 mirror | `UNAVAILABLE / NO CODE` |
+
+---
+
+# 工作区本地增量（2026-08-17）— RF-ROOT P6 contract 1（shutdown 停机顺序 + 写栅窗口收窄）
+
+> 原文（上方正文）一字未改。本增量由编码会话在 ~/pgrac-dsh/specs-local/ 起草，
+> 交 DSH 审核。定案前不得推公开仓（README 纪律）。绑定实现见本仓库 rf-root-dev 分支
+> `src/backend/postmaster/checkpointer.c` 与 `src/backend/cluster/cluster_qvotec.c`。
+
+## 增量 1：THREAD_CLEAN_CLOSE 停机顺序（contract 1，修 I7 执行偏差）
+
+### 背景事实（t243 实测证据，2026-08-17）
+
+- 旧接线把 5.13 shutdown handoff（`cluster_clean_leave_shutdown_drain`）放在
+  ShutdownXLOG 之前。handoff COMMITTED 后：① 本节点 epoch 经 IC envelope 观察
+  0→1（`cluster_epoch_observe_remote`，cluster_ic_envelope.c），而本地 fence token
+  仍持 pristine baseline（epoch 0）→ 精确 == 判据失败；② survivor 下一次 poll 的
+  steady-state baseline（fenced 集 = applied.dead，含离开节点）落地后，离开节点
+  下一 poll 会 self-fence。二者都让离开节点 shutdown checkpoint 的
+  recovery-anchor 发布（`cluster_recovery_anchor_publish_checkpoint`，
+  `cluster_write_fence_reject_if_fenced`，CritSection 内）PANIC →
+  abnormal shutdown → slot 2 永不到 STOPPED → t243 ok 3 铸根前置失败。
+- 这违反了冻结 I7（"STOPPED occurs only after clean shutdown checkpoint and
+  before coordination drain"）——旧顺序等于在 checkpoint 前先做了 coordination
+  drain 的一半（serving/authority 移交）。
+
+### 合同（本次修订后的停机顺序，与 I7 对齐）
+
+checkpointer 的 ShutdownRequestPending 块，按序：
+
+1. `ShutdownXLOG(0, 0)` —— shutdown checkpoint durable（含 W5a anchor 发布；
+   此时 fence token 仍与 epoch 一致，写门全部合法）；
+2. `cluster_wal_state_publish_stopped()` —— W3 STOPPED 槽位发布；
+3. `cluster_clean_leave_shutdown_drain()` —— serving rebind/authority 转换
+   （5.13 cooperative remaster/holder handoff；失败 fail-closed 返回 false）；
+4. `cluster_control_root_thread_clean_close_publish()` 仅在 step 3 返回 true 时
+   执行（handoff 失败 → root 保持 OPEN → 重启走既有 crash-rejoin 链，8.B）。
+
+不变：immediate/error 退出永不发布 CLOSED；崩溃不写 CLOSED。
+
+## 增量 2：qvotec 同 poll 写后刷新（spec-4.12b D2 实现收窄，survivor 侧）
+
+### 背景事实
+
+CLEAN_LEAVE commit（`cluster_reconfig_apply_clean_leave_as_coordinator`）按
+spec-5.13 D3 冻结语义**不提交 fence marker**（"nothing to fence"）。epoch 提升
+后，新 epoch 的权威只由 leader 下一 poll 的 baseline republish 提供；leader 自己
+的 token 刷新（D2，读 poll 开头 matrix）还要再等一 poll。于是 commit 之后存在
+"epoch 已提升、token 未跟进"的窗口（≤2×poll），窗口内 survivor 的任何 fence-gated
+写（实测：node0 在 clean-leave 后 100ms 的 CHECKPOINT 的 anchor 发布）在精确 ==
+判据下 PANIC。
+
+### 合同（D2 同 poll 写后刷新）
+
+`qvotec_poll_once`：本 poll 写出的 fence tuple（D4 fence submit，或 leader 的
+baseline）达到 quorum-majority durable（与 ack 同源计数）后，立即以同一 tuple
+调用既有 `cluster_write_fence_refresh_from_marker` 刷新本地 token。纯判据与
+double-monotonic guard 不变；qvotec 仍是 token 唯一写者；不做任何门放宽——只是把
+"健康方向"的 stale 窗口（R4 窗口的反向）从两 poll 收窄到一 poll。self-fence 的
+engage-first 序不变（复用既有函数）。
+
+### 审核注意点
+
+- 该增量只收窄 healthy-side 窗口，不改变 fenced-side 语义（fenced 节点仍
+  fail-closed）；
+- fail-stop 路径的 D4 submit 同样受益（coordinator 自身 token 提前一 poll 就绪），
+  行为方向不变；
+- 未解决的问题（记录在案，不在本增量范围内）：3 节点下第三方 observer 的 token
+  仍需自己的下一 poll 才跟进（drain-grace 交易在该窗口可能 53R51 重试，可接受）；
+  seed 单节点 clean stop 时 CLOSED 发布的 CF(S) 撞 stale-hold drain 失败
+  （CLOSED 跳过，对 seed 无害，L5 前需复核）。
+
+## 增量绑定
+
+- 产品实现：rf-root-dev 分支，commit 见编码会话（contract 1 reorder +
+  qvotec same-poll refresh）。
+- 验证：t243 全绿（铸根 ok 3 → L5 → L6/L8/L9/L10）；focused unit 全绿；
+  完整 build 闭包。

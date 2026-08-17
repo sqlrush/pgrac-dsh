@@ -13,6 +13,7 @@
 | `ad-023-rfroot-p04-recovery-authority-serving-split.md` | `~/pgrac/docs/ad-023-rfroot-p04-recovery-authority-serving-split.md` | §10：crash-rejoin self-join 例外合同（六环死锁圈 + 六门窄例外） |
 | `spec-rf-root-durable-root-retention-and-fenced-takeover.md` | `~/pgrac/specs/spec-rf-root-durable-root-retention-and-fenced-takeover.md` | §12：D3′ rebuild-first 路径的 formation-witness 绑定增量 |
 | `spec-5.16-online-join-grd-pcm-remaster.md` | `~/pgrac/specs/spec-5.16-online-join-grd-pcm-remaster.md` | 附录：self-join 例外与 HF2 actor 边界的一致性说明 |
+| `spec-s8-stop-01-root-control.md` | `~/pgrac/specs/spec-s8-stop-01-root-control.md` | 增量 1：contract 1 停机顺序（checkpoint→STOPPED→serving/authority 转换→CLOSED）；增量 2：qvotec 同 poll 写后 fence-token 刷新（4.12b D2 收窄） |
 
 ## 绑定锚
 
