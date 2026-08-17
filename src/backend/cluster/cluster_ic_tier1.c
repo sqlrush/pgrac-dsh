@@ -2770,7 +2770,8 @@ cluster_ic_tier1_recv_heartbeat_drain(int32 peer_id, int peer_fd)
 		{
 			static uint64 frame_diag_seq = 0;
 
-			if ((frame_diag_seq++ % 20) == 0)
+			if ((frame_diag_seq++ % 20) == 0
+				|| env.msg_type == PGRAC_IC_MSG_GES_REQUEST)
 				ereport(LOG,
 						(errmsg("TEMP tier1 recv frame: peer=%d type=%u "
 								"plen=%u seq=%llu",

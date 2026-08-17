@@ -3506,6 +3506,47 @@ cluster_reconfig_poll_join_commit_stage(void)
 				|| cluster_recovery_owner_rejoin_v1(
 					join_commit_stage.node_id,
 					join_commit_stage.admitted_incarnation);
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 owner-gate hunt): decompose the
+			 * owner gate so the failing sub-condition is attributable.
+			 * Capped with the revet diag; removed before the final push. */
+			{
+				static int revalidate_diag_owner = 0;
+				ClusterControlRootIdentity oid;
+				ClusterControlRootSnapshot osnap;
+				ClusterControlRootReadToken otok;
+				ClusterControlRootResult orr = cluster_control_root_lookup_owner_by_node_runtime(
+					join_commit_stage.node_id, &oid, &osnap, &otok);
+				ClusterRecoveryOwnerImportResult oir;
+				uint64 oproven = 0;
+				ClusterWalThreadClaim oclaim;
+				bool key_exact;
+				bool claim_crc_ok;
+
+				cluster_wal_thread_claim_fill(
+					&oclaim, oid.origin_thread_id, oid.origin_node_id,
+					oid.thread_claim_created_at);
+				oir = cluster_recovery_owner_import_read_v1(
+					join_commit_stage.node_id, &oclaim, 0, 0, &oproven);
+				key_exact = cluster_recovery_duty_key_valid_v1(&oid)
+					&& cluster_recovery_duty_key_compare(&oid, &osnap.identity)
+						   == CLUSTER_RECOVERY_DUTY_COMPARE_EXACT;
+				claim_crc_ok = oclaim.crc == oid.thread_claim_crc32c;
+				if (revalidate_diag_owner++ < 12)
+					ereport(LOG,
+							(errmsg("TEMP owner gate: node=%d root=%d lc=%d "
+									"owner_inc=%llu admitted=%llu lineage=%llu "
+									"import=%d proven=%llu key=%d crc=%d",
+									(int)join_commit_stage.node_id, (int)orr,
+									(int)osnap.lifecycle,
+									(unsigned long long)oid.origin_owner_incarnation,
+									(unsigned long long)
+										join_commit_stage.admitted_incarnation,
+									(unsigned long long)oid.root_lineage_seq,
+									(int)oir,
+									(unsigned long long)oproven,
+									key_exact ? 1 : 0,
+									claim_crc_ok ? 1 : 0)));
+			}
 			LWLockAcquire(&ReconfigShmem->lock, LW_SHARED);
 			ms = (int)cluster_membership_get_state(
 				join_commit_stage.node_id);

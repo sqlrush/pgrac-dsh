@@ -466,6 +466,19 @@ cluster_ges_request_handler(const ClusterICEnvelope *env, const void *payload)
 
 	pg_atomic_fetch_add_u64(&cluster_ges_state->request_defer_count, 1);
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 frame-loss hunt): entry probe.  Capped;
+	 * removed before the final push. */
+	{
+		static int ges_entry_diag = 0;
+
+		if (ges_entry_diag++ < 20)
+			ereport(LOG,
+					(errmsg("TEMP ges entry: src=%u dst=%u plen=%u",
+							(unsigned)env->source_node_id,
+							(unsigned)env->dest_node_id,
+							(unsigned)env->payload_length)));
+	}
+
 	if (payload == NULL) {
 		cluster_grd_inc_ges_inbound_validation_fail();
 		return;

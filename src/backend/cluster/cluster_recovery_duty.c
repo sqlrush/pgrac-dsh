@@ -336,11 +336,17 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 			   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
 		|| (snapshot.lifecycle
 				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE
-			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+			/* RF-ROOT P6 (specs-local STOP-01 increment 13): a CLOSED root
+			 * is the same-owner clean release (THREAD_CLEAN_CLOSE contract);
+			 * the same-owner clean reopen is admitted under the exact
+			 * RECOVERY_COMPLETE pre-conditions below (monotonic newer
+			 * incarnation + write-once claim CRC + durable JCMK majority). */
+			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& identity.origin_owner_incarnation != admitted_incarnation)
 		|| (snapshot.lifecycle
-				== CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE
+				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& (identity.root_lineage_seq == UINT64_MAX
 				|| identity.origin_owner_incarnation >= admitted_incarnation)))
 		return false;
@@ -366,8 +372,14 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 				 | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
 				 | CLUSTER_CONTROL_ROOT_PATCH_TAIL
 				 | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
-	patch.expected_lifecycle =
-		CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
+	patch.expected_lifecycle = snapshot.lifecycle;
+	/* RF-ROOT P6 (specs-local STOP-01 increment 13): the head gate now
+	 * admits the CLOSED lifecycle for the same-owner clean reopen, so the
+	 * CAS must expect the OBSERVED lifecycle (RECOVERY_COMPLETE for the
+	 * crash-rejoin mainline, CLOSED for the clean reopen) instead of a
+	 * hardcoded RECOVERY_COMPLETE — otherwise every clean-reopen join
+	 * fails the compare against the still-CLOSED root forever.  The OPEN
+	 * case never reaches here (already-satisfied shortcut above). */
 	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
 	patch.desired.identity.origin_owner_incarnation = admitted_incarnation;
 	patch.desired.identity.root_lineage_seq = identity.root_lineage_seq + 1;

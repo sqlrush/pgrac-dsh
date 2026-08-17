@@ -2192,6 +2192,30 @@ cl_coordinator_commit(int32 leaving)
 	(void)cl_poll_lmon_marker_stage();
 }
 
+/* RF-ROOT P6 (specs-local STOP-01 increment 12): has the leaving node's OLD
+ * process provably exited?  The CSSD peer state is node-scoped, so a fast
+ * restart (heartbeats resumed inside the DEAD window) never reads DEAD; but
+ * an observed slot with a coherent, fresh-alive incarnation DIFFERENT from
+ * the incarnation the cluster last admitted for the node (which a
+ * clean-departed node keeps until it is re-admitted by a join) can only
+ * belong to a NEW process — the old one is gone. */
+static bool
+cl_leaver_reincarnated(int32 leaving)
+{
+	uint64 obs_inc = 0;
+	uint64 obs_gen = 0;
+	uint64 admitted;
+
+	if (leaving < 0 || leaving >= CLUSTER_MAX_NODES)
+		return false;
+	if (!cluster_reconfig_get_observed_slot(leaving, &obs_inc, &obs_gen))
+		return false;
+	if (!cluster_reconfig_get_observed_fresh_alive(leaving))
+		return false;
+	admitted = cluster_membership_get_last_admitted_incarnation(leaving);
+	return admitted != 0 && obs_inc != 0 && obs_inc != admitted;
+}
+
 /* survivor (incl. coordinator) side of another node's leave. */
 static void
 cl_survivor_tick(int32 leaving)
@@ -2266,10 +2290,27 @@ cl_survivor_tick(int32 leaving)
 		 * and THREAD_CLEAN_CLOSE CF acquires run against a survivor-mastered,
 		 * NORMAL CF shard instead of wedging on the episode freeze window.  If the
 		 * rebind never confirms, the send never happens and the leaver fails
-		 * closed at its barrier deadline (no fake clean-leave completion). */
+		 * closed at its barrier deadline (no fake clean-leave completion).
+		 *
+		 * RF-ROOT P6 (specs-local STOP-01 increment 10): the "every tick" re-send
+		 * is floored to 1 Hz — the LMON iteration can be driven at inbound-frame
+		 * rate, and a per-iteration re-send combined with the rejoining node's
+		 * per-iteration authority done-key broadcast forms a self-sustaining
+		 * frame ping-pong that starves the cssd heartbeat path (t243 L5 restore
+		 * boot: node0 falsely DEAD at +3s, phase-3 broken, 60s bail).  The
+		 * confirmation is idempotent and delivery-assured at 1 Hz. */
 		if (pg_atomic_read_u32(&cl_state->committed_marker_durable)
-			&& cluster_serving_ready_is_current())
-			cl_send_committed(leaving, committed_epoch);
+			&& cluster_serving_ready_is_current()) {
+			static TimestampTz last_committed_send_at = 0;
+			TimestampTz now_ts = GetCurrentTimestamp();
+
+			if (now_ts == 0
+				|| last_committed_send_at == 0
+				|| now_ts - last_committed_send_at >= INT64CONST(1000000)) {
+				cl_send_committed(leaving, committed_epoch);
+				last_committed_send_at = now_ts;
+			}
+		}
 	}
 
 	/* 2b. EVERY survivor (not just the coordinator) must observe the CLEAN_LEAVE
@@ -2296,9 +2337,21 @@ cl_survivor_tick(int32 leaving)
 	 * LEAVE_COMMITTED until the leaver is gone (assured delivery, P1-1), and (b)
 	 * serializes leaves (a second leave is NAK'd until this one fully departs,
 	 * single-leave-at-a-time, P1-3).  clean_departed persists in the reconfig
-	 * region and suppresses the node's CSSD DEAD from a spurious fail-stop (CL-I13). */
+	 * region and suppresses the node's CSSD DEAD from a spurious fail-stop (CL-I13).
+	 *
+	 * RF-ROOT P6 (specs-local STOP-01 increment 12): CSSD peer state is
+	 * node-scoped, not process-scoped — when the leaving node restarts quickly
+	 * (heartbeats resume inside the 3 s DEAD window) the peer never reads DEAD
+	 * and the slot is held forever, which pins cluster_clean_leave_in_progress()
+	 * and the P2 join-serialization gate permanently blocks the fast-rejoin
+	 * chain on the survivor (t243 L5 restore boot: eviction fired, join-drive
+	 * blocked with clean_leave=1, rejoiner phase-3 starved the full 60 s
+	 * window).  An observed NEW incarnation is conclusive proof the old
+	 * process exited — a fresh process cannot be alive while the old one is —
+	 * so the release fires on that too. */
 	if (cluster_reconfig_is_clean_departed(leaving)
-		&& cluster_cssd_get_peer_state(leaving) == CLUSTER_CSSD_PEER_DEAD) {
+		&& (cluster_cssd_get_peer_state(leaving) == CLUSTER_CSSD_PEER_DEAD
+			|| cl_leaver_reincarnated(leaving))) {
 		LWLockAcquire(&cl_state->lock, LW_EXCLUSIVE);
 		if (cl_state->leaving_node_id == leaving) {
 			cl_state->leaving_node_id = -1;

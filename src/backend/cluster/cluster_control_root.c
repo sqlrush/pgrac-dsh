@@ -1516,6 +1516,13 @@ patch_shape_valid(const ClusterControlRootPatch *patch,
 	if (reason == CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
 		&& (patch->expected_lifecycle
 				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE
+			/* RF-ROOT P6 (specs-local STOP-01 increment 13): the same-owner
+			 * clean reopen joins from a CLOSED root (THREAD_CLEAN_CLOSE
+			 * released it); the CAS then advances CLOSED -> OPEN exactly
+			 * like THREAD_OPEN does, with the same owner-lineage
+			 * monotonicity enforced by the CAS compare below. */
+			&& patch->expected_lifecycle
+				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
 			|| patch->desired.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			|| patch->desired.identity.origin_owner_incarnation == 0
 			|| patch->desired.identity.root_lineage_seq == 0))
