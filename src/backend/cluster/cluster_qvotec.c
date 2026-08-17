@@ -2616,6 +2616,37 @@ qvotec_poll_once(void)
 	{
 		uint32 node;
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): what the matrix
+		 * read actually carries per poll (capped; removed before the final
+		 * push). */
+		{
+			static int obs_matrix_diag = 0;
+
+			if (obs_matrix_diag++ < 30)
+				for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+					uint64 m_gen = 0;
+					uint64 m_inc = 0;
+
+					for (i = 0; i < qvotec_n_disks; i++) {
+						ClusterVotingSlot *cell
+							= &qvotec_slot_matrix[i * CLUSTER_MAX_NODES + node];
+
+						if (cell->generation > m_gen
+							&& cell->node_id == node) {
+							m_gen = cell->generation;
+							m_inc = cell->incarnation;
+						}
+					}
+					if (m_gen > 0)
+						ereport(LOG,
+								(errmsg("TEMP obs matrix: self=%d node=%u "
+										"gen=%llu inc=%llu",
+										cluster_node_id, node,
+										(unsigned long long)m_gen,
+										(unsigned long long)m_inc)));
+				}
+		}
+
 		for (node = 0; node < CLUSTER_MAX_NODES; node++) {
 			uint64 best_gen = 0;
 			uint64 best_incarnation = 0;
@@ -2970,6 +3001,21 @@ qvotec_poll_once(void)
 		qvotec_slot_generation++;
 		self_slot.generation = qvotec_slot_generation;
 		self_slot.disk_index = (uint32)i;
+
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): self-slot write
+		 * identity per poll (capped; removed before the final push). */
+		{
+			static int selfwrite_diag = 0;
+
+			if (selfwrite_diag++ < 20 && i == 0)
+				ereport(LOG,
+						(errmsg("TEMP qvotec selfwrite: pid=%d inc=%llu "
+								"gen=%llu epoch=%llu",
+								(int)MyProcPid,
+								(unsigned long long)self_slot.incarnation,
+								(unsigned long long)self_slot.generation,
+								(unsigned long long)self_slot.current_epoch)));
+		}
 
 		if (rplm_state == CLUSTER_REPLACEMENT_REQUEST_SLOT_HOLD)
 			wrc = CLUSTER_VOTING_DISK_IO_FAILED;
