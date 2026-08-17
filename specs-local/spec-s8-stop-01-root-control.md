@@ -1883,6 +1883,16 @@ L5 restore boot（clean stop + 快速重开）的 phase3 权威 barrier 永不�
 
 ## 增量 17：owner-rejoin OPEN 分支接受同主更新化身（2026-08-17，修 L10 快速停机重启的 root 永拒）
 
+> **⚠️ 已回退（2026-08-18，DSH 复审补记 13）**：违反 STOP-02 §17.4——
+> OWNER_REJOIN 前态必须是 RECOVERY_COMPLETE；OPEN→OPEN 捷径被冻结线禁止；
+> 且 recovery_duty.c:387 构造 expected=OPEN 时 patch_shape_valid
+> （control_root.c:1516）只收 RECOVERY_COMPLETE/CLOSED → :1702
+> INVALID_ARGUMENT，该 OPEN 支路是死代码。回退点 = ce00ff9efd^
+> （head gate 恢复 `origin_owner_incarnation != admitted_incarnation`、
+> 已满足捷径恢复 `lifecycle == OPEN` 即 return true；单测用例同步删除）。
+> 遗留问题（L10 fast-stop 的 serving 过期窗口 root 停在 OPEN）转由
+> 增量 13 的裁决路线（B：clean-reopen 改走 STOP-01 THREAD_OPEN）承接。
+
 ### 背景事实（run-54 实测证据，2026-08-17 23:59:26-00:00:58）
 
 增量 16 后 t243 跑到 ok 1-33（L1-L10 全过），唯一剩尾腿：L10 的
@@ -1928,3 +1938,105 @@ L5 restore boot（clean stop + 快速重开）的 phase3 权威 barrier 永不�
 
 - t243 尾腿：L10 重启的 owner gate 走 OPEN CAS → JOIN 发布 → phase3
   收敛 → 全部 33 ok 无 bail。
+
+---
+
+## 增量 18：cluster_regress clean_leave SIGABRT 归因 = stale build artifact（2026-08-18，P0 收尾，无产品代码改动）
+
+### 背景（DSH 交接核验发现，2026-08-18 07:08）
+
+cluster_regress 2/13 红且为崩溃级：`cluster_clean_leave` 的
+`SELECT count(*) FROM pg_cluster_clean_leave_state;`（视图/SRF 首查，
+单节点 node_id=-1）使 backend SIGABRT（signal 6）；`cluster_node_remove`
+为崩溃后服务器 reinitializing（"database system is in recovery mode"）
+期间的连带失败。DSH 怀疑面 = 增量 10/12 的 clean-leave FSM 改动。
+
+### 取证（本会话 lldb 实锤，2026-08-18 07:1x）
+
+1. 手工单节点实例（cluster.enabled=on，node_id=-1）稳定复现同一崩溃。
+2. lldb attach backend，SIGABRT 栈：
+
+```
+frame #3: libsystem_c.dylib`__stack_chk_fail + 96
+frame #4: postgres`cluster_get_clean_leave_state + 304   ← 栈 canary 写穿
+frame #5: postgres`ExecMakeTableFunctionResult + 788     （SRF 首查）
+```
+
+   —— 不是 Assert（全程无 TRAP 消息），是 **栈保护 canary 失败**：函数
+   返回时检测到局部缓冲被写穿。
+3. 机制：`cluster_clean_leave_views.c` 的局部 `ClusterLeaveState st;`
+   由 `cluster_clean_leave_get_state(&st)` 整结构拷贝（`*out = *cl_state`）。
+   `cluster_clean_leave_views.o` mtime = 2026-08-16 16:42，早于
+   `cluster_clean_leave.h`（2026-08-17 15:55，5861a6c700 加入
+   `pg_atomic_uint32 shutdown_driven`，结构体变大）；而
+   `cluster_clean_leave.o`（2026-08-17 23:28）是新的。新 .o 的
+   `*out = *cl_state` 按新布局拷贝 **更大的结构体** 进 views 栈帧里
+   **旧的更小局部** → 写穿 canary → SIGABRT。
+4. 同因 stale 对象共 7 个（依赖 cluster_clean_leave.h 且 .o 早于 header）：
+   cluster_gcs_block / cluster_clean_leave_policy / cluster_shmem /
+   cluster_clean_leave_views / access/transam/xact / tcop/postgres /
+   storage/ipc/procsignal。本树 make 无依赖跟踪（无 --enable-depend），
+   header 变更不会触发依赖方重编。
+
+### 归因结论
+
+- **根因 = 构建产物陈旧**（stale .o 与 header 结构体尺寸不匹配），
+  **不是产品逻辑缺陷**：增量 10/12 的 FSM 改动（cl_leaver_reincarnated /
+  survivor 释放条件）与崩溃无因果；崩溃路径在 FSM 之外（纯观测 SRF）。
+- 佐证：① 单测 test_cluster_clean_leave 11/11 绿（单测二进制自当前源码
+  编译，无 stale）；② 后端全量 clean rebuild 后同一查询返回正确结果
+  （count=1，phase=idle，leaving_node_id=-1，leave_epoch=0），与
+  expected/cluster_clean_leave.out 逐字一致。
+
+### 处置（最小修复，无产品代码改动）
+
+1. `src/backend` 全量 `make clean && make -j8`（消灭全部 stale 对象，
+   含上述 7 个 + 其它潜在 stale），重新链接 postgres。
+2. cluster_regress 全量复跑（预期 13/13 绿，cluster_node_remove 连带
+   转绿）。
+3. 验收：cluster_regress 绿 + test_cluster_clean_leave 单测绿 +
+   t243 复跑（构建面变化可能影响任何路径，需 1 轮全绿确认）。
+
+### 预防记录
+
+- 本树增量构建无 header 依赖跟踪：今后凡改动 include 下的结构体/头文件，
+  必须先全量重建再跑批；发现诡异 SIGABRT/栈破坏时先查 .o 与 .c/.h 的
+  mtime 错位（本次教训）。
+
+---
+
+## 增量 18 补记：P1 TEMP 清理暴露 test 55 的掩盖性诊断块（2026-08-18）
+
+### 发现（清理过程的副产品）
+
+P1 清理时删除 test_cluster_reconfig.c 的 "TEMP DIAGNOSTIC (RF-ROOT P6
+increment 9)" printf 块后，`test_fast_rejoin_control_episode_lms_generation_
+loss_fails_closed`（test 55）转红。git 追溯实锤（921cab5ee5 提交说明原文：
+"reconfig suite now builds and runs (**5** pre-existing increment-5-8
+staleness failures + 5 pre-existing R4-model failures remain)"）：
+
+- test 55 本就是第 5 个 pre-existing staleness 失败；同一提交加入的诊断块
+  内含 `ut_join_qvotec_poll_write_pending()` **消费调用**（poll 即取走
+  pending 写入），使随后的 `UT_ASSERT(!poll)` 恒真 —— 诊断块掩盖了失败，
+  后续 P6 文档（P6-RESUME v5 / DSH 补记 8.4）只记录了 4 个（75/76/77/92）。
+- 掩盖机制（代码级）：fixture `ut_fast_rejoin_to_join_pending()` 最后一轮
+  tick（gen=1、serving=ready、capability armed）中 drive_joins phase-2 已把
+  JOIN_COMMITTED marker **staged + submitted**（增量 5/16 的无门排水语义，
+  该 marker 是 majority-durable 决策）；test 55 设 gen=2 后 capability 被
+  快照门清除（快照 gen 不匹配 → invalid → clear），但已 staged 的 commit
+  由无门排水继续完成 —— 断言"gen 变化后不得有 pending"在增量 5/16 语义下
+  过期。
+
+### 处置（测试同步，产品代码零改动）
+
+- test 55 重写为当前语义并保留 fail-closed 意图：
+  1. gen=2 后：已 staged 的 COMMITTED marker 仍 pending（capability 清除，
+     不再新 arm；joiner 保持 JOINING，未发布任何事件——无 stale 证据提交）；
+  2. 完成 marker（majority ACK）→ JOIN_COMMITTED 发布、node1 MEMBER；
+  3. gen 恢复 1：capability 不复活——新引入的 eligible peer（node2 DEAD+
+     fresh slot）不被纳入任何 episode（无新 JOIN_PENDING，node2 保持 DEAD）。
+- 副作用修正：诊断块遗留的未 ACK pending marker 泄漏污染了后续 test
+  75/76（join-commit marker submit 桩时序）——重写后泄漏消除，75/76 转绿。
+  reconfig 套件从文档化的 4 失败（75/76/77/92）降为 2（77/92 保持
+  pre-existing：marker submit 桩时序 + external-rejoin epoch 期望，与
+  P6-RESUME §4 记录一致，留给后续）。

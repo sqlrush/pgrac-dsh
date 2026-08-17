@@ -390,37 +390,6 @@ UT_TEST(test_owner_rejoin_closed_lifecycle_same_owner_clean_reopen)
 	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(70)));
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 
-	/* increment 17: an OPEN root whose owner is OLDER than the admitted
-	 * incarnation (the previous THREAD_CLEAN_CLOSE was denied in a
-	 * serving-stale window) is re-opened by the same owner's fresh process
-	 * via the CAS — expected_lifecycle=OPEN, owner re-stamped. */
-	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
-	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
-	UT_ASSERT_EQ(ut_owner_read_calls, 1);
-	UT_ASSERT_EQ(ut_root_publish_calls, 1);
-	UT_ASSERT(ut_root_publish_context_authorized);
-	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
-				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
-	UT_ASSERT_EQ(ut_root_published_patch.desired.lifecycle,
-				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
-	UT_ASSERT_EQ(
-		ut_root_published_patch.desired.identity.origin_owner_incarnation,
-		UINT64_C(77));
-	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq,
-				 ut_root_identity.root_lineage_seq + 1);
-
-	/* A STALE process (admitted <= root owner) on an OPEN root is still
-	 * rejected. */
-	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
-	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(70)));
-	UT_ASSERT_EQ(ut_root_publish_calls, 0);
-	setup_owner_rejoin(UINT64_C(77), UINT64_C(77));
-	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
-	UT_ASSERT_EQ(ut_root_publish_calls, 0); /* already-satisfied shortcut */
-
 	/* Bootstrap / retired roots are not in the reopen allowlist. */
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_UNUSED;
@@ -443,22 +412,13 @@ UT_TEST(test_owner_rejoin_fails_closed_on_non_jcmk_drift_or_exhaustion)
 	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 
-	/* increment 17: OPEN + same-owner NEWER incarnation is now admitted
-	 * (the CAS re-stamps the owner); a STALE process (admitted below the
-	 * root owner) is still rejected before any JCMK read. */
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
-	UT_ASSERT_EQ(ut_owner_read_calls, 1);
-	setup_owner_rejoin(UINT64_C(70), UINT64_C(60));
-	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(60)));
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
 	UT_ASSERT_EQ(ut_owner_read_calls, 0);
 	setup_owner_rejoin(UINT64_C(77), UINT64_C(77));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-	ut_root_identity = ut_root_snapshot.identity;
 	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
-	UT_ASSERT_EQ(ut_owner_read_calls, 1);
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
