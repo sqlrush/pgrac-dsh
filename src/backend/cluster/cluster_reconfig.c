@@ -6037,6 +6037,23 @@ cluster_reconfig_lmon_tick(void)
 				cluster_membership_set_state(i, CLUSTER_MEMBER_DEAD);
 			else if (ms == CLUSTER_MEMBER_ABSENT) {
 				cluster_membership_set_state(i, CLUSTER_MEMBER_MEMBER);
+				/* RF-ROOT P6 (specs-local STOP-01 增量 7): the bootstrap
+				 * re-admission re-proves the node present (CSSD ALIVE +
+				 * fresh slot), so the CL-I13 clean-departed mask no longer
+				 * applies — clear it here (inline: we already hold the
+				 * reconfig EXCLUSIVE lock; the out-of-line clearer
+				 * re-acquires it).  The join-commit clear remains the
+				 * readmission-path twin.  Without this, a re-joined node's
+				 * LATER real crash is masked (its fail-stop suppressed)
+				 * and the survivor wedges:  observed t243 L4 (kill -9
+				 * after a clean-departed rejoin). */
+				if (clean_departed_test_bit_locked(
+						ReconfigShmem->clean_departed_bitmap, i)
+					|| ReconfigShmem->clean_departed_epoch[i] != 0)
+					cluster_write_fence_authority_cache_invalidate();
+				ReconfigShmem->clean_departed_bitmap[i / 8]
+					&= (uint8) ~(1u << (i % 8));
+				ReconfigShmem->clean_departed_epoch[i] = 0;
 			}
 			else if (runtime_join_allowed && i == root_gated_join_node
 					 && ms == CLUSTER_MEMBER_DEAD
