@@ -242,17 +242,20 @@ cluster_lock_acquire_s1_entry(const ClusterLockAcquireRequest *req)
 				? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
 				: CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE;
 		/*
-		 * RF-ROOT P6 (clean-reopen / THREAD_OPEN): the phase-3 recovery
-		 * lock admission also covers the POSTMASTER.  The phase-3
-		 * sequence driver itself runs postmaster-side (!IsUnderPostmaster,
-		 * same assertion as phase_3_handler), and the THREAD_OPEN root
-		 * reopen it performs needs the phase-3 clusterwide CF share-lock;
-		 * only the StartupProcess was previously admitted.  The frozen
-		 * CF(S)/WALR(X) resid allowlist below is unchanged.
+		 * RF-ROOT P6 (reverted 2026-08-17): the recovery lock admission is
+		 * StartupProcess-only per frozen AD-023 §4 and STOP-01 I1 (the
+		 * postmaster never acquires remote/verified CF).  A brief widening
+		 * (AmStartupProcess() || !IsUnderPostmaster) let the postmaster
+		 * phase-3 driver acquire the CF(S) locally, but its S6 release was
+		 * refused (asymmetric gates) -> RELEASE_UNCERTAIN + a ghost GRD
+		 * holder that wedged every later CF(X) waiter (cast-leg pair-boot).
+		 * The phase-3 THREAD_OPEN retry therefore fails closed here (r=10);
+		 * the root reopen needs a PGPROC executor (deferred to the L5 leg
+		 * work).
 		 */
 		if (cluster_recovery_authority_request_allowed(
 				&req->resid, req->lockmode,
-				AmStartupProcess() || !IsUnderPostmaster))
+				AmStartupProcess()))
 			return CLUSTER_LOCK_ACQUIRE_OK_GRANTED;
 		return CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE;
 	}

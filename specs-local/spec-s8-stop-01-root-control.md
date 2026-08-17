@@ -1206,59 +1206,50 @@ engage-first 序不变（复用既有函数）。
 - 验证：t243 全绿（铸根 ok 3 → L5 → L6/L8/L9/L10）；focused unit 全绿；
   完整 build 闭包。
 
-## 增量 3：方案 D phase3 恢复锁准入四门对称（2026-08-17，修 THREAD_OPEN 永不落地 + 幽灵 holder）
+## 增量 3：回退 phase3 recovery 锁准入的 postmaster 半个放宽（2026-08-17，修铸根后 pair-boot 楔死）
 
-### 背景事实（t243 铸根后二次 pair-boot 实测证据，2026-08-17）
+### 背景事实（t243 实测证据，2026-08-17，cfx 探针双侧日志）
 
-- 方案 D（Writer 已批准：phase3 bind/barrier 循环由 postmaster phase3 驱动
-  重试 THREAD_OPEN 直到落地）要求 THREAD_OPEN 的 STRONG 根读取得 coordinated
-  CF(S)（master=对端）。
-- 实测（cfx 探针轮，双侧日志实锤）：
-  - node1（joiner，remote master）：THREAD_OPEN 的 CF(S) 在 **S4 请求侧门**
-    被拒（`cfx lock: mode=5 r=18`，shard phase 实为 NORMAL——是门拒不是冻结）；
-  - node0（coordinator，local master）：CF(S) 经本地 fast path 获取成功，但
-    **S6 释放门**拒绝（`cfx rel: gate=0 ... startup=0`）→ 根读返回
-    RELEASE_UNCERTAIN(27)，且 GRD 残留幽灵 CF(S) holder；
-  - 幽灵 holder 使 node0 checkpointer 的 W2 CF(X)（本地）与 node1 stats 的
-    W2 ACTIVE CF(X)（远程，连续 r=13 超时）全部楔死 → 两侧 phase4
-    "Cluster Stats did not publish READY" FATAL → start_pair bail。
-- 根因：S1 已按方案 D 放宽为 `AmStartupProcess() || !IsUnderPostmaster`，但
-  S4 请求侧门（`ges_readiness_allows_local_origin`）、S6 释放门
-  （`ges_readiness_allows_local_release_origin`）、master 侧 REQUEST 入站/
-  drain 复核门（`ges_readiness_allows_protocol_request` 的 seal 前置）与
-  master 侧 grant 门（`ges_readiness_allows_grant`）仍只认 StartupProcess /
-  seal——同一 acquire 在四个面上得到四种裁决。
+- 旧接线曾把 S1 recovery 准入放宽为 `AmStartupProcess() || !IsUnderPostmaster`
+  （方案 D 的 phase3 驱动在 postmaster 中重试 THREAD_OPEN）。这是**半个放宽**：
+  S4 请求侧门与 S6 释放门仍只认 StartupProcess，master 侧门仍只认 GRD seal。
+- 实测链条（run-16/17）：
+  1. node0（coordinator，local master）postmaster 的 THREAD_OPEN CF(S) 经
+     S1（已放宽）→ 本地 fast path 授予；S6 释放门拒（StartupProcess-only）
+     → 根读 RELEASE_UNCERTAIN(27)，GRD 残留**幽灵 CF(S) holder**；
+  2. 幽灵 holder 使 node0 checkpointer 的 W2 CF(X)（本地）与 node1 stats 的
+     W2 ACTIVE CF(X)（远程，连续 r=13 超时）全部楔死 → 双侧 phase4
+     "Cluster Stats did not publish READY" FATAL → start_pair bail；
+  3. 若继续把 S4/master 侧一并放宽（本轮曾尝试），node1 postmaster 的 CF(S)
+     走远程 wire 路径（outbound ring LWLock + CV wait），在无 PGPROC 进程里
+     撞冻结 A1 §8.3（"outbound enqueue/wakeup …不得在 Postmaster 执行"、
+     "锁竞争表示 unavailable"）→ postmaster 静默死亡。
+- 结论：该放宽违反了冻结 STOP-01 I1（"Postmaster has no PGPROC and never
+  acquires remote/verified CF"）与 AD-023 §4（caller 是 StartupProcess）。
 
-### 合同（增量 3，与 AD-023 §4 同向；只补方案 D 的执行对称，不扩 allowlist）
+### 合同（增量 3，回退型）
 
-1. **S4 请求侧门 + S6 释放门**：recovery 准入参数从 `AmStartupProcess()`
-   放宽为 `AmStartupProcess() || !IsUnderPostmaster`（与 S1 一致；被允许的
-   acquire 其 release 必须同样被允许——否则幽灵 holder 既是可用性丧失，也是
-   跨节点 waiter 饿死，即本次楔死的直接原因）。
-2. **master 侧 REQUEST 入站/drain 复核/grant 门**：CF(S)/WALR(X) allowlist
-   请求在 phase3 期间以 components-only transport 证明放行
-   （`allowlist && (authority_current || (phase==3 && components_current))`）；
-   其余 opcode/resource/mode 的 seal 前置一字不动（seal 是 barrier 的产物，
-   而 THREAD_OPEN 的 CF(S) 是 barrier 的输入——seal 前置对 allowlist 请求是
-   结构性死锁，这正是冻结 AD-023 §4 末段"不能丢失这两个 recovery request"
-   所要求的 preserve）。
-3. **不变**：mode/resid allowlist（CF 0xF1/S、WALR 0xFA/X）不动；OK_NATIVE /
-   local fallback 仍拒绝；serving 分支、REDECLARE 腿、RELEASE 腿不动。
+1. **S1 recovery 准入恢复 `AmStartupProcess()`（StartupProcess-only）**：
+   postmaster 的 phase3 THREAD_OPEN CF(S) 在 S1 即 fail-closed（r=10），
+   不产生任何 GRD 注册 → 幽灵 holder 机制性消失。
+2. S4 请求侧门、S6 释放门、master 侧 REQUEST/grant 门的 seal 前置全部保持
+   冻结原状，不做放宽。
+3. THREAD_OPEN 根重开仍需要落地（L5 腿依赖），但必须由 **PGPROC 执行者**
+   完成（StartupProcess 在 phase4 的 E2 STRONG 读上下文，或 LMON 阻塞执行者
+   受托）——该执行者设计在 L5 腿单独落增量，不随本增量。
+4. 不变：allowlist（CF 0xF1/S、WALR 0xFA/X）、OK_NATIVE/local fallback
+   拒绝、fail-closed 语义；postmaster CF call count 保持零（I1 验收）。
 
 ### 安全论证
 
-- CF(S) 是 STRONG 读锁，无 serving-side 效应；读侧文件级校验（sysid /
-  storage uuid / claim / CRC / 双读）不变。
-- 请求侧 S1+S4 仍限 phase3 驱动（postmaster 或 startup）且 components 证明
-  current 才能发；master 侧放宽面 = 同一 allowlist，宽度与既有 RELEASE 腿
-  （mode-only）一致，不新增任何 resource/mode/caller。
-- fail-closed 保持：任一门不满足仍拒绝；root 留 CLOSED 时既有 crash-rejoin
-  链语义不变。
+- 回退后 postmaster 不再执行任何 CF 获取/释放；铸根后 pair-boot 的 W2
+  CF(X) 不再面对幽灵 holder，即授予（serving 已 current）。
+- THREAD_OPEN 在 phase3 循环里 fail-closed（无副作用），不改变 witness/
+  barrier/join 链的既有语义；L4/L5 的 root 状态消费点均在 phase4+ 的
+  PGPROC 上下文。
 
 ### 验收
 
-- 铸根后二次 pair-boot：两侧 THREAD_OPEN 不再出现 root_result 17/18/27；
-  W2 CF(X) 两侧即时授予；checkpointer 无 25s 楔死；t243 ok 3 → L5 → L6/L8/
-  L9/L10 全绿。
-- 增量 2 观察项（seed clean-close 的 CF(S) stale-hold drain 失败）随释放门
-  对称一并复测。
+- 铸根后二次 pair-boot：W2 CF(X) 双侧即时授予、checkpointer 无楔死；
+  t243 ok 3 → L5 → L6/L8/L9/L10 全绿（L5 的 THREAD_OPEN 执行者增量单独
+  验证）；postmaster 侧无 CF 获取日志。
