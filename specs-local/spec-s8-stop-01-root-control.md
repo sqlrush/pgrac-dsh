@@ -1297,3 +1297,48 @@ engage-first 序不变（复用既有函数）。
 
 - 铸根后二次 pair-boot 无 fence PANIC；W2 checkpoint 正常完成；双侧
   phase4 → running；t243 ok 3 → L5 → L6/L8/L9/L10 全绿。
+
+## 增量 5：join PREPARE drain 移出 join-drive 门（2026-08-17，修 L4 fast-rejoin 循环死锁）
+
+### 背景事实（t243 L4 crash-rejoin 实测证据，2026-08-17）
+
+- L4 腿 kill -9 → 重启 <3s（CSSD 死带内恢复），survivor 无 DEAD 边 → 无
+  fail-stop；P04 shared-CF 快速重启回滚门（observed incarnation 超 floor）
+  正确驱逐旧化身并置 fast_rejoin_bitmap → epoch 1→2（JOIN_PENDING，事件
+  只 staged、未发布）。
+- 此后陷入循环死锁（双侧日志实锤）：
+  1. join-drive 门要求 `ordinary_actions_allowed`，其值 =
+     serving rebind 成功（epoch 2 的 GRD seal 重验）；
+  2. serving rebind 需要 JOIN 方向 GRD recovery episode 关闭；
+  3. episode 需要 JOIN_PENDING 事件已 applied；
+  4. JOIN_PENDING 的 prepare-marker drain（发布该事件）由
+     `cluster_reconfig_drive_joins` 驱动——drive 被同一道门挡住。
+  → 事件永不发布、episode 永不启动、rebind 永不通过、COMMITTED 永不落、
+  joiner 30s 后 53R61（"join did not converge"）。
+- 对照：fail-stop 的 staged fence drain（`cluster_reconfig_poll_failstop_
+  fence_stage`）在 LMON tick 里**无门**驱动——事件发布不依赖 serving
+  rebind，所以 fail-stop 路径从不死锁。join prepare drain 属同一类
+  （完成 in-flight 会籍发布），却被放进 drive 门内——P04 接线缺口。
+
+### 合同（增量 5）
+
+1. LMON tick 在 fail-stop stage drain 之后、无门地驱动
+   `cluster_reconfig_poll_join_prepare_stage()`（无 staged 时为 no-op）。
+2. join-drive 门自身不变：**新** join 决策仍须 ordinary/control 腿；
+   drain 只完成已 staged 的 JOIN_PENDING 发布（durable 链的完成步，
+   与 fail-stop stage 同地位）。
+3. 不变：JOIN_PENDING 事件内容、epoch bump、COMMITTED 是唯一 commit 点、
+   vet/allowlist/fail-closed 语义；PREPARE 仍 best-effort。
+
+### 安全论证
+
+- drain 只推进已由 eviction（P04 回滚门）授权的 staged 事件；无 staged
+  时为 no-op，不产生任何新决策。
+- JOIN_PENDING 发布后 GRD episode/rebind/commit 链沿既有冻结路径推进；
+  未放宽任何 gate、judge、timeout 或 workload。
+
+### 验收
+
+- t243 L4：kill -9 重启 ≤3s 时 survivor 在 ~1 tick 内发布 JOIN_PENDING →
+  episode 关闭 → rebind 通过 → COMMITTED + JCMK → joiner 自认 → phase3
+  完成 → ok 18/19 稳定；L5-L10 全绿。
