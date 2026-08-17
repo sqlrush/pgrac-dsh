@@ -5964,9 +5964,16 @@ cluster_reconfig_lmon_tick(void)
 			 * authority, a CRC-checked slot incarnation strictly above an existing
 			 * MEMBER floor is the missing eviction edge: exclude the prior
 			 * incarnation first, then let the unchanged join protocol admit the
-			 * newer one.  A zero floor is bootstrap, never rollover evidence. */
+			 * newer one.  A zero floor is bootstrap, never rollover evidence.
+			 *
+			 * RF-ROOT P6 (specs-local STOP-01 增量 8): the gate also accepts a
+			 * DEAD-state peer (cssd ALIVE + fresh slot + newer incarnation):
+			 * when the deadband wins the fast-restart race, the fail-stop
+			 * already demoted the peer, and without this arm the join has no
+			 * runtime leg (runtime_join_allowed is only armed here) -- the
+			 * joiner then waits for a JCMK that can never be written. */
 			if (!cluster_online_join && cluster_controlfile_shared_authority
-				&& ms == CLUSTER_MEMBER_MEMBER
+				&& (ms == CLUSTER_MEMBER_MEMBER || ms == CLUSTER_MEMBER_DEAD)
 				&& prior_incarnation > 0
 				&& cluster_cssd_get_peer_state(i) == CLUSTER_CSSD_PEER_ALIVE
 				&& cluster_reconfig_get_observed_fresh_alive(i)
@@ -5985,7 +5992,7 @@ cluster_reconfig_lmon_tick(void)
 				dead_bitmap_set_bit(dead_bitmap, i);
 				offpath_fast_rejoin_actions = true;
 				runtime_join_allowed = true;
-			} else if (ms == CLUSTER_MEMBER_MEMBER) {
+			} else if (ms == CLUSTER_MEMBER_MEMBER || ms == CLUSTER_MEMBER_DEAD) {
 				/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): full gate
 				 * decomposition, change-aware on the complete signature.
 				 * Removed before the final push. */
