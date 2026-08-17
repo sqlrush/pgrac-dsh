@@ -111,3 +111,19 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
   符合 specs-local 纪律；增量 2/2（若推导出新方案）留给新会话继续。
 - 上会话诚实标注"三个变体均先于本会话存在、任意 binary 可复现"——新会话
   排查 B1/B2/B3 时勿把责任归给 contract 1 修复；优先 bisect B1（已有探针）。
+
+---
+
+## 复审补记 4（2026-08-17 19:45，换会话交接 v3）
+
+- 复审对象：本会话 6 层修复（increment 3-8：S1 准入回退 / qvotec baseline
+  epoch floor / JOIN_PENDING drain 移出 drive 门 / 驱逐并入 dead 集 / bootstrap
+  清 clean-departed / rollover 门扩 DEAD 态）。方向全部符合冻结 spec，逐层
+  配 specs-local 增量，模式正确；中途自行 revert 一次"四门放宽"（A1 no-PGPROC
+  违反）——判断力在线，无遗留偏离。
+- 剩余楔子（已由会话自己写进 P6-RESUME v3，DSH 背书）：
+  ① node1 boot 的 cssd >2s 心跳空窗 → node0 二次 SUSPECTED/DEAD → 二次
+  fail-stop(epoch 4) → barrier epoch 精确匹配失败；
+  ② sj_adm=1 后 witness 仍 ~3.5 分钟才 READY（剩余门待分解）。
+- 新会话注意：F2/F3（P1）仍待查；L5 前复核 seed clean-close CF(S) stale-hold
+  （增量 2 已记录）。勿重开"四门放宽"。
