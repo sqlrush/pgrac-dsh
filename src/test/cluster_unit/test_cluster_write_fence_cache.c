@@ -119,6 +119,14 @@ cluster_qvotec_in_quorum(void)
 	return true;
 }
 
+/* RF-ROOT P6 (TEMP diag): cluster_write_fence.o's hot-gate diagnostic
+ * samples the startup-phase word; the cache fixture pins it inert. */
+int
+cluster_current_phase(void)
+{
+	return 0;
+}
+
 void
 cluster_undo_horizon_note_self_member(void)
 {}

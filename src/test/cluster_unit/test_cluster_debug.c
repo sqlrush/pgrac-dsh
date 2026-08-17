@@ -3503,6 +3503,58 @@ cluster_grd_serving_authority_rebind_lmon(
 	return false;
 }
 
+/* RF-ROOT P6 (L5 leaver rebind + L4 admission diag refs): cluster_grd.o and
+ * cluster_startup_phase.o referenced from the debug surface; pin them inert
+ * like the LMON rebind above. */
+bool
+cluster_grd_serving_authority_rebind_leaver(
+	const ClusterFormationSnapshotV1 *formation pg_attribute_unused(),
+	uint64 boot_incarnation pg_attribute_unused(),
+	uint64 lms_generation pg_attribute_unused())
+{
+	return false;
+}
+
+bool
+cluster_grd_join_remaster_in_progress(void)
+{
+	return false;
+}
+
+/* RF-ROOT P6 (L4/L5 admission diag refs): remaining cluster_grd.o /
+ * cluster_startup_phase.o / cluster_cf_phase2.o symbols referenced by the
+ * debug surface; pin them inert. */
+uint64
+cluster_epoch_get_current(void)
+{
+	return 0;
+}
+
+bool
+cluster_membership_is_member(int32 node_id pg_attribute_unused())
+{
+	return false;
+}
+
+bool
+cluster_reconfig_self_join_admitted(void)
+{
+	return false;
+}
+
+void
+cluster_cf_phase2_verify_or_fail(const char *pgdata pg_attribute_unused())
+{
+}
+
+bool
+cluster_control_root_thread_open_publish(uint64 boot_incarnation pg_attribute_unused())
+{
+	return false;
+}
+
+char *DataDir = NULL;
+
 uint64
 cluster_lms_get_lms_restart_generation(void)
 {

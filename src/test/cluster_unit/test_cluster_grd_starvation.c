@@ -922,6 +922,41 @@ cluster_cssd_get_status(void)
 	return 0;
 }
 
+/* RF-ROOT P6 (TEMP diag refs in cluster_grd.o): phase word, tier1 peer fds,
+ * LMS recovery-ready, durable self-join admission, NBuffers and the clean-
+ * leave write gate; the starvation fixture pins them neutral/inert. */
+int
+cluster_current_phase(void)
+{
+	return 0;
+}
+
+int
+cluster_ic_tier1_get_peer_fd(int32 peer_id pg_attribute_unused())
+{
+	return 0;
+}
+
+bool
+cluster_lms_is_recovery_ready(void)
+{
+	return false;
+}
+
+bool
+cluster_reconfig_self_join_admitted(void)
+{
+	return false;
+}
+
+int NBuffers = 0;
+
+bool
+cluster_clean_leave_node_refuses_writes(void)
+{
+	return false;
+}
+
 void
 cluster_lmon_wakeup(void)
 {

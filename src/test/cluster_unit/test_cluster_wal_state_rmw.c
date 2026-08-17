@@ -42,6 +42,7 @@ bool cluster_controlfile_shared_authority = true;
 bool cluster_lms_enabled = true;
 char *cluster_wal_threads_dir = "/virtual/pgrac-wal";
 int cluster_node_id = 3;
+int MyProcPid = 0; /* RF-ROOT P6: cluster_wal_state.o TEMP diag samples it */
 
 static PGPROC dummy_proc;
 PGPROC *MyProc = &dummy_proc;

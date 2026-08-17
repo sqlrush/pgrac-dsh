@@ -595,6 +595,20 @@ cluster_grd_serving_authority_rebind_lmon(
 		&& lms_generation == phase_test_lms_generation;
 }
 
+/* RF-ROOT P6 (L5 leaver serving rebind): cluster_startup_phase.o references
+ * the leaver-side GRD rebind; the pure unit pins it to the same authority
+ * gate as the LMON rebind above. */
+bool
+cluster_grd_serving_authority_rebind_leaver(
+	const ClusterFormationSnapshotV1 *formation, uint64 boot_incarnation,
+	uint64 lms_generation)
+{
+	return phase_test_grd_authority_ok && formation != NULL
+		&& formation->reserved[0] == phase_test_formation_epoch
+		&& boot_incarnation == 11
+		&& lms_generation == phase_test_lms_generation;
+}
+
 /* RF-ROOT P6 (L4/L5 wiring): unit stubs for the membership / reconfig / GRD
  * accessors the startup-phase predicates consult.  Deterministic, mirroring
  * the production semantics in the pure unit's single-process harness. */

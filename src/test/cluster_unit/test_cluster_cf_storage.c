@@ -70,6 +70,8 @@ char *cluster_shared_data_dir = NULL;
 bool cluster_controlfile_shared_authority = false;
 char *DataDir = NULL;					   /* storage.o's bootstrap orchestrator refs it */
 int cluster_cf_enqueue_timeout_ms = 30000; /* orchestrator liveness wait */
+int MyBackendType = 0;					   /* RF-ROOT P6: storage.o TEMP diag samples it */
+int MyProcPid = 0;						   /* RF-ROOT P6: storage.o TEMP diag samples it */
 
 /* ---- Assert + ereport + fd.c stubs (same pattern as the authority test) ---- */
 void

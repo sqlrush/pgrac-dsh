@@ -161,6 +161,77 @@ cluster_write_fence_revalidate_cached_nowait(const ClusterFenceMarker *expected,
 	return CLUSTER_FENCE_CACHE_INVALID;
 }
 
+/* RF-ROOT P6 (L4 admission / phase-3 gate diag refs): cluster_recovery_duty.o
+ * samples the live-component predicates; the pure unit pins them inert so the
+ * binary stays standalone (the formation-witness paths under test use the
+ * dedicated fixture mocks above). */
+int cluster_node_id = 0;
+
+bool
+cluster_cssd_get_status(void)
+{
+	return false;
+}
+
+int
+cluster_qvotec_get_status(void)
+{
+	return 0;
+}
+
+bool
+cluster_qvotec_in_quorum(void)
+{
+	return false;
+}
+
+bool
+cluster_membership_is_member(int32 node_id pg_attribute_unused())
+{
+	return false;
+}
+
+bool
+cluster_reconfig_self_join_admitted(void)
+{
+	return false;
+}
+
+bool
+cluster_lms_is_recovery_ready(void)
+{
+	return false;
+}
+
+int
+cluster_current_phase(void)
+{
+	return 0;
+}
+
+bool
+cluster_recovery_transport_components_current(void)
+{
+	return false;
+}
+
+void
+errfinish(const char *filename pg_attribute_unused(), int lineno pg_attribute_unused(),
+		  const char *funcname pg_attribute_unused())
+{}
+
+bool
+errstart(int elevel pg_attribute_unused(), const char *domain pg_attribute_unused())
+{
+	return false;
+}
+
+int
+errmsg(const char *fmt pg_attribute_unused(), ...)
+{
+	return 0;
+}
+
 static void
 put_u32_le(uint8 *dst, uint32 value)
 {

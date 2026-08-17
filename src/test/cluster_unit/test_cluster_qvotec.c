@@ -654,6 +654,14 @@ cluster_reconfig_get_last_event(ReconfigEvent *out)
 {
 	memset(out, 0, sizeof(*out)); /* pristine (event_id == 0): never applied */
 }
+/* RF-ROOT P6 (clean-departed epoch floor): cluster_qvotec.o references the
+ * clean-departed epoch for the fence baseline floor; the unit harness has no
+ * departed nodes -> floor 0 (pristine path unchanged). */
+uint64
+cluster_reconfig_get_clean_departed_epoch(int32 node_id pg_attribute_unused())
+{
+	return 0;
+}
 /* spec-5.15 D1/D4: qvotec poll publishes observed slots into the reconfig region
  * and mediates the join-commit marker handshake; stub all the reconfig symbols
  * qvotec.o now references (cluster_reconfig.o is not linked into this test). */
