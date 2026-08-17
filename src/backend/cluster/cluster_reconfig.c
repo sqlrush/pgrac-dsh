@@ -5942,6 +5942,21 @@ cluster_reconfig_lmon_tick(void)
 				 * rollover.  Do not mutate the admitted serving formation here. */
 				ReconfigShmem->fast_rejoin_incarnation[i] = observed_incarnation;
 				prior_incarnation = observed_incarnation;
+				/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): baseline
+				 * set.  Capped; removed before the final push. */
+				{
+					static int prior_set_diag = 0;
+
+					if (prior_set_diag++ < 8)
+						ereport(LOG,
+								(errmsg("TEMP fast-rejoin prior set: peer=%d "
+										"prior=%llu fresh=%d",
+										i,
+										(unsigned long long)observed_incarnation,
+										cluster_reconfig_get_observed_fresh_alive(i)
+											? 1
+											: 0)));
+				}
 			}
 
 			/* P04 fast restart can replace a process inside CSSD's deadband, so
@@ -5970,14 +5985,10 @@ cluster_reconfig_lmon_tick(void)
 				dead_bitmap_set_bit(dead_bitmap, i);
 				offpath_fast_rejoin_actions = true;
 				runtime_join_allowed = true;
-			} else if (!cluster_online_join
-					   && cluster_controlfile_shared_authority
-					   && ms == CLUSTER_MEMBER_MEMBER
-					   && prior_incarnation > 0) {
-				/* TEMP DIAGNOSTIC (RF-ROOT P6 flake hunt): decompose the
-				 * fast-rejoin rollover gate.  Change-aware (logs whenever
-				 * the observed slot / liveness signature changes, plus the
-				 * first evals).  Removed before the final push. */
+			} else if (ms == CLUSTER_MEMBER_MEMBER) {
+				/* TEMP DIAGNOSTIC (RF-ROOT P6 L4-rollover hunt): full gate
+				 * decomposition, change-aware on the complete signature.
+				 * Removed before the final push. */
 				static int rollover_diag_count = 0;
 				static int64 last_sig = INT64_MIN;
 				uint64 d_inc = 0;
@@ -5986,23 +5997,29 @@ cluster_reconfig_lmon_tick(void)
 					= cluster_reconfig_get_observed_slot(
 						i, &d_inc, &d_gen);
 				bool fresh_obs = cluster_reconfig_get_observed_fresh_alive(i);
-				int64 sig = (int64)d_inc * 8
-					+ (int64)(fresh_obs ? 1 : 0) * 4
-					+ (int64)cluster_cssd_get_peer_state(i);
+				int cssd_st = (int)cluster_cssd_get_peer_state(i);
+				int64 sig = (int64)d_inc * 32
+					+ (int64)(fresh_obs ? 1 : 0) * 16
+					+ (int64)cssd_st * 4
+					+ (int64)prior_incarnation % 4;
 
-				if (rollover_diag_count++ < 30 || sig != last_sig) {
+				if (rollover_diag_count++ < 100 || sig != last_sig) {
 					last_sig = sig;
 					ereport(LOG,
-							(errmsg("TEMP fast-rejoin gate: peer=%d ms=%d "
-									"prior=%llu obs_inc=%llu obs_gen=%llu "
-									"cssd_state=%d fresh=%d have_obs=%d",
+							(errmsg("TEMP rollover gate: peer=%d ms=%d "
+									"shared_auth=%d prior=%llu cssd=%d "
+									"fresh=%d have_obs=%d obs_inc=%llu "
+									"obs_gen=%llu gt=%d",
 									i, (int)ms,
+									cluster_controlfile_shared_authority ? 1 : 0,
 									(unsigned long long)prior_incarnation,
+									cssd_st, fresh_obs ? 1 : 0,
+									have_obs ? 1 : 0,
 									(unsigned long long)d_inc,
 									(unsigned long long)d_gen,
-									(int)cluster_cssd_get_peer_state(i),
-									fresh_obs ? 1 : 0,
-									have_obs ? 1 : 0)));
+									(have_obs && d_inc > prior_incarnation)
+										? 1
+										: 0)));
 				}
 			}
 			/*
