@@ -1730,3 +1730,97 @@ JCMK 多数持久化），但 JOIN 提交的 re-vet 的 owner 门永久失败：
 - t243 L5：restore boot 的 JOIN 提交在 owner 门通过后完成 →
   JOIN_COMMITTED → node1 自认 → phase3 收敛 → ok 20/21；L6/L8/L9/L10
   全绿。
+
+## 增量 14：DONE echo 移到 FSM episode-hash 门之前（2026-08-17，修 bootstrap/cast reform 同复合体饿死）
+
+### 背景事实（run-42 实测证据，2026-08-17 22:13-22:15）
+
+增量 11 的 echo 块放在 `cluster_grd_recovery_mark_peer_done` 的 FSM
+episode-hash 门（`dead_bitmap_hash == 0 || dead_bitmap_hash !=
+episode_bitmap_hash` 早退）**之后**——首次编队 / cast reform / clean-leave
+腿的本地 episode hash 恒为 0，echo 块是死代码：node0 request terminaled
+后广播停（1Hz floor 抑制最后一帧 + terminal 静默），node1 的同复合体
+request 因 done0=0/0 永久饿死（run-42：done0=0/0 持续 70s）。
+
+### 合同（增量 14）
+
+1. echo 块（FSM self-done 或 authority self-done 匹配 + once-per-composite
+   放大防护）移到 episode-hash 门**之前**；FSM hash 轴写入
+   （`recovery_done_bitmap_hash[node]`）在门后原样保留。
+2. 不变：echo 每 {epoch, hash} 复合体至多一次；接收端各轴门幂等；
+   judge/timeout/workload 不动。
+
+### 验收
+
+- t243 run-43+：node1 的 authority tick 显示 `markpd>0 echo=1` →
+   bootstrap/cast reform 同复合体在 ~1 tick 内收敛。
+
+## 增量 15：postmaster A1 契约——reconfig 自认读条件化 + phase3 mid-bind 保护（2026-08-17，修 L5 restore boot 的 postmaster A1 PANIC）
+
+### 背景事实（run-45 实测证据 + lwlock 探针，2026-08-17 23:07:24）
+
+L5 restore boot 的 phase3 循环在 begin_ok 后 ~13ms 内必死：
+
+```
+23:07:24.183 [58118] TEMP cf lock fail: mode=5 r=10 ... pid=58118 upm=0
+23:07:24.183 [58118] PANIC:  cannot wait without a PGPROC structure
+                     DETAIL:  tranche=90 (ClusterReconfig) state=0x20000000 mode=1
+```
+
+- **A1 违约点**：`cluster_reconfig_self_join_admitted()` 用**阻塞**
+  LWLockAcquire(SHARED) 读 ReconfigShmem->lock，而
+  `cluster_control_root_thread_open_publish` 的 TEMP 分解诊断
+  （cluster_recovery_duty.c:551）在求值参数时经
+  `cluster_recovery_transport_components_current()` 调到它；同一毫秒
+  LMON 正持该锁 EXCLUSIVE（join-drive/rollover 链）→ postmaster
+  （MyProc==NULL）进 LWLockQueueSelf → PANIC。run-43（22:15:56.802）
+  同款。`cluster_grd_recovery_authority_is_current` 与
+  `cluster_authority_temp_log_predicate_mismatch` 也经同一函数暴露。
+- **mid-bind 清 binding 竞态**：begin() 只能以 lms_generation=0 建
+  STARTING binding（LMS 进程在 begin 之后才 spawn，live gen 尚 0），
+  gen 由 phase3 循环下一迭代的 bind_recovery_generation 写入。此窗口
+  （~13ms）内 node0 的 REDECLARE_DONE 帧到达 → ges 的 "TEMP done gate"
+  诊断（cluster_ges.c:194）求值 `cluster_recovery_transport_is_current()`
+  ——该函数带**清 binding 副作用**（recovery_transport_stale clear，
+  gen=0 被视为 stale）→ STARTING binding 被毁 → 循环被迫整轮重来
+  （wait_for_live_formation + begin），并把 phase3 收敛拖到竞态窗口
+  之外（run-43 55.801 clear → 55.802 PANIC 同链）。
+- run-44 的 claim FATAL 与 run-45 的 "Stale postmaster.pid" 是同一
+  PANIC 的测试面（node1 死在启动链，harness 后续 start 失败 bail）。
+
+### 合同（增量 15）
+
+1. `cluster_reconfig_self_join_admitted()`：MyProc==NULL（postmaster）
+   时改用 `LWLockConditionalAcquire(SHARED)`，竞争即返回 false
+   （fail-closed：调用方全是 AND 门，只延迟不误放；admission 是
+   一次性闩锁，重试即收敛）。带 PGPROC 的进程保持阻塞语义不变。
+2. `cluster_recovery_transport_is_current` 的 stale-clear 只对
+   `binding.lms_generation != 0` 的 STARTING binding 执行：gen=0 是
+   "begin 后尚未 bind" 的中间态，不是 stale；phase3 循环自己会在
+   失败路径清 binding 并整轮重来（有界）。
+3. ges "TEMP done gate" 诊断（cluster_ges.c:194）改用无副作用的
+   `cluster_recovery_transport_components_current()`（诊断不得执行
+   带副作用的判定逻辑）。
+4. 不变：DONE/REDECLARE 各轴门本身、echo、1Hz floor、FSM/authority
+   复合体、judge/timeout/workload 全不动。
+
+### 安全论证
+
+- 条件化只影响无 PGPROC 调用者的锁原语选择；锁内读的值与持锁语义
+  不变。竞争路径返回 false 与"尚未准入"同值，所有消费方（
+  components_current 的 member_ok、grd request-current 门、
+  owner-rejoin 前置）都是 fail-closed AND 门——最坏是丢一帧/延迟一
+  tick，绝不放行。
+- mid-bind 保护只取消"gen=0 中间态"的销毁；真正 stale（gen 已绑但
+  形成漂移）的 STARTING binding 仍被清，phase3 循环对 gen=0 绑定
+  的自我失败路径（bind preseal 失败 → clear → 重来）原样保留，
+  有界收敛。
+- 不重开"四门放宽"：DONE 门在 gen=0 窗口仍拒帧（components_current
+  返回 false），收敛靠 postmaster bind gen 后 node0 的 1Hz 重播。
+
+### 验收
+
+- t243 L5 restore boot：postmaster 不再 PANIC；begin→bind→barrier
+  在 ~1 tick 内完成；ok 20/21 及 L6/L8/L9/L10 全绿；cluster_unit
+  新增 `test_self_join_admitted_no_pgproc_never_blocks_on_reconfig_lock`
+  全绿。
