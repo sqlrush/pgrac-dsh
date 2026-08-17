@@ -331,3 +331,29 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
   记录完全一致，均 pre-existing，与本会话无关）；
 - 全量构建绿（run-60 make install）；TEMP 清零（137 点）；公共仓库已推送。
 - P6 完成。遗留仅上述 10 个 pre-existing 断言，供后续路线处理。
+
+---
+
+## 复审补记 9（2026-08-18 07:10，P6 收尾欠账 + 换会话交接）
+
+### 9.1 P6 收尾欠账（DSH 交接核验新发现，如实）
+
+1. **cluster_regress 2/13 红，且是崩溃级**（DSH 07:08 独立复跑）：
+   - `cluster_clean_leave`：backend SIGABRT（signal 6），崩溃语句
+     `SELECT count(*) FROM pg_cluster_clean_leave_state;`（视图首查），
+     单节点模式触发；疑与增量 10/12 的 clean-leave FSM 改动相关。
+   - `cluster_node_remove`：连带失败（崩溃后服务器 reinitializing，
+     `FATAL: database system is in recovery mode`）。
+   - P6 完成门原含"cluster_regress 最小闭包"，实际未跑绿——此门当时
+     漏验，DSH 有责。新会话第一个任务即修此回归。
+2. **TEMP 清理不完整**：c32810bebc 清了 137 点/17 文件，但全树仍有 26 个
+   文件含 `TEMP `。RF-ROOT P6 时代残留至少：xlog.c 5 处、checkpointer.c
+   3 处（含 "TEMP checkpointer loop"、"TEMP checkpointer sees flags"）、
+   cluster_lock_acquire.c 1 处；其余为更早 stage 遗留（catalog/planner 等）。
+   先清 P6 时代残留并复核 t243 仍绿，其余登记清单。
+
+### 9.2 换会话交接
+
+- 新交接文档：`RFROOT-NEXT.md`（P7-P9 合同、测试面、纪律、遗留清单）。
+- HEAD=62158031da（含本补记提交前的状态）；公共仓库已同步。
+- 新会话启动后先读 RFROOT-NEXT.md §8 两条 P0/P1，再读本文件与 P6-RESUME v5。
