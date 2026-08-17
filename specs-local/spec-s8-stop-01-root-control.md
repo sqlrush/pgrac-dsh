@@ -1415,3 +1415,38 @@ engage-first 序不变（复用既有函数）。
 
 - t243 L4：两条竞态路径均收敛（驱逐路径 + fail-stop 路径）；ok 18/19
   稳定；L5-L10 全绿。
+
+## 增量 8：fast-rejoin 驱逐门扩到 DEAD 态（2026-08-17，修 L4 竞态 B 的 join 无腿）
+
+### 背景事实（t243 L4 实测证据，2026-08-17）
+
+- 增量 7 后竞态 B 走通 fail-stop（epoch 1→2 + FAIL 事件 + JOIN 方向
+  episode 2s 内关闭）——但 join 永无驱动：runtime_join_allowed 只由
+  fast-rejoin 驱逐置位（actions snapshot = fast_rejoin_bitmap），而驱逐门
+  要求 ms==MEMBER；竞态 B 中 cssd 死带抢先（DEAD @2.1s）把 membership
+  降级 DEAD → 驱逐永不触发 → 无 JOIN_PENDING/COMMITTED/JCMK → joiner
+  witness 永不稳定 → 60s bail。
+- P04 的冻结前提是"快速重启发生在死带内，liveness 永不呈现 DEAD 边"——
+  本机重启 2.1-2.5s 恰好压在 3s 死带边缘，两条竞态都真实发生。新化身的
+  槽位证据在两个竞态里同等有效。
+
+### 合同（增量 8）
+
+1. 驱逐门（shared-CF rollover gate）的 membership 前置从
+   `ms == MEMBER` 扩为 `ms == MEMBER || ms == DEAD`（cssd ALIVE + fresh
+   slot + observed incarnation > prior floor 不变）。DEAD 态时驱逐不重复
+   死亡宣告（fail-stop 已声明），只为 join 驱动提供 runtime 腿。
+2. 不变：prior floor 单调、JOIN_PENDING/COMMITTED 链、vet、fence、gate、
+   judge、timeout、workload 全不动。
+
+### 安全论证
+
+- DEAD+cssd-ALIVE+新化身 = 该节点已重启归来；驱逐只是把既有死亡事实与
+  新化身证据接进既有的 join 协议——fail-stop 与驱逐对同一节点同 tick
+  叠加时事件仍单调（fail-stop 先发布，驱逐只置位驱动 join）。
+- 不放宽任何 fence 或 admit 判据：vet 的 floor 单调检查照旧。
+
+### 验收
+
+- t243 L4：两条竞态路径均收敛到 JOIN_COMMITTED + JCMK + joiner 自认；
+  ok 18/19 稳定；L5-L10 全绿。
