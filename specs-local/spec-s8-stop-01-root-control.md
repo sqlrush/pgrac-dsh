@@ -1342,3 +1342,43 @@ engage-first 序不变（复用既有函数）。
 - t243 L4：kill -9 重启 ≤3s 时 survivor 在 ~1 tick 内发布 JOIN_PENDING →
   episode 关闭 → rebind 通过 → COMMITTED + JCMK → joiner 自认 → phase3
   完成 → ok 18/19 稳定；L5-L10 全绿。
+
+## 增量 6：fast-rejoin 驱逐计入 JOIN_PENDING dead 集（2026-08-17，修 L4 join episode DONE 循环死锁）
+
+### 背景事实（t243 L4 实测证据，2026-08-17）
+
+- 增量 5 修复后：驱逐 → JOIN_PENDING 发布（epoch 2）→ JOIN 方向 GRD
+  episode 启动并走完本地 GES rebind barrier（stall 探针零命中）→
+  WAIT_CLUSTER 等待 joiner 的跨节点 DONE——但 joiner 的 DONE 在结构上不可
+  能：其 phase3 barrier 尚未武装（witness 需要 sj_adm = JCMK = COMMITTED
+  = join-drive Phase-2 = serving rebind = episode 关闭）→ 循环死锁。
+- 根因差异：fail-stop 路径的 JOIN_PENDING dead 集 = last_applied.dead
+  = {joiner}（fail-stop 事件先行），episode 的 P6 门跳过 dead 集的 DONE；
+  fast-rejoin 驱逐路径没有 fail-stop 事件，JOIN_PENDING 的 pending_dead
+  只取 last_applied.dead（空）→ joiner 不在 dead 集 → 其 DONE 被强制要求。
+- P04 冻结语义本身已写明"exclude the prior incarnation first"——驱逐即旧
+  化身的死亡宣告，只是没有落入 JOIN 事件的 dead 集。
+
+### 合同（增量 6）
+
+1. `cluster_reconfig_apply_join_as_coordinator` 的 pending_dead 在
+   last_applied.dead 之上并入 `fast_rejoin_bitmap`（本 episode 的驱逐集）。
+2. 下游全走既有冻结链：JOIN_PENDING（dead 含旧化身）→ episode 跳过
+   joiner 的 DONE（P6 门）→ 关闭 → serving rebind → drive Phase-2 →
+   COMMITTED（dead 清掉 joiner，fence baseline 同步收缩）→ JCMK → joiner
+   自认（RC-5 supersede 解 self-fence）→ witness live → phase3 完成。
+3. 不变：事件 ID 算法、epoch bump 序、vet、commit 是唯一 commit 点、
+   clean-departed 清除（commit 时）、fence 单调守卫。
+
+### 安全论证
+
+- 驱逐本身已是 quorum-observed 的旧化身死亡声明；把它写入 JOIN 事件的
+  dead 集只是让 episode 的 DONE 跳过与 fail-stop 路径同一语义（旧化身在
+  本 episode 没有 GRD holder 状态可 redeclare，其 DONE 无意义）。
+- COMMITTED 时 joiner 从 dead 集清除 + fence baseline 收缩，与新化身
+  准入同时发生（fail-stop 路径同一序）；无任何 gate 放宽。
+
+### 验收
+
+- t243 L4：驱逐后 episode 关闭（不再等 joiner DONE）→ COMMITTED + JCMK
+  → node1 自认 → phase3 完成 → ok 18/19；L5-L10 全绿。
