@@ -19,6 +19,7 @@ stuck_episode=0
 prev_oks_final=-1
 prev_reg_epoch=0
 best_oks=0
+prev_regress_fail=-1
 
 snapshot() {
   local head headtime uncommitted regtime oks latest_edit fp
@@ -37,9 +38,23 @@ snapshot() {
     bail=$(grep -c 'Bail out!' "$reglog" 2>/dev/null | tr -d ' ')
   fi
   run_active=$(pgrep -f 't/243_wal_thread_2node_shared_root' 2>/dev/null | wc -l | tr -d ' ')
+  # cluster_regress tracking (RF-ROOT P7-P9 phase): parse the summary line
+  # "N of M tests failed" from regression.out (absent -> "none").
+  regress2="$REPO/src/test/cluster_regress/regression.out"
+  reg2="none"
+  reg2_fail=-1
+  if [ -f "$regress2" ]; then
+    reg2=$(grep -oE '[0-9]+ of [0-9]+ tests failed' "$regress2" 2>/dev/null | head -1 | tr -d ' ')
+    if [ -n "$reg2" ]; then
+      reg2_fail=$(echo "$reg2" | cut -d' ' -f1)
+    else
+      reg2_fail=0
+      reg2="green"
+    fi
+  fi
 
   fp="$head|$uncommitted|$reg_epoch|$oks|$latest_edit"
-  echo "$(date '+%m-%d %H:%M:%S') c=$cycle HEAD=$head@$headtime uncommitted=$uncommitted t243=${oks}ok@$regtime bail=$bail active=$run_active" >> "$LOG"
+  echo "$(date '+%m-%d %H:%M:%S') c=$cycle HEAD=$head@$headtime uncommitted=$uncommitted t243=${oks}ok@$regtime bail=$bail active=$run_active regress=${reg2}" >> "$LOG"
 
   # (a) stuck
   if [ "$fp" = "$prev_fp" ]; then
@@ -94,6 +109,32 @@ snapshot() {
         echo "$(date '+%m-%d %H:%M:%S') ✅ SNAPSHOT new-high ${oks}ok -> tag dsh-flash-wip-$ts ($sha)" >> "$LOG"
       fi
       best_oks=$oks
+    fi
+    # (e) cluster_regress tracking (RF-ROOT P7-P9): alert when failures
+    # worsen vs the last completed run; snapshot+flag the 0-failed milestone.
+    if [ "$reg2_fail" -ge 0 ]; then
+      if [ "$prev_regress_fail" -ge 0 ] && [ "$reg2_fail" -gt "$prev_regress_fail" ]; then
+        {
+          echo ""
+          echo "---"
+          echo "🔴 [DSH-WATCH $(date '+%m-%d %H:%M')] cluster_regress 恶化：上一轮 $prev_regress_fail 个失败，新一轮 $reg2_fail 个（regression.out）。"
+          echo "   DSH 建议：看 regression.diffs 的新失败项，优先二分最近改动；P0 基线为 clean_leave+node_remove 两红。"
+        } >> "$REVIEW"
+        echo "$(date '+%m-%d %H:%M:%S') 🔴 REGRESS-WORSE $prev_regress_fail->$reg2_fail flagged -> DSH-REVIEW.md" >> "$LOG"
+      fi
+      if [ "$reg2_fail" -eq 0 ] && [ "$prev_regress_fail" -gt 0 ]; then
+        ts=$(date '+%m%d-%H%M')
+        sha=$(git -C "$REPO" stash create "dsh-snapshot regress-green" 2>/dev/null)
+        [ -n "$sha" ] && git -C "$REPO" tag -f "dsh-regress-green-$ts" "$sha" 2>/dev/null
+        {
+          echo ""
+          echo "---"
+          echo "✅ [DSH-WATCH $(date '+%m-%d %H:%M')] cluster_regress 全绿里程碑（$reg2_fail 失败）。"
+          echo "   已尝试打快照 tag dsh-regress-green-$ts；请提交修复并等 DSH 复审。"
+        } >> "$REVIEW"
+        echo "$(date '+%m-%d %H:%M:%S') ✅ REGRESS-GREEN milestone -> DSH-REVIEW.md" >> "$LOG"
+      fi
+      prev_regress_fail=$reg2_fail
     fi
     prev_oks_final=$oks
     prev_reg_epoch=$reg_epoch
