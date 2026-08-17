@@ -207,6 +207,7 @@
 #include "cluster/cluster_xid_authority.h" /* PGRAC: spec-6.15b native-era XID authority */
 #include "cluster/cluster_xid_wrap_barrier.h" /* PGRAC: GCS-race round-3 P0-1 startup mirror */
 #include "cluster/cluster_recovery_anchor.h" /* PGRAC: spec-5.6a per-node recovery anchor */
+#include "cluster/cluster_write_fence.h" /* PGRAC: RF-ROOT P6 checkpoint fence deferral */
 #include "cluster/cluster_lms.h" /* PGRAC: spec-5.6 GES-ready boundary for CF X */
 #endif
 
@@ -7670,6 +7671,38 @@ CreateCheckPoint(int flags)
 	SyncPreCheckpoint();
 
 #ifdef USE_PGRAC_CLUSTER
+
+	/*
+	 * RF-ROOT P6 (reconfig epoch window):  the checkpoint's recovery-anchor
+	 * publication is fence-gated (spec-4.12 D5) and PANICs inside a critical
+	 * section on a stale token.  Right after a reconfig epoch advance
+	 * (JOIN_COMMITTED admission, CLEAN_LEAVE commit) the local fence token
+	 * legitimately lags the live epoch until the next qvotec poll latches the
+	 * new baseline; the phase-4 W2 FORCE|WAIT checkpoint structurally races
+	 * the join commit into that window, and the survivor's post-clean-leave
+	 * CHECKPOINT races the leave commit.  Defer the checkpoint until the
+	 * fence would allow it (bounded); on expiry the checkpoint proceeds and
+	 * the anchor gate fails closed as usual -- this wait never weakens the
+	 * fence, it only dodges the transient healthy-side lag.  The
+	 * end-of-recovery checkpoint is exempt (it runs before the first
+	 * authority and must never defer).
+	 */
+	if (cluster_write_fence_enforcing()
+		&& (flags & CHECKPOINT_END_OF_RECOVERY) == 0)
+	{
+		TimestampTz fence_deadline
+			= GetCurrentTimestamp() + (TimestampTz)10 * 1000 * 1000; /* 10 s */
+		bool		fence_ok = cluster_write_fence_allowed();
+
+		while (!fence_ok && GetCurrentTimestamp() < fence_deadline)
+		{
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 20, WAIT_EVENT_CHECKPOINTER_MAIN);
+			ResetLatch(MyLatch);
+			fence_ok = cluster_write_fence_allowed();
+		}
+	}
 
 	/*
 	 * PGRAC: spec-5.6 Dc1 + RF-B.  In shared-authority mode a normal

@@ -2361,6 +2361,8 @@ qvotec_poll_once(void)
 	bool is_leader = false;				/* spec-4.12b D6: lowest-live baseline leader */
 	uint64 durable_authority_epoch = 0; /* spec-4.12b D5/P1-1: highest durable fence */
 	bool durable_has_authority = false; /* epoch observed on disk THIS poll */
+	bool fence_majority_written = false; /* RF-ROOT P6: this poll's marker tuple
+										 * reached quorum-majority durability */
 
 	if (cluster_semantic_activation_qvotec_poll_record_read(
 			&semantic_record_read_request)) {
@@ -3042,8 +3044,9 @@ qvotec_poll_once(void)
 		 * >= quorum-majority -- otherwise the coordinator fails closed and does
 		 * NOT publish the reconfig event (core 8.A order).
 		 */
+		fence_majority_written = (disks_ok_post_write >= quorum_size_post_write);
 		if (have_submit)
-			cluster_write_fence_qvotec_complete(disks_ok_post_write >= quorum_size_post_write);
+			cluster_write_fence_qvotec_complete(fence_majority_written);
 
 		/*
 		 * spec-5.13 §2.5: ack the clean-leave marker submit.  Uses the marker's
@@ -3094,6 +3097,28 @@ qvotec_poll_once(void)
 		if (have_removal_submit)
 			cluster_node_remove_qvotec_complete(disks_ok_post_write >= quorum_size_post_write);
 	}
+
+	/*
+	 * RF-ROOT P6 (contract 1 survivor side; spec-4.12b D2 same-poll
+	 * refinement):  the D2 token refresh near the top of this poll read the
+	 * PRE-write matrix, so an authority this very poll just made durable
+	 * (a submitted fence marker, or the leader's steady-state baseline at
+	 * the new applied epoch) would otherwise leave the LOCAL hot gate stale
+	 * for one more poll.  A clean-leave commit publishes its epoch advance
+	 * WITHOUT a fence marker (spec-5.13: nothing to fence), so the first
+	 * fence-gated write on the survivor right after the commit — e.g. the
+	 * CHECKPOINT / shutdown-checkpoint recovery-anchor publication — would
+	 * PANIC on the exact-epoch judge before a later poll latched the new
+	 * baseline.  Once the tuple this poll wrote is majority-durable (the
+	 * same tally that ACKs the submit), refresh the local token from it
+	 * directly:  same pure judge + monotonic guard, qvotec remains the sole
+	 * token writer, no gate loosening — it only shrinks the healthy-side
+	 * stale window (the R4 window's reverse) from two polls to one.
+	 */
+	if (fence_majority_written && (have_submit || author_baseline))
+		cluster_write_fence_refresh_from_marker(
+			have_submit ? &submit_marker : &baseline_marker,
+			now_us + (uint64)cluster_write_fence_lease_ms * 1000ULL);
 
 	/*
 	 * spec-6.15 D5b: xid-stripe face.  Keep re-scanning region 5 until a
