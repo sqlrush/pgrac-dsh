@@ -399,3 +399,22 @@ OWNER_REJOIN CAS。增量 13 与 17 一并进偏离裁决，裁决未批前不�
 
 - P6 = 未完成（t243 绿为真，但完成门未过）。RFROOT-NEXT.md §8 的 P0/P1
   与新加的两条偏离共同构成新会话任务清单；本文档优先。
+
+---
+
+## 复审补记 11（2026-08-18 07:40，增量 18 归因背书 + P0 改判）
+
+- 增量 18（specs-local，未提交）对 P0 SIGABRT 的归因 **证据链完整，DSH 背书**：
+  1) `cluster_clean_leave_get_state` 整结构拷贝 `*out = *cl_state`（clean_leave.c:309）；
+  2) views.c:86 栈局部 `ClusterLeaveState st;` 接收拷贝；
+  3) 5861a6c700 给 ClusterLeaveState 加 `pg_atomic_uint32 shutdown_driven`
+     （结构体变大）；
+  4) views.o 旧于 header → 拷贝写穿旧尺寸栈帧 → `__stack_chk_fail`（lldb
+     三帧签名吻合：stack_chk_fail → cluster_get_clean_leave_state →
+     ExecMakeTableFunctionResult）。
+  → **P0 根因 = 构建产物陈旧，非产品缺陷；增量 10/12 无罪**。RFROOT-NEXT.md
+    的"怀疑面=增量 10/12"作废（已改判）。
+- 处置批准：全量 clean 重建 + regress 13/13 + t243 复跑确认。全量重建后
+  t243 必须重新跑一轮（构建面变化影响所有路径）。
+- 预防记录采纳：改 include 下结构体/头文件 → 先全量重建再跑批；诡异
+  SIGABRT 先查 .o/.h mtime 错位。

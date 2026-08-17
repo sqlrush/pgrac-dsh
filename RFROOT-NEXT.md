@@ -84,16 +84,11 @@
 
 ## 8. 遗留清单（本会话开局时的已知红/未办）
 
-- [ ] **【P0 先修】cluster_regress 崩溃回归**（DSH 07:08 独立复跑取证）：
-  - `cluster_clean_leave`：backend SIGABRT（signal 6，cassert Assert 失败），
-    崩溃语句 = `SELECT count(*) FROM pg_cluster_clean_leave_state;`
-    （视图/SRF 首查）。单节点模式（node_id=-1）下触发。
-  - `cluster_node_remove`：连接丢失——系前者崩溃后服务器 reinitializing
-    期间的连带失败（postmaster.log：`FATAL: database system is in recovery
-    mode`）。修好 clean_leave 后单独复跑确认。
-  - 怀疑面：增量 10/12 改过 clean-leave FSM（cl_leaver_reincarnated、
-    survivor 释放条件）——先跑 `test_cluster_clean_leave` 单测（clean_leave
-    11/11 据称绿）对照，再用 gdb/Assert 栈定位；**回归归属查清前勿大改**。
+- [ ] **【P0 已归因，待全量重建验收】cluster_regress 崩溃回归**：
+  根因 = stale build artifact（views.o 旧于 cluster_clean_leave.h，
+  5861a6c700 使结构体变大 → 整结构拷贝写穿栈 canary → SIGABRT），
+  **非产品缺陷**；增量 10/12 无罪（见 DSH-REVIEW 补记 11）。处置：
+  全量 make clean + make 重建 → regress 13/13 → t243 复跑确认。
 - [ ] **【P1】TEMP 清理不完整**：P6 声称"137 点清零"，实际 26 个文件仍有
   `TEMP ` 残留。其中 RF-ROOT P6 时代：`xlog.c`（5 处）、`checkpointer.c`
   （3 处）、`cluster_lock_acquire.c`（1 处）；其余为更早 stage 遗留
