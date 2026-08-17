@@ -357,3 +357,45 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
 - 新交接文档：`RFROOT-NEXT.md`（P7-P9 合同、测试面、纪律、遗留清单）。
 - HEAD=62158031da（含本补记提交前的状态）；公共仓库已同步。
 - 新会话启动后先读 RFROOT-NEXT.md §8 两条 P0/P1，再读本文件与 P6-RESUME v5。
+
+---
+
+## 复审补记 10（2026-08-18 07:30，P6 完成裁定撤回 + 增量 17/13 偏离裁决）
+
+### 10.1 撤回补记 8.4 的"P6 完成"
+
+新会话首轮分析五条指控，DSH 逐条独立取证，**全部成立**（取证见聊天汇报）：
+
+1. 增量 17 违反冻结 spec：STOP-02 §17.4 明确 OWNER_REJOIN 前态必须是
+   RECOVERY_COMPLETE（spec-s8-stop-02-root-generation.md:1049）；OPEN→OPEN
+   捷径被冻结线禁止。DSH 补记 8 未查此条即批准——复审失误。
+2. 增量 17 未端到端接通：recovery_duty.c:387 构造 expected=OPEN，而
+   patch_shape_valid（control_root.c:1516）只收 RECOVERY_COMPLETE/CLOSED
+   → :1702 INVALID_ARGUMENT。该 OPEN 支路是死代码（fail-closed 但无意义）。
+3. run-60 L10 停成 CLOSED（node1 log 00:38:36.948 clean-closed），33/33
+   未覆盖 OPEN(old) 态，不能证明增量 17。
+4. cluster_regress clean_leave SIGABRT（DSH 已独立复现，见补记 9）。
+5. TEMP 未清完（checkpointer.c:371、xlog.c:7698 等，26 文件）。
+   且 recovery_duty 单测 stub 了低层发布（ut_root_publish_calls mock），
+   18/18 测不出断路。
+
+### 10.2 附加发现：增量 13 同属 §17.4 偏离
+
+OWNER_REJOIN+CLOSED 同样违反"前态必须 RECOVERY_COMPLETE"。合法 clean-close
+得到 CLOSED 后，冻结主线是 STOP-01 的 THREAD_OPEN（CLOSED→OPEN），不是借
+OWNER_REJOIN CAS。增量 13 与 17 一并进偏离裁决，裁决未批前不保留。
+
+### 10.3 修正路线（新会话执行顺序）
+
+1. 偏离裁决（pgrac-talk DEVIATION→DECISION/USER-RESULT）先于代码动作；
+2. 回退增量 17 的 head-gate/patch 改动（禁止把 OPEN 加进 allowlist 去接通
+   违规捷径）；增量 13 按裁决去留（倾向：clean-reopen 改走 THREAD_OPEN）；
+3. 修 cluster_regress clean_leave SIGABRT（P0）；
+4. 清 P6 时代 TEMP 探针（checkpointer/xlog/cluster_lock_acquire）；
+5. 补端到端 lifecycle 测试（不打桩 compare_and_publish）；
+6. cluster_regress 全绿 + t243 33/33 双绿，才可重新申请 P6 冻结。
+
+### 10.4 状态
+
+- P6 = 未完成（t243 绿为真，但完成门未过）。RFROOT-NEXT.md §8 的 P0/P1
+  与新加的两条偏离共同构成新会话任务清单；本文档优先。
