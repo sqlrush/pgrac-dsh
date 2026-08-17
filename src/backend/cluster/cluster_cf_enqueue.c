@@ -34,6 +34,7 @@
 #include "cluster/cluster_cf_stats.h"
 #include "cluster/cluster_clean_leave.h" /* RF-ROOT P6: leaver write-refusal gate */
 #include "cluster/cluster_conf.h"
+#include "cluster/cluster_grd.h"		  /* TEMP diag: shard phase */
 #include "cluster/cluster_guc.h"
 #include "cluster/cluster_lock_acquire.h"
 #include "cluster/cluster_startup_phase.h" /* TEMP diag: cluster_current_phase */
@@ -194,6 +195,23 @@ cluster_cf_lock(LOCKMODE mode)
 	req.wait_event = WAIT_EVENT_CLUSTER_CF_ENQUEUE;
 
 	r = cluster_lock_acquire_seven_step(&req);
+
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): CF acquire outcome + shard
+	 * phase + master for every acquire.  Capped; removed before the final
+	 * push. */
+	{
+		static int cfx_lock_diag = 0;
+
+		if (cfx_lock_diag++ < 60)
+			ereport(LOG,
+					(errmsg("TEMP cfx lock: mode=%d r=%d phase=%d master=%d pid=%d "
+							"self=%d",
+							(int)mode, (int)r,
+							(int)cluster_grd_shard_phase(
+								cluster_grd_shard_for_resource(&req.resid)),
+							(int)cluster_grd_lookup_master(&req.resid),
+							(int)MyProcPid, (int)cluster_node_id)));
+	}
 
 	switch (r) {
 	case CLUSTER_LOCK_ACQUIRE_OK_NATIVE:

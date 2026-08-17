@@ -192,6 +192,43 @@ cluster_lock_acquire_s1_entry(const ClusterLockAcquireRequest *req)
 	if (req == NULL)
 		return CLUSTER_LOCK_ACQUIRE_FAIL_INTERNAL;
 
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S1 verdict decomposition for
+	 * the CF resid.  Capped; removed before the final push. */
+	if (req->resid.type == CLUSTER_CF_RESID_TYPE) {
+		static int cfx_s1_diag = 0;
+		ClusterLockAcquireResult probe_r;
+
+		probe_r = cluster_authority_readiness_managed()
+			? (cluster_serving_ready_is_current()
+				   ? (cluster_lms_is_ready()
+						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
+						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE)
+				   : (cluster_recovery_authority_request_allowed(
+						  &req->resid, req->lockmode,
+						  AmStartupProcess() || !IsUnderPostmaster)
+						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
+						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE))
+			: (cluster_lms_enabled
+				   ? (cluster_lms_is_ready()
+						  ? CLUSTER_LOCK_ACQUIRE_OK_GRANTED
+						  : CLUSTER_LOCK_ACQUIRE_FAIL_LMS_UNAVAILABLE)
+				   : CLUSTER_LOCK_ACQUIRE_OK_NATIVE);
+
+		if (cfx_s1_diag++ < 80)
+			ereport(LOG,
+					(errmsg("TEMP cfx s1: mode=%d r=%d managed=%d serving=%d "
+							"lms_enabled=%d lms_ready=%d startup=%d not_under_pm=%d "
+							"pid=%d",
+							(int)req->lockmode, (int)probe_r,
+							cluster_authority_readiness_managed() ? 1 : 0,
+							cluster_serving_ready_is_current() ? 1 : 0,
+							cluster_lms_enabled ? 1 : 0,
+							cluster_lms_is_ready() ? 1 : 0,
+							AmStartupProcess() ? 1 : 0,
+							!IsUnderPostmaster ? 1 : 0,
+							(int)MyProcPid)));
+	}
+
 	/* RF-ROOT P6 Scheme A: a formed boot is always fail-closed unless it
 	 * holds one of the two explicit readiness proofs.  Recovery readiness
 	 * admits only StartupProcess CF(S)/WALR(X); serving readiness retains the
@@ -648,6 +685,21 @@ cluster_lock_acquire_s6_release(const ClusterLockAcquireRequest *req)
 
 	if (req == NULL)
 		return CLUSTER_LOCK_ACQUIRE_FAIL_INTERNAL;
+
+	/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): S6 release decomposition for
+	 * the CF resid.  Capped; removed before the final push. */
+	if (req->resid.type == CLUSTER_CF_RESID_TYPE) {
+		static int cfx_s6_diag = 0;
+		int32 probe_master = cluster_grd_lookup_master(&req->resid);
+
+		if (cfx_s6_diag++ < 80)
+			ereport(LOG,
+					(errmsg("TEMP cfx s6: mode=%d master=%d phase=%d pid=%d",
+							(int)req->lockmode, (int)probe_master,
+							(int)cluster_grd_shard_phase(
+								cluster_grd_shard_for_resource(&req->resid)),
+							(int)MyProcPid)));
+	}
 
 	/*
 	 * PGRAC: spec-5.5 P0 — route the release the SAME way the acquire/send path

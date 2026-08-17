@@ -209,6 +209,7 @@
 #include "cluster/cluster_recovery_anchor.h" /* PGRAC: spec-5.6a per-node recovery anchor */
 #include "cluster/cluster_write_fence.h" /* PGRAC: RF-ROOT P6 checkpoint fence deferral */
 #include "cluster/cluster_lms.h" /* PGRAC: spec-5.6 GES-ready boundary for CF X */
+#include "cluster/cluster_startup_phase.h" /* TEMP diag: cfx checkpoint probes */
 #endif
 
 extern uint32 bootstrap_data_checksum_version;
@@ -7694,6 +7695,20 @@ CreateCheckPoint(int flags)
 			= GetCurrentTimestamp() + (TimestampTz)10 * 1000 * 1000; /* 10 s */
 		bool		fence_ok = cluster_write_fence_allowed();
 
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): fence-deferral entry.
+		 * Capped; removed before the final push. */
+		{
+			static int cfx_ckpt_diag = 0;
+
+			if (cfx_ckpt_diag++ < 40)
+				ereport(LOG,
+						(errmsg("TEMP cfx ckpt pre-fence: flags=%x fence_ok=%d "
+								"phase=%d pid=%d",
+								(unsigned)flags, fence_ok ? 1 : 0,
+								(int)cluster_current_phase(),
+								(int)MyProcPid)));
+		}
+
 		while (!fence_ok && GetCurrentTimestamp() < fence_deadline)
 		{
 			(void) WaitLatch(MyLatch,
@@ -7701,6 +7716,20 @@ CreateCheckPoint(int flags)
 							 20, WAIT_EVENT_CHECKPOINTER_MAIN);
 			ResetLatch(MyLatch);
 			fence_ok = cluster_write_fence_allowed();
+		}
+
+		/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): fence-deferral exit.
+		 * Capped; removed before the final push. */
+		{
+			static int cfx_ckpt_diag2 = 0;
+
+			if (cfx_ckpt_diag2++ < 40)
+				ereport(LOG,
+						(errmsg("TEMP cfx ckpt post-fence: fence_ok=%d "
+								"phase=%d pid=%d",
+								fence_ok ? 1 : 0,
+								(int)cluster_current_phase(),
+								(int)MyProcPid)));
 		}
 	}
 
@@ -7771,6 +7800,22 @@ CreateCheckPoint(int flags)
 			if (cluster_cf_join_readonly())
 				cluster_cf_set_join_readonly(false);	/* steady-state: back to CF X */
 
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): W2 CF(X) attempt.
+			 * Capped; removed before the final push. */
+			{
+				static int cfx_ckpt_diag3 = 0;
+
+				if (cfx_ckpt_diag3++ < 40)
+					ereport(LOG,
+							(errmsg("TEMP cfx ckpt pre-cf: phase=%d ges=%d "
+									"shutdown=%d join_ro=%d pid=%d",
+									(int)cluster_current_phase(),
+									ges_available ? 1 : 0,
+									ShutdownRequestPending ? 1 : 0,
+									cluster_cf_join_readonly() ? 1 : 0,
+									(int)MyProcPid)));
+			}
+
 			if (!cluster_cf_lock(ExclusiveLock))
 				ereport(ERROR,
 						(errcode(ERRCODE_CLUSTER_CONTROLFILE_AUTHORITY_UNAVAILABLE),
@@ -7782,6 +7827,19 @@ CreateCheckPoint(int flags)
 								   ShutdownRequestPending,
 								   cluster_cf_join_readonly(), ges_available,
 								   eor)));
+
+			/* TEMP DIAGNOSTIC (RF-ROOT P6 cfx hunt): W2 CF(X) granted.
+			 * Capped; removed before the final push. */
+			{
+				static int cfx_ckpt_diag4 = 0;
+
+				if (cfx_ckpt_diag4++ < 40)
+					ereport(LOG,
+							(errmsg("TEMP cfx ckpt cf-got: phase=%d pid=%d",
+									(int)cluster_current_phase(),
+									(int)MyProcPid)));
+			}
+
 			cf_x_taken = true;
 
 			LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
