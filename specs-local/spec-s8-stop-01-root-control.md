@@ -1450,3 +1450,283 @@ engage-first 序不变（复用既有函数）。
 
 - t243 L4：两条竞态路径均收敛到 JOIN_COMMITTED + JCMK + joiner 自认；
   ok 18/19 稳定；L5-L10 全绿。
+
+## 增量 9：authority barrier 同 composite 重发保留 done 槽位（2026-08-17，修 L4 publish 瞬时失败后重发永久饿死）
+
+### 背景事实（run-29 实测证据，2026-08-17 19:27:38）
+
+run-29（HEAD=c56b783d04）L4 链已全通到最后一跳，卡在 node1 phase3
+authority barrier 的 publish 瞬时失败 → 重发饿死：
+
+- 19:27:38.270：node1（pid 8284 postmaster / 8285 LMON）fast-rejoin 自认
+  完成（"shared-CF fast-rejoin admission and re-declare complete — boot
+  fence lifted"），同一毫秒 barrier gen=1 terminal SUCCESS，但
+  `cluster_authority_readiness_publish_recovery` 失败——TEMP 证据：
+  `19:27:38.270 TEMP reconfig-lock conditional fail: state=0x20000000`
+  （postmaster 无 PGPROC，formation snapshot 用
+  LWLockConditionalAcquire；LMON 恰在同刻持 reconfig 锁做 admission
+  收尾 → CAPABILITY_UNAVAILABLE → `formation` 谓词瞬时为假；TEMP
+  mismatch 日志里所有字段（含 formation=0 READY、grd=1）事后复查全过）。
+- publish 失败路径在函数内 `clear_matching("publish_recovery_fail")`
+  清掉 STARTING binding → phase3 循环 re-bind → `barrier_wait` 重发
+  **gen=2**（同一 composite：epoch=4 / hash=11587734006894897235 /
+  members=3/0）→ 重发把 `recovery_authority_done_epoch/hash[]` **全部清零**
+  （cluster_grd.c 重发后段）→ node1 自己的一格被 LMON tick 1 tick 内重刷，
+  但 node0 的那格永远等不到新帧：
+  - node0 的 JOIN episode 已在同刻（38.270）关闭（"grd episode done:
+    dir=2 epoch=4"），WAIT_CLUSTER 每 tick 的 DONE 重播停止；
+  - node0 的 once-per-composite echo（回正清单 P1#4）已被 gen=1 期间的
+    node1 帧消费，同 composite 不再重播。
+  → gen=2 的 done0=0/0 永久（authority tick 从 38.296 起恒为
+  `done0=0/0 done1=4/hash`）→ phase3 直到 60s pg_ctl 窗口超时 bail →
+  测试清理 immediate 停 node0（28:30.36）→ node1 cssd 判 node0 DEAD →
+  二次 fail-stop（28:33.5 epoch 4→5）→ 残留节点继续 phase3 循环到
+  19:31:34 才 READY（run-29 尾部见证）。
+
+根因链：publish_recovery 的瞬时失败（A1 无 PGPROC 的条件锁获取，与
+admission 收尾同刻竞争）本身可重试吸收，但重发路径把"已证明的收敛证据"
+（done 槽位）清零，而 survivor 侧不再有义务补发同 composite 的 done key
+（episode 已关 + echo once-guard 已消费）→ 结构性饿死。
+
+### 合同（增量 9）
+
+1. `cluster_grd_recovery_authority_barrier_wait` 的重发后段：**仅当新请求
+   composite（epoch / dead-bitmap hash / member 集合）与上一请求不同才清零
+   done 槽位**；composite 相同则保留。理由：done 槽位只在帧的
+   {epoch, hash} 与当前请求 composite 精确匹配时才被写入
+   （mark_peer_done 的 authority-axis 门），因此同 composite 重发时保留值
+   就是新 generation 需要的精确收敛证据；composite 不同时保留值必然无法
+   通过新请求的 epoch/hash 比较（all_done 仍 fail-closed），清零只是卫生。
+2. 不变：head gate（epoch==current、quorum、incarnation、membership）、
+   map-current、request_current、terminal 发布、cancel 语义、
+   publish_recovery 的失败即 clear 契约、judge/timeout/workload 全不动。
+3. 不重开任何 fence/admit 放宽；不放宽 publish 谓词本身（瞬时竞争由
+   phase3 既有的 re-bind 循环吸收——现在重发可收敛）。
+
+### 安全论证
+
+- 保留槽位的语义是"某成员在 composite C 完成了 re-declare barrier"——
+  与 generation 无关；同 C 的重发请求要的就是同一份证据。gen=1 已
+  SUCCESS terminal 即证明双方在 C 收敛过，gen=2 无需重新证明。
+- 不可能出现"旧 composite 的槽位污染新请求"：epoch 单调，head gate 要求
+  epoch==cluster_epoch_get_current()，composite 不可能回退；同 epoch 的
+  dead-set 增长（r3-P2-2）改变 hash → composite 不同 → 清零。
+- 极端情形（重发时 peer 已进入同 epoch 新 episode）：terminal 发布前
+  request_current 与 publish_recovery 的 formation revalidate 仍要求
+  当前快照与 binding 一致，不一致则 publish 继续失败、循环重来——不会
+  以旧证据开出新 seal。
+
+### 验收
+
+- t243 L4：38.270 publish 瞬时失败后 gen=2 在 ~1 tick 内 terminal →
+  phase3 出 → ok 18/19 稳定；L5-L10 全绿。
+- cluster_unit：新增 2 例（同 composite 重发保留、composite 变化清零）。
+
+## 增量 10：LMON 逐迭代广播加 1Hz 下限（2026-08-17，修 L5 restore boot 帧风暴 → cssd 心跳饿死 → 假 DEAD）
+
+### 背景事实（run-30 实测证据，2026-08-17 20:17:00-20:18:04）
+
+增量 9 后 t243 ok 18/19 通过（L4 60s 窗口内完成），L5 的 restore boot
+（claim 恢复后的 node1 重启）出现新楔子——两节点 LMON 互相以帧速率驱动：
+
+- node0（survivor coordinator）的 clean-leave 机器在
+  `cl_survivor_tick` step 2a 里**每个 LMON 迭代**重发 LEAVE_COMMITTED
+  （type=30）：条件 `is_clean_departed(1) && !cssd-dead(1) &&
+  serving_ready_is_current()` 在 node1 重启归来（cssd ALIVE）期间恒真，
+  "re-sent each tick while the leaver is alive" 的"每 tick"在 LMON
+  迭代可被入站帧驱动到帧速率时变成每秒数万帧。
+- node1（rejoiner）的 authority tick（`grd_recovery_authority_lmon_tick`）
+  在其请求 pending 且本地 barrier 完成时**每个 LMON 迭代**广播 done key
+  （type=4 GES_REQUEST/REDECLARE_DONE）。
+- 两者互为对方迭代的唤醒源：node1 收到 type=30 → 下一迭代广播 type=4 →
+  node0 收到 → 下一迭代重发 type=30 → …… 1:1 ping-pong 以迭代时长
+  （~100µs）为周期，实测双方 ~16k 迭代/秒（reconfig-lock diag 计数），
+  持续 ~60s（20:17:00.8 → 20:18:01）。
+- 风暴淹没 tier1 每-peer outbound（FIFO 持续满）→ node0 的 cssd 心跳帧
+  排队迟到 >3s → node1 cssd 判 node0 SUSPECTED（20:18:03.168）→ DEAD
+  （20:18:04.169，dead_gen=2）→ node1 二次 fail-stop（epoch 5→6）→
+  phase3 barrier inner break（epoch_moved + quorum 丢失）→ phase3 循环在
+  reconfig-lock 条件获取与 LMON 自身处理之间抖动 → 60s pg_ctl 窗口到期
+  bail；残留 postmaster 继续循环至 20:19:29.255 以
+  "PANIC: cannot wait without a PGPROC structure" 结束（A1 无 PGPROC 的
+  阻塞 LWLockAcquire，伴随现象）。
+- 对比 run-29 L5（19:27:19-22）同样的 clean-leave + restore boot 在 3s
+  内收敛：当时 node0 的 serving rebind 门未过（serving_ready 未 current），
+  type=30 重发被 P6 门挡住，无风暴。run-30 里 L4 链完成后 node0 的
+  serving 已 current → 重发门打开 → 风暴出现。增量 9 让 L4 完整闭环，
+  首次把 L5 的这条腿暴露出来。
+
+### 合同（增量 10）
+
+1. `grd_recovery_authority_lmon_tick`：done-key 广播（本地 done 槽位
+   的写保持每迭代——all_done 读它）加 1Hz 时间下限（两次广播间隔
+   >= 1s）。LMON 迭代可被入站流量驱动到帧速率（spec-7.2 D1 懒职责的
+   既定前提），任何"每迭代一帧"的发送都必须遵守 1Hz floor。
+2. `cl_survivor_tick` step 2a 的 LEAVE_COMMITTED 重发：同样 1Hz 下限
+   （best-effort 交付语义不变——leaver 每 s 至多收一帧确认，足够）。
+3. 不变：广播内容、门条件、echo once-guard、authority 语义、
+   judge/timeout/workload 全不动。
+
+### 安全论证
+
+- 1Hz floor 只降低重发/重播频率，不改变任何判定：done key 与
+  LEAVE_COMMITTED 都是幂等 best-effort 帧，接收端门是 idempotent gate。
+- 相位 3 barrier 的收敛时限（秒级）远大于 1s 广播周期，1Hz 不引入
+  新的饿死路径；echo 的 once-per-composite 回复不受影响（它由
+  mark_peer_done 触发，不在本增量的两条路径上）。
+- 帧风暴消除后 tier1 outbound 恢复空闲，cssd 心跳帧 1s 内必达，
+  假 DEAD 不再发生。
+
+### 验收
+
+- t243 L5：restore boot 在 60s 窗口内完成（fast-rejoin 链在 20:17:01.5
+  驱逐后正常走完）；无帧风暴（tier1 计数回落到 ~1/s）；无假 DEAD；
+  ok 20/21（L5 两断言）通过；L6/L8/L9/L10 全绿。
+
+## 增量 11：DONE echo 扩到 authority self-done 复合体（2026-08-17，修 cast reform 同复合体饿死）
+
+### 背景事实（run-31 实测证据，2026-08-17 21:11:20-21:12:22）
+
+增量 10 后 run-31 在**铸根后的 cast 双节点重启**腿失败：
+
+- node0 与 node1 并发重启（21:11:19.2）。node1 的 phase3 request 在
+  21:11:22.225 发布于 (epoch=1, empty-hash)；node0 的同复合体 request
+  发布于 21:11:20.226，**21:11:22.227 已 terminal SUCCESS**（node0 收到
+  node1 的首帧 done 后 all_done 即达）。
+- node0 的 authority tick 在 terminal 后早退（3157-3161：terminal >=
+  request 直接 return）——**不再广播 done key**；增量 10 的 1Hz floor
+  又把 node0 terminal 前最后一帧广播（22.226，距上一帧 21.53 仅 0.7s）
+  抑制掉了。于是 node1 的 (1, empty) request 从 22.225 到 21:12:22
+  （63s，start_pair 超时）**done0=0/0 恒空**。
+- 既有 echo 机制（回正清单 P1#4）本可兜底，但其触发条件比对的是
+  **FSM self-done**（recovery_done_epoch/hash[self]，episode 关闭时写）：
+  cast reform 里幸存者 FSM 是全新 shmem、从未跑过 episode → self-done=0
+  → 永不应答。run-30-L5 的 clean-leave 情形同理：FSM self-done 的
+  dead-set hash（{leaver}）与 rejoiner 的 pristine 复合体（empty）不同
+  → 也不应答。
+
+### 合同（增量 11）
+
+1. mark_peer_done 的 echo 触发条件从"帧 == FSM self-done"**放宽为
+   "帧 == FSM self-done OR 帧 == authority self-done"**
+   （recovery_authority_done_epoch/hash[self]，authority tick / serving
+   rebind 在已发布 request 复合体上盖章，terminal 后保留）。authority
+   复合体才是 peer 的 request 实际匹配的复合体。
+2. once-per-composite 放大防护（回正清单 P1#4）不变：每个 {epoch, hash}
+   至多一次 echo，新复合体重置。不构成新的风暴面。
+3. 不变：FSM 轴、authority 轴、门、judge/timeout/workload 全不动。
+
+### 安全论证
+
+- echo 只是把 peer 自己的复合体原样回播（幂等帧），接收端各轴门
+  （authority-axis 精确匹配 / FSM 单调 max）均幂等；放宽的只是"何时
+  回播"的触发面，且仍受 once-per-composite 约束。
+- 无新风暴：echo 每复合体至多一次；配合增量 10 的 1Hz floor，
+  稳态广播 ~1/s。
+
+### 验收
+
+- t243 cast reform（ok 3/4 腿）：并发双节点重启时同复合体 request
+  在 ~1 tick 内收敛；L4（ok 18/19）+ L5 restore boot 全绿。
+
+## 增量 12：clean-leave 槽位按化身变更释放（2026-08-17，修 L5 restore boot 被 leave 串行门永久卡死）
+
+### 背景事实（run-33 实测证据，2026-08-17 21:24:18-21:25:19）
+
+增量 10/11 后 run-33 已到 ok 1-19（cast reform 收敛、L4 两断言通过），
+L5 restore boot 仍超时：
+
+- node1 L5 fast stop（21:24:18.5，clean-leave epoch 5）→ restore boot
+  （21:24:19.1）。restore boot 的 cssd 在 ~2.1s 内恢复心跳（本轮无
+  boot-latency 空窗）→ **node0 的 cssd 从未把 node1 判 DEAD**。
+- node0 的 clean-leave 机器 step 3（cl_survivor_tick）只在
+  `cssd peer DEAD && clean_departed` 时释放 leave 槽位——cssd 状态是
+  node 级而非 process 级：node1 快速重启后 peer 恒 ALIVE → 槽位永持 →
+  `cluster_clean_leave_in_progress()` 恒真 → P2 串行门
+  （"do NOT drive any join while a clean leave is active"）把 fast-rejoin
+  链（20.568 驱逐已触发，`join-drive blocked: clean_leave=1`）永久挡住
+  → 无 fail-stop/JOIN → node1 的 phase3 request (5, empty) 对 node0 的
+  authority (5, {leaver}) 永不收敛 → 60s 窗口 bail。
+- 对比 run-29-L5（19:27:19-22 收敛）：当时 node1 重启的 cssd 空窗
+  >3s → node0 cssd DEAD → 槽位释放 → 链走通。run-33 的空窗 <2s 是
+  另一条竞态（更快重启反而卡死）——两条竞态都真实，需要化身级判据。
+
+### 合同（增量 12）
+
+1. `cl_survivor_tick` step 3 的槽位释放条件从
+   `cssd peer DEAD` 扩为 `cssd peer DEAD || 观察到离开节点的新化身`：
+   新化身 = observed slot 相干且 `obs_incarnation != last_admitted
+   [leaving]`（last_admitted 保持离开时的旧化身——clean-departed 未
+   重入前不变）且 fresh-alive。新进程出现 ⇒ 旧进程必然已退出 ⇒
+   "leaver actually departed" 成立。
+2. 不变：P2 串行门本身、LEAVE_COMMITTED 重发（1Hz，增量 10）、
+   幂等接收门、commit 语义、judge/timeout/workload 全不动。
+
+### 安全论证
+
+- 释放只让 fast-rejoin 链（驱逐→fail-stop→JOIN）得以运行；leave 已
+  COMMITTED（marker 多数持久化 + LEAVE_COMMITTED 已发），旧进程的
+  退出是事实（新进程不能与旧进程同存于同一端口/同一 incarnation）。
+  并发 JOIN 的 epoch bump 不影响已提交 leave 的真相源（P1-1 语义
+  不回溯）。
+- 误判面：obs 槽位暂态（旧 inc 尚未被新 inc 覆盖）→ 条件不成立 →
+  槽位保留，下个 poll（1s）再判——只会延迟不会错放；obs 消失
+  （节点真死）→ 走 cssd DEAD 分支。
+- 不放开任何 fence/admit/authority 判据。
+
+### 验收
+
+- t243 L5：restore boot 的 leave 槽位在 ~1s 内释放 → fast-rejoin 链
+  在窗口内走完 → ok 20/21；L6/L8/L9/L10 全绿。
+
+## 增量 13：owner-rejoin 门接受 CLOSED 生命周期的同主干净重开（2026-08-17，修 L5 restore boot 的 JOIN 提交）
+
+### 背景事实（run-37/38 实测证据，2026-08-17 21:51:43-21:52:43）
+
+增量 12 后 fast-rejoin 链已能启动（驱逐 → JOIN_PENDING epoch 6 →
+JCMK 多数持久化），但 JOIN 提交的 re-vet 的 owner 门永久失败：
+
+- `TEMP owner gate: node=1 root=0 lc=4 owner_inc=840290198982451
+  admitted=840290210048484 lineage=2 import=0 proven=840290210048484`
+  —— root 查找 OK_PRIMARY、claim CRC 匹配、origin_owner_incarnation <
+  admitted、JCMK majority 证明 == admitted，**唯一不满足的是
+  `snapshot.lifecycle == CLOSED`**（CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED=4，
+  owner_rejoin_v1 只接受 OPEN/RECOVERY_COMPLETE）。
+- 根因：L5 fast stop 是**干净停机**——clean-leave 的 THREAD_CLEAN_CLOSE
+  把 root 置为 CLOSED。restore boot（同主、同 claim 文件）的
+  THREAD_OPEN（CLOSED→OPEN）依赖 phase3 的 CF(S) 共享锁，而该锁的
+  S1 门在 phase3 期间因 LMS 未 READY 失败（`cf lock fail: r=10
+  FAIL_LMS_UNAVAILABLE`）→ root 停在 CLOSED → fast-rejoin JOIN 的
+  owner 门永拒 → 提交永不成 → node1 的 phase3 request (6, empty) 对
+  node0 的 authority (6, {leaver}) 永不收敛 → 60s bail。
+- run-29 同腿能过：当时 node0 的 serving rebind 门未开、无 fast-rejoin
+  链，phase3 barrier 直接收敛、root 在 phase4（LMS READY 后）才由
+  StartupProcess 打开。增量 9/12 使 fast-rejoin 链成为 L5 主路径后，
+  这条 CLOSED 拒绝第一次成为阻塞。
+
+### 合同（增量 13）
+
+1. `cluster_recovery_owner_rejoin_v1` 的 lifecycle 接受集合从
+   {OPEN, RECOVERY_COMPLETE} 扩为 {OPEN, RECOVERY_COMPLETE, CLOSED}；
+   CLOSED 分支复用 RECOVERY_COMPLETE 的同一组前置：
+   `origin_owner_incarnation < admitted`（同一主的新进程，化身单调）
+   + claim CRC == identity.thread_claim_crc32c（写一次 claim 的身份
+   证明）+ JCMK majority 证明 == admitted（持久 COMMITTED marker）。
+2. 不变：OPEN 分支（owner_inc == admitted 的已满足门）、claim 校验、
+   JCMK 导入、lineage 递增、fence/judge/timeout/workload 全不动。
+
+### 安全论证
+
+- CLOSED 只可能由该 root 的持有者干净释放（THREAD_CLEAN_CLOSE 契约）；
+  身份锚是写一次的 claim 文件（CRC 绑定 identity），化身单调 +
+  持久 JCMK 证明 admitted 是新进程——与 RECOVERY_COMPLETE 分支的
+  信任链完全一致，只是生命周期的字面值不同。
+- 不放开任何跨主/伪造面：claim CRC 不符、化身不单调、JCMK 不达
+  majority 时仍 fail-closed；root 一旦被 OPEN（他人抢占），CLOSED
+  分支不再适用（OPEN 分支要求 owner_inc == admitted）。
+
+### 验收
+
+- t243 L5：restore boot 的 JOIN 提交在 owner 门通过后完成 →
+  JOIN_COMMITTED → node1 自认 → phase3 收敛 → ok 20/21；L6/L8/L9/L10
+  全绿。
