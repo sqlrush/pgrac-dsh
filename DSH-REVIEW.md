@@ -99,3 +99,15 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
   checkpointer 的 STOPPED 发布与 THREAD_CLEAN_CLOSE 的顺序（contract 1：
   CLOSED 只能在 checkpoint durable + STOPPED 发布之后）。
 - 正面：WIP 已补 unit 测试（startup_phase +57、reconfig +16，回应 F5）。
+
+---
+
+## 复审补记 3（2026-08-17 17:45，换会话交接）
+
+- 复审对象：e920ca6800（contract 1 停机顺序）、94791471d5（fence-token 窗口）。
+  方向均正确，未见 Spec 偏离：CLOSED 只在 checkpoint/STOPPED 后发布，
+  immediate/error 退出不发布；fence-token 窗口收窄与 STOP-05 §5.4 不冲突。
+- 上会话在 specs-local 落增量 1/2（STOP-01 contract 1 + fence-window），
+  符合 specs-local 纪律；增量 2/2（若推导出新方案）留给新会话继续。
+- 上会话诚实标注"三个变体均先于本会话存在、任意 binary 可复现"——新会话
+  排查 B1/B2/B3 时勿把责任归给 contract 1 修复；优先 bisect B1（已有探针）。
