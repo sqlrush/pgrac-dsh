@@ -1382,3 +1382,36 @@ engage-first 序不变（复用既有函数）。
 
 - t243 L4：驱逐后 episode 关闭（不再等 joiner DONE）→ COMMITTED + JCMK
   → node1 自认 → phase3 完成 → ok 18/19；L5-L10 全绿。
+
+## 增量 7：bootstrap 重入清除 clean-departed（2026-08-17，修 L4 竞态 B 双路径死）
+
+### 背景事实（t243 L4 实测证据，2026-08-17）
+
+- 竞态 B（重启 > CSSD 死带）：node1 的 cssd 被 survivor 判 DEAD →
+  membership 降级 DEAD；但 node1 的 clean-departed 位仍置（首次 boot 的
+  clean stop 写入，bootstrap 重入不产生 join commit → 冻结的
+  "join commit 清 clean_departed" 不触发）→ CL-I13 掩码吞掉 fail-stop →
+  无事件、无 episode → serving rebind 永失败 → 双路径全死。
+- 竞态 A（重启 < 死带）走 fast-rejoin 驱逐路径（增量 5/6 已修）。
+- 冻结 spec-5.13 CL-I13 的掩码语义是"自愿离开者不 fail-stop"——该节点
+  已经回来（cssd ALIVE + ABSENT→MEMBER），掩码的适用前提已消失。
+
+### 合同（增量 7）
+
+1. membership 维护的 bootstrap 重入边（peer CSSD ALIVE + state ABSENT →
+   MEMBER）同时 `cluster_reconfig_clear_clean_departed(i)`：节点已重新在场，
+   其后续真实死亡必须走普通 fail-stop。
+2. 不变：clean-leave 的 durable COMMITTED 重建（boot 时）仍然置位——历史
+   证据不丢；join commit 的清除不变；fail-stop 语义不变。
+
+### 安全论证
+
+- 清除只发生在节点被证明重新在场之后（cssd ALIVE + 新槽位）；此前的
+  离开期掩码照旧。清除后该节点任何后续死亡都是真实故障 → fail-stop，
+  方向为收紧（更多 fail-stop 而非更少），8.A 安全。
+- 不改变任何 fence/epoch/gate/judge。
+
+### 验收
+
+- t243 L4：两条竞态路径均收敛（驱逐路径 + fail-stop 路径）；ok 18/19
+  稳定；L5-L10 全绿。
