@@ -1880,3 +1880,51 @@ L5 restore boot（clean stop + 快速重开）的 phase3 权威 barrier 永不�
 - t243 L5 restore boot：fence 提交后 publish 立刻执行 → JOIN_COMMITTED
   事件 → GRD join episode (N, empty) → rebind (N, empty) → node1 的
   done0 被 echo/广播盖写 → phase3 收敛 → ok 20/21；L6/L8/L9/L10 全绿。
+
+## 增量 17：owner-rejoin OPEN 分支接受同主更新化身（2026-08-17，修 L10 快速停机重启的 root 永拒）
+
+### 背景事实（run-54 实测证据，2026-08-17 23:59:26-00:00:58）
+
+增量 16 后 t243 跑到 ok 1-33（L1-L10 全过），唯一剩尾腿：L10 的
+"fast stop → 重启"（第三次 restore boot）60s bail：
+
+- 23:59:25.548 node1 收 fast shutdown；26.173 clean-leave COMMITTED
+  （epoch 11）——**但 leaver 的 serving re-confirm 未达**（55.565
+  WARNING "committed but the local serving authority did not re-confirm
+  before the barrier deadline"）：L10 停机恰逢 node0 的驱逐 episode
+  (11, {1})，leaver 的 serving rebind 被 GRD in-progress 挡住。
+- 随后 shutdown checkpoint 的 THREAD_CLEAN_CLOSE 的 CF(X) 因 serving
+  过期（S1 只认 serving-current 或 StartupProcess）被拒 → **root 停在
+  OPEN（owner=旧化身 840297561279716）而非 CLOSED**。
+- 23:59:55.669 L10 重启 boot；join commit 的 owner gate 分解：
+  `root=0 lc=1 owner_inc=840297561279716 admitted=840297596318716
+  lineage=4 import=0 proven==admitted key=1 crc=1`——claim CRC ✓、
+  JCMK majority ✓、同主化身单调（owner_inc < admitted）✓，**唯一不满足
+  ：OPEN 分支要求 owner_inc == admitted**（L5 的 close 成功是因为其停机
+  恰逢 serving-current 窗口；L10 撞上驱逐窗口——纯时序）。
+- 60s 内 owner gate 永拒 → JOIN 不发布 → phase3 barrier 饿死 → bail。
+
+### 合同（增量 17）
+
+1. `cluster_recovery_owner_rejoin_v1` 的 OPEN 分支从 `owner_inc ==
+   admitted`（已满足门）扩为 `owner_inc <= admitted`：同主更新化身
+   （owner_inc < admitted）走 CAS（expected_lifecycle=OPEN，desired
+   OPEN + owner=admitted + lineage+1）；`owner_inc > admitted`（stale
+   旧进程）仍 fail-closed。
+2. 不变：claim CRC、JCMK majority（proven==admitted）、identity 锚、
+   CLOSED 分支、judge/timeout/workload 全不动。
+
+### 安全论证
+
+- OPEN + owner_inc < admitted 只可能是同一节点的新进程：identity 锚
+  （root 按 node 查找 + 写一次 claim CRC）与 JCMK majority（持久
+  COMMITTED marker + publish-proof 证明 admitted）与 CLOSED 分支完全
+  同链；OPEN 字面值只是"THREAD_CLEAN_CLOSE 未跑/被拒"（崩溃或
+  serving 过期窗口），不改变信任结构。CAS expected=OPEN 原子，并发
+  THREAD_OPEN/他人抢占仍被 CAS 挡住。
+- `>` 的 stale 拒绝保留：admitted 比 root owner 还旧时永不重开。
+
+### 验收
+
+- t243 尾腿：L10 重启的 owner gate 走 OPEN CAS → JOIN 发布 → phase3
+  收敛 → 全部 33 ok 无 bail。
