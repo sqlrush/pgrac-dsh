@@ -2040,3 +2040,60 @@ staleness failures + 5 pre-existing R4-model failures remain)"）：
   reconfig 套件从文档化的 4 失败（75/76/77/92）降为 2（77/92 保持
   pre-existing：marker submit 桩时序 + external-rejoin epoch 期望，与
   P6-RESUME §4 记录一致，留给后续）。
+
+---
+
+## 增量 19：端到端 lifecycle 测试方案（2026-08-18，DSH 补记 13-C 设计稿，代码待 B 裁决后落）
+
+### 需求（补记 13-C 原文）
+
+"补一条不打桩的测试：真实 shmem 控制根 + 真实 compare_and_publish 路径，
+断言 ① OWNER_REJOIN 前态 RECOVERY_COMPLETE 成功；② 前态 OPEN/CLOSED 的
+OWNER_REJOIN 被 patch_shape_valid 拒绝（冻结行为）；③ THREAD_OPEN 的
+CLOSED→OPEN 成功。放 test_cluster_control_root 或 recovery_duty 集成段。"
+
+### 现状调研（2026-08-18）
+
+- test_cluster_control_root.c 已具备真实文件根 + 真实
+  `cluster_control_root_compare_and_publish` 的骨架：`wipe_root_files()`
+  → `create_prepared`（真实 create_prepared API）→ `read_canonical`
+  （真实 STRONG 读）→ `compare_and_publish`（真实 CAS 发布），仅存储
+  钩子（CF/WALR/rename）为 stub。已有 test_lifecycle_publish_exact_
+  token_cas（CLOSED→RETIRED）、test_owner_rejoin_advances_exact_lineage
+  _and_exhausts_at_max、test_retention_expanding_publish_* 等先例。
+- patch_shape_valid（control_root.c:1501-1551）冻结形状：
+  - OWNER_REJOIN：expected ∈ {RECOVERY_COMPLETE, CLOSED（增量 13 偏离，
+    裁决中）} → desired OPEN + owner>0 + lineage>0；
+  - THREAD_CLEAN_CLOSE：OPEN→CLOSED；
+  - THREAD_OPEN：CLOSED→OPEN + owner>0 + lineage>0。
+  - **expected=OPEN 的 OWNER_REJOIN 一律 INVALID**（补记 10.1.2 的
+    死代码点：recovery_duty 增量 17 构造的 expected=OPEN 在此被拒）。
+
+### 测试设计（新增 1 个 UT_TEST，放 test_cluster_control_root.c）
+
+`test_lifecycle_frozen_shape_matrix`（或分 3 个）：
+
+1. **① OWNER_REJOIN 前态 RECOVERY_COMPLETE → OK**：build_migration 置
+   lifecycle=RECOVERY_COMPLETE → create_prepared → read_canonical →
+   build_owner_rejoin_patch（owner=+1、lineage+1）→
+   compare_and_publish(PUBLISH_OWNER_REJOIN) == OK_PRIMARY，published
+   lifecycle=OPEN、lineage+1、publish_seq+1。
+2. **② 前态 OPEN 的 OWNER_REJOIN → INVALID_ARGUMENT**：同样流程但
+   lifecycle=OPEN → owner-rejoin patch（expected=OPEN）→
+   compare_and_publish 返回 INVALID_ARGUMENT，文件未动
+   （root_publish_seq 不变、read_canonical 复读仍 OPEN）。
+   （② 的 CLOSED 半例：当前增量 13 允许 CLOSED，测试在 B 裁决落地
+   （摘除 CLOSED）后追加"CLOSED OWNER_REJOIN → INVALID_ARGUMENT"；
+   若裁决保留 CLOSED，则改为断言 CLOSED 分支行为并删本半例。）
+3. **③ THREAD_OPEN CLOSED→OPEN → OK**：lifecycle=CLOSED（用
+   THREAD_CLEAN_CLOSE 发布或 build_migration 直接置 CLOSED）→
+   read_canonical → THREAD_OPEN patch（expected=CLOSED、desired OPEN、
+   owner=admitted 新化身、lineage+1）→ compare_and_publish
+   (PUBLISH_THREAD_OPEN) == OK_PRIMARY。
+
+### 验收
+
+- 本测试**不打桩 compare_and_publish / patch_shape_valid**（区别于
+  recovery_duty 单测的 ut_root_publish_calls mock，补记 10.1.5）。
+- ①/②(OPEN)/③ 在 B 裁决前即可绿（均冻结行为）；②(CLOSED) 随 B 落地。
+- 提交节奏：随 B 裁决一起落（避免与裁决冲突的双写）。
