@@ -127,3 +127,105 @@ F1（P0，先修）→ F2/F3（P1，同批修）→ F5（提交前补齐）→ F
   ② sj_adm=1 后 witness 仍 ~3.5 分钟才 READY（剩余门待分解）。
 - 新会话注意：F2/F3（P1）仍待查；L5 前复核 seed clean-close CF(S) stale-hold
   （增量 2 已记录）。勿重开"四门放宽"。
+
+---
+
+## 复审补记 5（2026-08-17 20:25，Flash 第一批产出复审 + run-30 取证）
+
+### 5.1 增量 9（同 composite 重发保留 done 槽位）——方向批准，待提交
+
+- 核验通过：done 槽位写入门（cluster_grd.c:2895）只比 {epoch,hash} 与当前
+  发布 composite，不比 generation → 同 composite 保留的槽位即新 gen 需要的
+  精确证据，composite 变化时必 fail-closed。prev 快照读取位置（gen fetch-add
+  之后、本次发布之前）无竞态：composite 字段只由请求方发布路径写（1381/1560
+  为 survivor/leaver rebind，与 joiner 请求不同节点）。
+- 单测 2 例（同 composite 保留 / composite 变化清零）逻辑正确；DSH 独立重编
+  重跑：96/96 全绿。
+- 17 个单测文件的批量改动 = 补桩（前序提交引入的符号引用：qvotec.o→
+  cluster_reconfig_get_clean_departed_epoch、ges.o→components_current 等），
+  修复了 latent 链接断裂，合法 test-sync。22 个编译警告均为 fixture 桩的
+  -Wmissing-prototypes，良性。
+- 卫生提醒：单测二进制曾被跑在 grd.c 20:15 终版之前（20:03 旧构建），DSH
+  已代为重建重跑；提交前请以当前源码再跑一遍全 cluster_unit。尚未提交，
+  证据已齐（run-30 为增量 9 实机），请按 increment 模式提交。
+
+### 5.2 run-30（20:15-20:18）：ok 21，L4 核心首次全绿，新楔子在 L5 第二段重启
+
+- ok 17→21 全过：L4 崩溃恢复链（18/19）**首次绿**；L5 foreign-claim 拒绝
+  （20/21）也过。cliff 从 ok-17 推进到 ok-22。
+- 新楔子（L5 恢复 claim 后的 node1 重启，44183 代）：barrier gen=1 epoch=5
+  hash=11587734006894897235 发布于 20:17:00.720，tick 恒 done0=0/0 → 62s
+  pg_ctl 超时 bail。增量 9 的保留逻辑没机会触发——饿死在更早一层。
+- 根因链（node0 侧日志实测）：
+  1) 20:16:29.502 L5 `$node1->stop`（fast）→ node1 走完整 clean-leave 握手；
+  2) 20:16:29.517 node0 "clean-leave: committed departure of node 1 at epoch 5"
+     → dead set 含 node1（hash A=11186936869689127925 ≠ B）；
+  3) 20:17:01.551 node0 rollover 门开（gt=1）evict 旧化身 840284179171461
+     → 840284220225026，但 clean-leave 状态未随之清除；
+  4) 之后 join-drive 恒 blocked：runtime=1 ordinary=1 control=0 coord_self=1
+     **clean_leave=1** online=0 new_fail_zero=1 gen_changed=0——唯一否决项是
+     cluster_reconfig.c:6299 门的 `!cluster_clean_leave_in_progress()`。
+  5) node0 的 epoch-5 再准入 episode（dir=2）从未启动 → dead set 分歧 → 帧
+     hash 永不匹配 composite → done0 饿死 → 结构性死锁（六环同构）。
+- 对照证据：L4 那代（stop 'immediate'=SIGQUIT 无离开握手）→ clean_leave=0 →
+  epoch-4 join-drive 放行 → 所以 L4 绿、L5 第二段挂。
+- 修复方向（DSH 建议，开放给 Flash 细化）：survivor 侧 clean-leave FSM 在
+  "committed departure" 之后应到达终态，但实测 in-progress 永存。两个候选
+  终态触发：① departure commit 本身即终态（当前为何不清？查 FSM 终态转移
+  的等待条件）；② peer 新化身 rollover-evict 时作废 stale leave。注意
+  Hardening v1.0.4 的 leave/join 互斥设计动机（leaver 误观 epoch 不变得出
+  leave-commit）——勿一刀切放开互斥；要做有界、有证据门的终态转移（如
+  rollover-evict 已把 prior incarnation 踢出，旧 leave 的 epoch-observe
+  前提已失效，可安全终结）。
+- 下一步顺序建议：先修 clean-leave 终态 → ok 22 绿 → L6-L10 → 再评估
+  F2/F3（P1）与 L5 前复核 CF(S) stale-hold（增量 2 记录）。
+
+### 5.3 watcher 状态
+
+- bash-171 运行中，c=3，无卡住告警（19:49→20:04→20:19 周期正常）。
+
+---
+🔴 [DSH-WATCH 08-17 21:40] t243 启动级失败：跑批 bail 且仅 3 ok（reglog ��——节点启动/bootstrap 层被打断。
+   DSH 建议：查 tmp_check/log 两节点日志尾部的第一个 FATAL/PANIC；这类回归通常来自最新改动，先回退再修。
+
+---
+
+## 复审补记 6（2026-08-17 22:20，增量 10/12/13 复审 + run-42/43 回归预警）
+
+### 6.1 增量 12（clean-leave 释放门加"leaver 已换新化身"）——方向批准（正是补记 5 的处方）
+
+- `cl_leaver_reincarnated()` = 观测化身 ≠ 已准入化身 → 旧进程必然已退出，
+  作为 clean-leave 释放的充分证据，逻辑成立；配合 is_clean_departed 前置，
+  fail-closed 保持。这是有界、有证据门的终态转移，不是放宽。
+- **P2 建议**：`obs_inc != admitted` 收紧为 `obs_inc > admitted`——不等号会
+  被乱序旧帧（旧化身帧迟到）误触发，单调方向更稳。
+
+### 6.2 增量 13（control_root OWNER_REJOIN allowlist 加 CLOSED）——语义合理但敏感，务必配单测
+
+- 这是 P6-RESUME v3 遗留的 F2/F3 区域。语义：THREAD_CLEAN_CLOSE 后 root
+  生命周期=CLOSED，same-owner clean reopen 走 OWNER_REJOIN 若只认
+  RECOVERY_COMPLETE 会被挡——L5-restore 恰是此链。CAS compare 仍强制
+  owner-lineage 单调，非 owner 无法通过。方向批准。
+- **但**：control_root.c 改动时间 22:11 与 run-42（22:13，background node1
+  start failed / 0ok）、run-43（22:17，3ok）的启动级回归强相关。历史上有
+  过"THREAD_OPEN 无条件 expected=CLOSED → bootstrap 0-ok"的先例（F1）。
+  请：① 给 increment 13 配单测（OWNER_REJOIN+CLOSED 通过 / 非 owner 拒绝 /
+  bootstrap 路径不受影响）；② 用 run-42 的 node1 日志证明回归根因是 13
+  还是别的，别靠猜；③ 若 13 确实打破 bootstrap，先回退 13 单独验证。
+
+### 6.3 状态快照
+
+- 21ok 态已有两处保底：tag dsh-flash-wip-2150（手动，21:51）、
+  dsh-flash-wip-0817-2207（watcher 自动，22:07）。恢复：
+  `git checkout <tag> -- .`。
+- 仍未提交任何东西。请把已验证的增量（9+10+12 已实机 21ok）按 increment
+  模式落提交；13 验证干净后再提交。
+
+---
+🔴 [DSH-WATCH 08-17 22:22] t243 回归：上一轮完成 21 ok，新一轮完成仅 3 ok（reglog ��。
+   DSH 建议：先 diff 本轮相对上一绿轮的源码改动（git diff / 最近 uncommitted 变更），二分定位回归提交，
+   优先恢复上轮绿态（20:19 run-30 的 21ok）再继续；不要把回归归因为环境问题。
+
+---
+🔴 [DSH-WATCH 08-17 22:22] t243 启动级失败：跑批 bail 且仅 3 ok（reglog ��——节点启动/bootstrap 层被打断。
+   DSH 建议：查 tmp_check/log 两节点日志尾部的第一个 FATAL/PANIC；这类回归通常来自最新改动，先回退再修。
