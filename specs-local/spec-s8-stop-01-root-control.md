@@ -3653,3 +3653,107 @@ B（未置位）registry——两节点从不同源推导恢复判定。**安全
 2. 成员 OPEN_APPLIED 应用 + latch 幂等（r4fsm 单测）；
 3. utility mailbox 驱动（operator 入口 + 单测）；
 4. 验收跑批（t243/regress/census）+ 推送。
+
+---
+
+## 增量 43：增量 42 修正 —— activate_prepared 执行者与锁序（2026-08-18，
+## 实施评估中发现的设计缺口；补记 17 "needs a PGPROC executor" 注记延伸）
+
+### 缺口
+
+增量 42 §A 第 2 步"协调者激活"未写明 activate_prepared 的执行者。实测
+R4 编排：ACK 推进 + CAS mailbox 全在 LMON tick（shmem 内，无 CF/盘 I/O）；
+而 `cluster_control_root_activate_prepared`（control_root.c:1380）内部
+`acquire_clusterwide_cf(ExclusiveLock)` + 根文件 read/rename/readback——
+**LMON tick 内持 CF(X) 做盘 I/O 违反 STOP-05 §5.4 锁序审查面**（补记 1
+F4 / 补记 3 契约：CF→盘 I/O 排序纪律）。AD-023 §4 冻结的 CF(S) 执行者是
+startup，但 cutover 是 serving 期操作（startup 不参与）。
+
+### 修正：执行者 = coordinator utility backend（mailbox 两段握手）
+
+utility mailbox 三方协议天然支持（:5292 "Only the publishing backend
+consumes COMPLETE"；submit=backend / 编排=LMON / consume=backend）：
+
+**第一段（现有）**：operator（coordinator backend）`submit` → LMON ACK
+编排（SAMPLE→BARRIER→PREPARED→COMMIT_APPLIED）→ mailbox COMPLETE。
+
+**第二段（新增，bit22 cutover 专属）**：
+1. backend poll COMPLETE → 校验 round 为 bit22 cutover（target bit22 +
+   COMMIT_APPLIED stage 全成员 ACK）→ **backend 上下文执行
+   `cluster_control_root_activate_prepared`**（CF(X) + 根文件 I/O：backend
+   有 PGPROC、无 LMON tick 锁上下文——锁序合法；proof 四门在
+   activate_authority_current_v1 内，census 由 latch apply 自检承担）；
+2. activate 成功（root ACTIVE）→ backend 写**激活结果**（新 mailbox 结果
+   字段或复用 utility_result + 扩展语义）→ LMON 看到 → 发布 OPEN_APPLIED
+   REQUEST（round 身份绑定）→ 各成员 apply `latch_apply`（无锁 shmem）+
+   ACK → 协调者收齐（observed==expected，stage=OPEN_APPLIED COMPLETE）→
+   轮完成；
+3. activate 失败 → 结果 = 失败（root 保持 PREPARED）→ 轮终止 fail-closed
+   （可重试——activate 幂等语义：PREPARED token + round sha 绑定）。
+
+**锁序汇总**：backend 持 CF(X) 做 root I/O（合法，非 LMON）；成员 latch
+apply 无锁；协调者 OPEN_APPLIED 推进在 LMON（无 CF——只读 ACK 表 + 发
+REQUEST）。
+
+**验收增量**：r4fsm 扩展覆盖第二段（backend activate 成功/失败 → LMON
+OPEN_APPLIED 推进 → 成员应用/幂等/round 绑定拒绝）；实施步骤 = 增量 42
+E 的 1-3 改序：① 成员 OPEN_APPLIED 应用（latch 幂等，独立可测）→ ②
+coordinator OPEN_APPLIED 推进（LMON，依赖 ① 的 ACK）→ ③ backend
+activate 接线（mailbox 第二段）→ ④ mailbox 驱动入口完善 + 单测。
+
+---
+
+## 增量 44：任务 4 实施评估发现 —— bit22 轮与 R4 四成员编排的关系
+## （2026-08-18，实施步骤 ① 前；交 DSH 裁决）
+
+### 发现（代码取证）
+
+成员侧 `semantic_activation_ack_lmon_progress_member_commit_applied`
+（semantic_activation.c:3629-3636）硬编码 **exact four-member formation**：
+`cluster_node_id 1..3`、`coordinator_node == 0`、`expected_members_lo ==
+0x0f`、`target_feature_bitmap == R4_SYNC_CR_V1`、`source_feature_bitmap
+== 0`。协调者侧同理（:2482 一带）。**R4 编排（SAMPLE→…→COMMIT_APPLIED）
+是四成员专用**。
+
+### 冲突
+
+增量 42/43 的 bit22 首开轮设计复用这套 ACK 编排（round.admitted_bitmap
+驱动成员集 + target 含 bit22）。但：
+1. **t243 是 2 节点**（members=0x03，coordinator 可能非 0）——bit22 轮的
+   COMMIT_APPLIED 段推进会被硬编码拒（fail-closed）；
+2. bit22 轮的 target = R4_SYNC_CR_V1 | bit22（或仅 bit22？）——与
+   :3632 的精确比较冲突；
+3. R4 编排的 prepare/commit 段语义（R4_SYNC_CR_V1 的 cr 同步）与 bit22
+   cutover（root 激活）不同——bit22 轮可能不需要 COMMIT_APPLIED 段。
+
+### 候选（DSH 三选一）
+
+- **A（最小）**：bit22 轮走独立 stage 序列（复用 ACK 表/wire/编排队形，
+  但成员集与 feature bitmap 由 round 参数驱动，不经过 COMMIT_APPLIED 的
+  四成员硬编码段）——实现 = 新增 OPEN_APPLIED 段 + round 参数化校验；
+  R4 冻结校验不动。
+- **B（放宽）**：把 :3631 硬编码改为 admitted_bitmap 驱动（round 参数化）
+  ——改动 R4 冻结校验面，风险高（R4 是冻结 spec 核心）。
+- **C（四成员限定）**：bit22 轮仅四成员支持（t243 2 节点无法 TAP 验证
+  bit22 开门，unit 承担）——测试强度缺口。
+
+### 建议
+
+**A**：bit22 cutover 是 R4 之后的第二轮语义（root 激活），与 R4_SYNC_CR_V1
+的 cr 同步无关——独立 stage 序列（SAMPLE→BARRIER→PREPARED→
+**OPEN_APPLIED**，跳过 COMMIT_APPLIED）语义更干净，且不动 R4 冻结面。
+增量 42/43 的 OPEN_APPLIED 设计在此模型下不变（成员集/round 身份由
+round 参数驱动）。等 DSH 裁决后实施。
+
+### 本会话 P7 状态汇总（2026-08-18 22:1x）
+
+- ✅ 批 1（9a72084695）：NULL-identity 修复 + S1-S3 双路径门控 + latch
+- ✅ 批 2（11d6ac246a）：pin 两步读 + 调用者门控
+- ✅ 批 3（d88369e91a）：census 重定义（post-bit22 静态证明）+ latch apply
+  自检 + activate proof 门移除
+- ✅ 批 4（5eba0e5585）：hw_remaster 双路径 + census strict GREEN
+- ✅ 任务 3 闭合（补记 56 裁定：单测守卫 + t243 证据；crash 腿受集群语义
+  限制，5 轮实测 4 发现 + 对照实验入档增量 40/41）
+- ✅ 增量 40/41/42/43/44：任务 4 设计 + 实施评估（含 activate 执行者锁序
+  修正 + 本增量四成员耦合发现）
+- ⏳ 任务 4：等 DSH 裁决增量 44 的 A/B/C 后实施（步骤 ①-④ 见增量 43）
