@@ -2743,3 +2743,66 @@ published_at 阈值边界 + 崩溃/活 peer 双向）**。待 DSH 复审后实�
 - worker.c:192 revalidate：validate_stream 的 target-page 锚从
   registry highest_lsn（写位置）改保守 root 判定（validated_tail 界
   或 BLOCKED）——语义论证同增量 26 待背书项。
+
+---
+
+## 增量 28：站点 1 实施记录（plan.c:203 verdict 迁移 canonical root，方案 A）（2026-08-18，随补记 32）
+
+### 补记 32 三条件落地
+
+1. **truth-table 聚焦单测**：新增 recovery_plan 单测（EMPTY/CLEAN/ALIVE/
+   CRASHED/UNKNOWN 全象限 + 阈值边界 age ∈ {阈值-ε, 阈值, 阈值+ε}）。
+2. **liveness 延迟代价显式登记**（安全但慢）：
+   - 原 registry 活性粒度 = cluster_stats 每 1s tick 刷新 last_updated
+     （cluster_cluster_stats_main_loop_interval=1000ms）；
+   - 迁移后活性粒度 = root.published_at 刷新 = checkpoint 粒度
+     （CHECKPOINT_ADVANCE 每 checkpoint 发布；checkpoint_timeout=300s
+     时阈值 600s，=1h 时阈值 2h）；
+   - 后果：crashed→CRASHED_CANDIDATE 判定延迟从 ~10s 变 ~2×checkpoint
+     间隔。兜底路径可用性论证：判定延迟只影响"本节点冷启动时把死 peer
+     归类为 crash candidate 的早晚"；4.6/4.7 的 warm 路径（NOT_COLD）
+     不依赖本判定——peer 活着时 root.published_at 由 peer 的 checkpointer
+     持续刷新（每 checkpoint），ALIVE 判定在 peer 存活期间始终正确；
+     peer 崩溃后 published_at 冻结，最迟 2×checkpoint 间隔后判
+     CRASHED_CANDIDATE → merge 候选。fallback 始终存在：plan 是
+     observational-only（WARNING 明言），verdict 错误方向 = ALIVE 误判
+     （安全，NOT_COLD 拒 merge）；CRASHED 误判仅当 peer 实际存活且其
+     checkpointer 停止发布——peer 存活则其 checkpointer 必然运行，
+     排除该场景（fail-closed 方向不变）。
+3. **阈值**：`liveness_threshold_us = max(2 × CheckPointTimeout × 1000000,
+   60s)`，ALIVE 偏向；clamp 下限 60s；上限不 clamp（文档给出大值场景
+   端到端可接受性如上）。CheckPointTimeout 为 GUC int（秒）。
+
+### truth table（root 版，替换 registry classify_slot 调用）
+
+| 条件 | verdict |
+|---|---|
+| tid == own_thread | OWN |
+| root_result == ABSENT（记录不存在）| EMPTY |
+| root_result != OK/DEGRADED | UNKNOWN |
+| origin_node_id != tid-1 | UNKNOWN |
+| lifecycle == CLOSED | CLEAN |
+| lifecycle == OPEN 且 now - published_at < 阈值 | ALIVE |
+| lifecycle == OPEN 且 now - published_at ≥ 阈值 | CRASHED_CANDIDATE |
+| 其他 lifecycle（RECOVERY_REQUIRED/COMPLETE/RETIRED/UNUSED）| UNKNOWN |
+
+### max_highest_lsn / max_highest_scn 处置（补记 31 项 3）
+
+- max_highest_scn：无消费者 → 从 correctness 判定删除（字段保留 0，
+  观测面移除 scn_recovery_cmp 调用）；
+- max_highest_lsn：改取 root checkpoint_lower_lsn / validated_tail 的
+  max（观测语义：registry highest_lsn 是写位置，root 无写位置字段；
+  用 checkpoint/tail 界为保守观测）。
+
+### 实施范围（本轮 = plan.c:203；worker.c:192 另站）
+
+- cluster_recovery_plan_generate 的 tid 循环：cluster_wal_state_read_slot
+  → cluster_control_root_read_canonical(tid, NULL, READ_STRONG, ...)；
+  每 tid 一次 STRONG read（startup pre-IR 合法，CF(S) 可获取已取证）。
+- registry_ready() 门 → root 可用性判定（root ABSENT = 首启无 root =
+  plan.failed 同语义？——registry 与 root 生命周期不同：root 由 P6
+  THREAD_OPEN 发布。首启时 registry 有 ACTIVE slot 但 root 可能 ABSENT
+  （THREAD_OPEN 未跑）→ 需保持 plan 可用：root ABSENT 时按"全部
+  UNKNOWN"处理并 LOG，plan.failed=false？——待实施时以 t243 实测为准，
+  倾向：root ABSENT → plan.failed=true（同现 registry_ready false 语义，
+  WARNING fail-open）。

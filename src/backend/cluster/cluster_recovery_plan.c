@@ -43,6 +43,7 @@
 #ifdef USE_PGRAC_CLUSTER
 
 #include "cluster/cluster_guc.h"
+#include "cluster/cluster_control_root.h" /* RF-ROOT P7 G1b step 4: canonical verdict source */
 #include "cluster/cluster_recovery_plan.h"
 #include "cluster/cluster_recovery_worker.h" /* pool lives in this wrapper (spec-4.4 D5) */
 #include "cluster/cluster_scn.h"
@@ -51,6 +52,7 @@
 #include "cluster/cluster_wal_thread.h"
 #include "lib/stringinfo.h"
 #include "port/atomics.h"
+#include "postmaster/bgwriter.h" /* CheckPointTimeout (liveness threshold, increment 28) */
 #include "storage/shmem.h"
 #include "utils/timestamp.h"
 
@@ -149,6 +151,14 @@ publish_plan(const ClusterRecoveryPlan *plan)
  *	pass runs BEFORE InRecovery is determined, so a plan generated on
  *	a clean local start must be readable as exactly that).
  */
+/*
+ * cluster_recovery_plan_generate
+ *
+ *	dbstate_at_startup / local_recovery_needed are captured by the
+ *	caller from ControlFile at the hook site (P1-3 observability: this
+ *	pass runs BEFORE InRecovery is determined, so a plan generated on
+ *	a clean local start must be readable as exactly that).
+ */
 void
 cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_needed)
 {
@@ -157,8 +167,6 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 	uint16 own_thread;
 	int64 now_us;
 	uint16 tid;
-	XLogRecPtr max_scn_lsn = 0; /* scn_recovery_cmp tie-break carriers */
-	NodeId max_scn_node = 0;
 
 	if (cluster_wal_threads_dir == NULL || cluster_wal_threads_dir[0] == '\0')
 		return;
@@ -196,30 +204,39 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 
 	initStringInfo(&candidates);
 	for (tid = 1; tid <= CLUSTER_RECOVERY_PLAN_THREADS; tid++) {
-		ClusterWalStateSlot slot;
-		ClusterWalSlotVerdict v;
+		ClusterControlRootSnapshot snapshot;
+		ClusterControlRootReadToken token;
+		ClusterControlRootResult root_result;
 		ClusterRecoveryThreadVerdict verdict;
 
-		v = cluster_wal_state_read_slot(tid, &slot);
-		verdict = cluster_recovery_classify_slot(v, &slot, own_thread, tid, now_us,
-												 cluster_recovery_stale_active_ms);
+		/*
+		 * RF-ROOT P7 G1b step 4 (site 1): the plan's per-thread source is
+		 * the canonical control root (STRONG read — the startup process is
+		 * the frozen CF(S)-capable recovery admission, AD-023 §4; the
+		 * same read the G1b-A merge engage uses).  The registry is no
+		 * longer a correctness source for the plan.
+		 */
+		root_result = cluster_control_root_read_canonical(
+			tid, NULL, CLUSTER_CONTROL_ROOT_READ_STRONG, &snapshot, &token);
+		verdict = cluster_recovery_classify_root_slot(
+			root_result, &snapshot, own_thread, tid, now_us, CheckPointTimeout);
 		plan.verdict[tid] = (uint8)verdict;
 		plan.threads_scanned++;
 
-		if (v == CLUSTER_WAL_SLOT_OK) {
-			if (slot.highest_lsn > plan.max_highest_lsn)
-				plan.max_highest_lsn = slot.highest_lsn;
-			/* SCN ordering goes through the spec-1.15 recovery comparator
-			 * (raw operators are CI-gated); the three-level tie-break
-			 * (local_scn -> LSN -> node) carries the winner's lsn/node. */
-			if (scn_recovery_cmp((SCN)slot.highest_scn, (XLogRecPtr)slot.highest_lsn,
-								 (NodeId)(tid - 1), (SCN)plan.max_highest_scn, max_scn_lsn,
-								 max_scn_node)
-				> 0) {
-				plan.max_highest_scn = slot.highest_scn;
-				max_scn_lsn = (XLogRecPtr)slot.highest_lsn;
-				max_scn_node = (NodeId)(tid - 1);
-			}
+		if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+			|| root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED) {
+			/*
+			 * Observation (max_highest_lsn): the registry's highest_lsn is
+			 * a write-position watermark the root does not carry; use the
+			 * canonical checkpoint/tail bounds as the conservative
+			 * observation (specs-local increment 28).
+			 */
+			if (snapshot.validated_tail_lsn_exclusive > plan.max_highest_lsn)
+				plan.max_highest_lsn = snapshot.validated_tail_lsn_exclusive;
+			if (snapshot.checkpoint_lower_lsn > plan.max_highest_lsn)
+				plan.max_highest_lsn = snapshot.checkpoint_lower_lsn;
+			/* 补记 31 item 3: max_highest_scn has no consumer; the SCN
+			 * ordering dimension is removed from correctness. */
 		}
 
 		switch (verdict) {
@@ -245,8 +262,8 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 		}
 
 		if (verdict != CLUSTER_RECOVERY_THREAD_EMPTY)
-			ereport(DEBUG1, (errmsg("recovery plan: thread %u verdict %d (slot verdict %d)",
-									(unsigned)tid, (int)verdict, (int)v)));
+			ereport(DEBUG1, (errmsg("recovery plan: thread %u verdict %d (root result %d)",
+									(unsigned)tid, (int)verdict, (int)root_result)));
 	}
 	plan.generated = true;
 
@@ -259,7 +276,7 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 						 candidates.len > 0 ? candidates.data : "", candidates.len > 0 ? "]" : "",
 						 (unsigned)plan.n_alive, (unsigned)plan.n_unknown),
 				  plan.n_unknown > 0
-					  ? errhint("UNKNOWN slots are never treated as crashed; check the shared "
+					  ? errhint("UNKNOWN verdicts are never treated as crashed; check the shared "
 								"WAL storage if they persist.")
 					  : 0));
 	pfree(candidates.data);

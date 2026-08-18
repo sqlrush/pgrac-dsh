@@ -57,6 +57,7 @@
 #ifndef CLUSTER_RECOVERY_PLAN_H
 #define CLUSTER_RECOVERY_PLAN_H
 
+#include "cluster/cluster_control_root.h" /* RF-ROOT P7 G1b step 4: canonical verdict source */
 #include "cluster/cluster_wal_state.h"
 
 /* Per-thread recovery verdict (spec-4.3 §3.2 truth table). */
@@ -129,6 +130,47 @@ cluster_recovery_classify_slot(ClusterWalSlotVerdict v, const ClusterWalStateSlo
 	if (now_us < slot->last_updated)
 		return CLUSTER_RECOVERY_THREAD_ALIVE;
 	if (now_us - slot->last_updated <= (int64)stale_active_ms * 1000)
+		return CLUSTER_RECOVERY_THREAD_ALIVE;
+	return CLUSTER_RECOVERY_THREAD_CRASHED_CANDIDATE;
+}
+
+/*
+ * cluster_recovery_classify_root_slot -- RF-ROOT P7 G1b step 4 (site 1,
+ * specs-local increment 28 / 补记 32 scheme A): classify one canonical
+ * control-root record with the §3.2 semantics, replacing the registry slot
+ * read.  Liveness is checkpoint-granular (root.published_at refreshes only
+ * on root publications), so the ALIVE/CRASHED threshold is conservatively
+ * amplified to max(2 x CheckPointTimeout, 60s) — safe-but-slow: a crashed
+ * peer is classified CRASHED_CANDIDATE at most 2 checkpoint intervals later,
+ * and the NOT_COLD fallback never depends on this verdict.  Fail-closed:
+ * every unclassifiable state lands UNKNOWN.
+ */
+static inline ClusterRecoveryThreadVerdict
+cluster_recovery_classify_root_slot(ClusterControlRootResult root_result,
+									const ClusterControlRootSnapshot *snapshot,
+									uint16 own_thread, uint16 tid, int64 now_us,
+									int checkpoint_timeout_sec)
+{
+	int64 threshold_us;
+	int64 age_us;
+
+	if (tid == own_thread)
+		return CLUSTER_RECOVERY_THREAD_OWN;
+	if (root_result == CLUSTER_CONTROL_ROOT_ABSENT)
+		return CLUSTER_RECOVERY_THREAD_EMPTY;
+	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		|| snapshot->identity.origin_node_id != (int32) tid - 1)
+		return CLUSTER_RECOVERY_THREAD_UNKNOWN;
+	if (snapshot->lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+		return CLUSTER_RECOVERY_THREAD_CLEAN;
+	if (snapshot->lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+		return CLUSTER_RECOVERY_THREAD_UNKNOWN;
+	threshold_us = (int64) Max(checkpoint_timeout_sec * 2, 60) * INT64CONST(1000000);
+	age_us = now_us - snapshot->published_at_usec;
+	/* Boundary included in the alive side (mirrors the registry
+	 * classifier's <= stale window; ALIVE-biased per 补记 32). */
+	if (age_us < 0 || age_us <= threshold_us)
 		return CLUSTER_RECOVERY_THREAD_ALIVE;
 	return CLUSTER_RECOVERY_THREAD_CRASHED_CANDIDATE;
 }

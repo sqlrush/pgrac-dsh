@@ -30,8 +30,9 @@
 #      - cluster_thread_recovery_orchestrator.c window derivation
 #        (thread-recovery worker context, same CF(S) constraint)
 #      - cluster_recovery_worker.c stream validation
-#      - cluster_recovery_plan.c plan generation verdict + SCN ordering
-#        (the root has no SCN value field — design decision pending)
+#    CLOSED (2026-08-18, increment 28 / 补记 32): cluster_recovery_plan.c
+#    migrated to the canonical control root (verdict + liveness, scheme A);
+#    its registry read is gone.
 #
 # IDENTIFICATION
 #    scripts/ci/check-wal-state-correctness-census.sh
@@ -75,11 +76,13 @@ TELEMETRY_OK=(
 # Known-deferred correctness sites (see header).  Listed explicitly so the
 # cutover audit can track them; they must move to the canonical root (or be
 # formally retired) before bit22 opens.
+# G1b step 4 site 1 (2026-08-18, increment 28): cluster_recovery_plan.c was
+# migrated to the canonical control root (verdict + liveness, 补记 32 scheme
+# A) and removed from this list — its registry read is gone.
 DEFERRED=(
+	'src/backend/cluster/cluster_recovery_worker.c'
 	'src/backend/cluster/cluster_hw_remaster.c'
 	'src/backend/cluster/cluster_thread_recovery_orchestrator.c'
-	'src/backend/cluster/cluster_recovery_worker.c'
-	'src/backend/cluster/cluster_recovery_plan.c'
 )
 
 violations=0
