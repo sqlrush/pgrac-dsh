@@ -1112,3 +1112,66 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   不碰 workload/judge。唯一阻塞 site-4 = pin 时 root 不存在，修完
   census 可双处归零。
 - 提醒：anchor 修复后的 t243/regress 复跑仍欠着，一并安排。
+
+---
+
+## 复审补记 42（2026-08-18 17:25，增量 36 勘误复审 + 17:04 失败归因结案：DSH 判定）
+
+### 勘误核验（DSH 独立取证）
+
+1. **勘误 2（BASE_BACKUP 不成立）= 属实** ✓。DSH 亲自核对
+   `src/test/perl/PostgreSQL/Test/ClusterPair.pm`：backup/init_from_backup
+   仅在 new_pair 种子段（:263-267）；start_pair（:459-620）全文无任何
+   backup/init_from/_relocate 调用（grep exit=1）。增量 35 的 BASE_BACKUP
+   假设正式撤销。
+2. **勘误 1（root 从未 mint，非"消失"）= 机制链自洽** ✓。16:41 的
+   tmp_check 已被后续 run 覆盖（不可复验），但链成立：④ pin ABSENT →
+   BLOCKED → hw_gate held → PCM-X fail-closed → L148 CHECKPOINT 拿不到
+   CF → 死在 cast 前 → root 从未 mint。与 17:17 绿跑日志中"HW remaster
+   ... rebuilt ... -> done（registry 读成功）"对照一致。
+
+### 17:04 失败归因 —— 结案：环境/构建态波动，非 P5 回归
+
+- **DSH 独立核验 17:17 复跑（同提交树 f4b18ce86b）**：regress log
+  33 ok / 0 not ok / plan 1..33 完成、无 Bailout → **t243 33/33 GREEN**。
+  17:04 的 Bailout（pg_ctl start failed）为一次性环境/构建态问题
+  （P5 修复后首跑，疑似陈旧构建产物，同 clean_leave SIGABRT 前科）。
+- 提醒：绿跑日志里同样出现 "PCM-X runtime fail-closed (recovery
+  blocked)" / "peer closed: connect failed" / epoch bump 7→10→13 循环——
+  这些是 t243 L10+ restart 腿的**瞬态噪声，不是失败签名**，勿再据此
+  判回归。判据只看 regress log 的 ok/not-ok/Bailout。
+
+### 三个"待 DSH 指导"的裁决
+
+**Q1（④ ABSENT 语义）——裁定：区分 never-minted 与 minted-lost，且
+expected-ABSENT 不得持 gate**
+
+- 语义必须二分：**root 从未 mint**（registry 无该 tid 的发布记录 /
+  producer 未跑 THREAD_OPEN）→ ABSENT 是**正常期望状态**，hw_remaster
+  按无 canonical 数据降级完成（registry 路径 = ③ 现行行为，实测
+  "2048 adopted shards rebuilt -> done"），**不得 BLOCKED、不得持
+  hw_gate**；**root 已 mint 但 STRONG 读失败**（registry 有发布记录
+  LSN X 但文件缺）→ 矛盾 = 危险态，保持 fail-closed（53RA2 语义）。
+- 判别器 = root registry 发布记录（生产已存在；③ 的读取源）。pin
+  ABSENT 必须对照 registry 解释，不能单独判 BLOCKED。
+- fail-closed 也不得以"永持 hw_gate"形式实现（16:41 wedge 即此病：
+  永持 gate → CF 全卡 → 集群整体锁死）。危险态应 fail-stop/显式退出，
+  不留永续 gate。
+- 落地顺序：先 specs-local 增量 37（定义 ABSENT-expected vs
+  ABSENT-lost 二分 + 判别器 + 不持 gate 约束），交 DSH 复审后再动码。
+  这属于裁决 C（pre-IR pinned projection）的合同补全，不是 deviation，
+  但仍须文档先行。
+
+**Q2（t243 setup 调整）——裁定：不需要，禁止改**
+
+- fixture 从未出错（BASE_BACKUP 已撤销）。修复全在产品侧（④ 的
+  ABSENT 语义）。冻结裁决 RFROOT-P04-A2 原样不动；cast 后移方案废弃。
+
+**Q3（17:04 失败归因）——已结案（见上）：复跑 GREEN，非回归。**
+
+### 待办更新
+
+- ④ 重开路径已清晰：落地增量 37 语义 → site-4（hw_remaster.c:487）
+  迁移 → census 双处归零 → bit22 首开。
+- 仍欠：cluster_regress 13/13 复跑（t243 已由 17:17 绿跑覆盖）。
+- t243 内 2 行 TEMP note 仍待删（push 前）。
