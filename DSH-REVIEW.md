@@ -866,3 +866,39 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   wal_state 21/21；census 脚本实跑仍 RED（5 deferred violation，按设计）。
 - 通过。剩余：G1b step 4（关闭 5 个 deferred site，同一提交里从
   C 表 + 脚本 DEFERRED 双处移除）→ census 转 GREEN 才是 bit22 可开时刻。
+
+---
+
+## 复审补记 30（2026-08-18 14:30，增量 25 设计复审：技术分析通过，spec 合规待裁决）
+
+### 设计的技术分析：批准
+
+- 成环发现真实：增量 23 原把 5 个 deferred site 押在"CF(S)/episode CF(X)
+  窗口调度"，若调度是 bit22 前置 → 调度→bit22→调度 成环。解环动机成立。
+- 5 站点逐个分析（CF(S) 可行性 + 语义映射非恒等 + max_highest_scn 无消费者）
+  证据充分，bgworker 上下文不可行有实测（LOCK_UNAVAILABLE 16×）。
+
+### Spec 合规：**不通过冻结条文，需用户裁决**
+
+- STOP-01 §17.9 冻结原文（specs/spec-s8-stop-01-root-control.md:999）：
+  "post-bit22 wal-state correctness reader/writer count **exactly zero**"，
+  且 f076 census 明确点名这 5 个 file:line 区间是 correctness readers。
+- 增量 25 的 NODE_LOCAL_AUTHORITY 白名单类别 = 保留 registry 读 →
+  与"exactly zero"字面冲突。语义再分类（node-local vs cluster-wide）
+  不能单方面改写冻结清单——同增量 17/13 先例，需 user 裁决或冻结 spec
+  修订（pgrac-talk DEVIATION）。
+
+### DSH 建议的冻结合规替代（供裁决参考）
+
+- 不是"等调度"，而是 **node-local 镜像**：CF(S) 可行上下文
+  （checkpointer/coordinator/startup）把 canonical root 的
+  checkpoint/tail/verdict 值刷进每节点 shmem 镜像（G1a/G1a-2 发布点
+  顺手做）；bgworker 读**镜像**而非 registry —— 读源已迁移，§17.9
+  census 归零成立，且无 CF(S) 依赖。失败仍 fail-closed。
+- 与增量 25 的差别仅一处：读的是 root 派生镜像，不是 wal-state registry。
+
+### 裁决项（user 三选一）
+
+A. 接受增量 25 的 NODE_LOCAL_AUTHORITY 分类（改冻结清单语义，显式授权）；
+B. 走 DSH 建议的 node-local 镜像（冻结合规，改动略大）；
+C. 维持"迁移到 canonical 读"原义（需解决 bgworker CF(S) 窗口问题）。
