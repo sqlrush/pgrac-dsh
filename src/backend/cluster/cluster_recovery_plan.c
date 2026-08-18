@@ -311,6 +311,70 @@ cluster_thread_recovery_replay_slot(uint16 dead_tid)
 }
 
 /*
+ * cluster_thread_recovery_pin_projection -- RF-ROOT P7 G1b step 4 (increment
+ * 30/31): pin the canonical-root projection for one dead thread BEFORE the
+ * episode freeze.  Must be called from a zero-resource-lock point (LMON tick
+ * before grd P1 freeze / startup pre-IR); the caller holds no CF.  STRONG
+ * read once, then stamp the slot under the given episode_epoch — the worker
+ * consumes only this immutable projection and never re-acquires CF(S) inside
+ * the episode (补记 31 item 2, STOP-02 §1.3 projection discipline).  Returns
+ * false when the root read fails (the episode then fails closed on this
+ * thread) or the slot is absent.
+ */
+bool
+cluster_thread_recovery_pin_projection(uint16 dead_tid, uint64 episode_epoch)
+{
+	ClusterThreadReplaySlot *slot;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootReadToken token;
+	ClusterControlRootResult root_result;
+
+	slot = cluster_thread_recovery_replay_slot(dead_tid);
+	if (slot == NULL)
+		return false;
+	root_result = cluster_control_root_read_canonical(
+		dead_tid, NULL, CLUSTER_CONTROL_ROOT_READ_STRONG, &snapshot, &token);
+	if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return false;
+
+	/*
+	 * Single-writer (LMON/startup): plain stores via the header-only fill,
+	 * then the episode_epoch stamp is the publication fence the consumer
+	 * pairs with.
+	 */
+	cluster_thread_recovery_pin_fill(slot, &snapshot, &token);
+	pg_write_barrier();
+	pg_atomic_write_u64(&slot->episode_epoch, episode_epoch);
+	return true;
+}
+
+/*
+ * cluster_thread_recovery_projection_current -- RF-ROOT P7 G1b step 4: the
+ * episode bgworker's read of the pinned projection.  Fail-closed: returns
+ * false unless the slot exists AND is stamped with exactly the current
+ * episode (the worker's own launch episode).  The caller then uses the
+ * pinned fields directly; it must NOT re-read the canonical root (no CF(S)
+ * inside the episode — 补记 31 item 2).
+ */
+bool
+cluster_thread_recovery_projection_current(uint16 dead_tid, uint64 episode_epoch,
+										   ClusterControlRootReadToken *token_out,
+										   uint64 *validated_tail_out,
+										   uint64 *checkpoint_lower_out,
+										   uint64 *lifecycle_out,
+										   uint32 *tail_tli_out,
+										   uint32 *checkpoint_tli_out)
+{
+	ClusterThreadReplaySlot *slot;
+
+	slot = cluster_thread_recovery_replay_slot(dead_tid);
+	return cluster_thread_recovery_projection_read(
+		slot, episode_epoch, token_out, validated_tail_out, checkpoint_lower_out,
+		lifecycle_out, tail_tli_out, checkpoint_tli_out);
+}
+
+/*
  * cluster_thread_recovery_counters -- the region-level online thread-recovery
  *	counter block (spec-4.11 D5), declared in cluster_recovery_plan.h.  Returns
  *	NULL when the region is not attached (L110: the orchestrator getters then

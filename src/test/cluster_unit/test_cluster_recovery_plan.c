@@ -554,11 +554,126 @@ UT_TEST(test_verdict_array_bounds_and_zero_slot)
 	UT_ASSERT_EQ((int)plan.verdict[OWN_TID], (int)CLUSTER_RECOVERY_THREAD_OWN);
 }
 
+/* ---- RF-ROOT P7 G1b step 4 (increment 30/31): pre-IR pinned projection
+ * ---- field-completeness + stale-episode fail-closed. */
+
+static void
+fill_pin_snapshot(ClusterControlRootSnapshot *snap)
+{
+	memset(snap, 0, sizeof(*snap));
+	snap->validated_tail_lsn_exclusive = UINT64_C(0x2000000);
+	snap->checkpoint_lower_lsn = UINT64_C(0x1000000);
+	snap->lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	snap->tail_tli = 7;
+	snap->checkpoint_tli = 6;
+}
+
+UT_TEST(test_pin_fill_copies_every_field)
+{
+	ClusterThreadReplaySlot slot;
+	ClusterControlRootSnapshot snap;
+	ClusterControlRootReadToken token;
+
+	memset(&slot, 0xa5, sizeof(slot));
+	memset(&token, 0x3c, sizeof(token));
+	fill_pin_snapshot(&snap);
+	cluster_thread_recovery_pin_fill(&slot, &snap, &token);
+
+	UT_ASSERT(memcmp(&slot.pin_token, &token, sizeof(token)) == 0);
+	UT_ASSERT_EQ((long long)slot.pin_validated_tail, 0x2000000LL);
+	UT_ASSERT_EQ((long long)slot.pin_checkpoint_lower, 0x1000000LL);
+	UT_ASSERT_EQ((long long)slot.pin_lifecycle,
+				 (long long)CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ((int)slot.pin_tail_tli, 7);
+	UT_ASSERT_EQ((int)slot.pin_checkpoint_tli, 6);
+	/* The pin fill must not touch the state/episode gate fields. */
+	UT_ASSERT_EQ((int)pg_atomic_read_u32(&slot.state), (int)0xa5a5a5a5);
+}
+
+UT_TEST(test_pin_fill_zero_snapshot_is_exact)
+{
+	ClusterThreadReplaySlot slot;
+	ClusterControlRootSnapshot snap;
+	ClusterControlRootReadToken token;
+
+	memset(&slot, 0, sizeof(slot));
+	memset(&snap, 0, sizeof(snap));
+	memset(&token, 0, sizeof(token));
+	cluster_thread_recovery_pin_fill(&slot, &snap, &token);
+
+	UT_ASSERT(memcmp(&slot.pin_token, &token, sizeof(token)) == 0);
+	UT_ASSERT_EQ((long long)slot.pin_validated_tail, 0LL);
+	UT_ASSERT_EQ((long long)slot.pin_checkpoint_lower, 0LL);
+	UT_ASSERT_EQ((long long)slot.pin_lifecycle, 0LL);
+	UT_ASSERT_EQ((int)slot.pin_tail_tli, 0);
+	UT_ASSERT_EQ((int)slot.pin_checkpoint_tli, 0);
+}
+
+UT_TEST(test_projection_read_rejects_stale_episode)
+{
+	/* The shmem gate: episode_epoch must match exactly.  A slot stamped 0
+	 * vs expected 42 -> fail-closed. */
+	uint64 validated_tail = 0;
+	uint64 checkpoint_lower = 0;
+	uint64 lifecycle = 0;
+	uint32 tail_tli = 0;
+	uint32 checkpoint_tli = 0;
+	ClusterControlRootReadToken token;
+	ClusterThreadReplaySlot slot;
+
+	memset(&slot, 0, sizeof(slot));
+	pg_atomic_init_u64(&slot.episode_epoch, 0);
+	pg_atomic_init_u32(&slot.state, 0); /* CLUSTER_THREADREC_REPLAY_IDLE */
+	UT_ASSERT(!cluster_thread_recovery_projection_read(
+		&slot, 42, &token, &validated_tail, &checkpoint_lower, &lifecycle,
+		&tail_tli, &checkpoint_tli));
+
+	/* NULL slot -> fail-closed. */
+	UT_ASSERT(!cluster_thread_recovery_projection_read(
+		NULL, 42, &token, &validated_tail, &checkpoint_lower, &lifecycle,
+		&tail_tli, &checkpoint_tli));
+}
+
+UT_TEST(test_projection_read_matching_episode_returns_pinned_fields)
+{
+	uint64 validated_tail = 0;
+	uint64 checkpoint_lower = 0;
+	uint64 lifecycle = 0;
+	uint32 tail_tli = 0;
+	uint32 checkpoint_tli = 0;
+	ClusterControlRootReadToken token;
+	ClusterControlRootReadToken expected_token;
+	ClusterControlRootSnapshot snap;
+	ClusterThreadReplaySlot slot;
+
+	memset(&slot, 0, sizeof(slot));
+	memset(&expected_token, 0x5a, sizeof(expected_token));
+	fill_pin_snapshot(&snap);
+	cluster_thread_recovery_pin_fill(&slot, &snap, &expected_token);
+	pg_atomic_init_u64(&slot.episode_epoch, 42);
+	pg_atomic_init_u32(&slot.state, 0); /* CLUSTER_THREADREC_REPLAY_IDLE */
+
+	UT_ASSERT(cluster_thread_recovery_projection_read(
+		&slot, 42, &token, &validated_tail, &checkpoint_lower, &lifecycle,
+		&tail_tli, &checkpoint_tli));
+	UT_ASSERT(memcmp(&token, &expected_token, sizeof(token)) == 0);
+	UT_ASSERT_EQ((long long)validated_tail, 0x2000000LL);
+	UT_ASSERT_EQ((long long)checkpoint_lower, 0x1000000LL);
+	UT_ASSERT_EQ((long long)lifecycle, (long long)CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ((int)tail_tli, 7);
+	UT_ASSERT_EQ((int)checkpoint_tli, 6);
+
+	/* A later episode invalidates the projection (episode 43). */
+	UT_ASSERT(!cluster_thread_recovery_projection_read(
+		&slot, 43, &token, &validated_tail, &checkpoint_lower, &lifecycle,
+		&tail_tli, &checkpoint_tli));
+}
+
 
 int
 main(int argc, char **argv)
 {
-	UT_PLAN(27);
+	UT_PLAN(31);
 
 	UT_RUN(test_own_priority_beats_every_verdict);
 	UT_RUN(test_empty_slot);
@@ -588,6 +703,11 @@ main(int argc, char **argv)
 	UT_RUN(test_sweep_count_conservation);
 	UT_RUN(test_sweep_bitmap_verdict_coherence);
 	UT_RUN(test_verdict_array_bounds_and_zero_slot);
+	/* RF-ROOT P7 G1b step 4 (increment 30/31): pinned projection. */
+	UT_RUN(test_pin_fill_copies_every_field);
+	UT_RUN(test_pin_fill_zero_snapshot_is_exact);
+	UT_RUN(test_projection_read_rejects_stale_episode);
+	UT_RUN(test_projection_read_matching_episode_returns_pinned_fields);
 
 	UT_DONE();
 	return ut_failed_count != 0 ? 1 : 0;

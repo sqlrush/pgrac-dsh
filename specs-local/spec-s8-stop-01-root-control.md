@@ -2933,3 +2933,35 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
   事件消费与 GRD 状态转换的精确时序）——需 DSH 确认或实测；
 - validated_tail 作 validated_min 的 fail-closed 方向（同增量 26 表
   已论证：VALIDATED 界强于 written 界，replay validated_end 兜底）。
+
+---
+
+## 增量 31：投影 pin 点验证 + 实施①（shmem 载体）（2026-08-18，随补记 35）
+
+### 验证点答案（补记 35：pin 读须在 episode freeze 前零资源锁）
+
+- CF 锁获取者仅 3 处：control_root（STRONG read 自身 S 锁）、wal_state
+  （registry 写按需 X 锁 :214）、hw_ic/oid_lease（镜像资源锁，非 CF）；
+  **LMON tick 路径全程无 CF 获取**（grep 实证 cluster_grd.c /
+  cluster_thread_recovery_worker.c / cluster_lmon.c 零命中）。
+- **thread_recovery_lmon_tick 在 grd tick 之前**（cluster_lmon.c:1390
+  顺序：reconfig → semantic → thread_recovery → grd）→ orchestrator /
+  recovery-worker 投影在 episode freeze（P1）**之前**构造，零锁 ✓。
+- **hw_remaster launch 在 grd P7**（:4038，P5→P6 barrier 后）→ episode
+  已 freeze → 投影**前移到 P0 accept**（grd IDLE→WAIT_EPOCH 转换，
+  :3581，freeze 前零锁）✓。
+- 补记 24 的 LOCK_UNAVAILABLE（16×）是 worker 进程内 STRONG read 与
+  同进程 registry 写竞争——投影化后 worker 不再自行 CF(S)，问题消除。
+
+### 实施①：projection shmem 载体
+
+- 载体：ClusterThreadReplaySlot（plan shmem 区域，per-tid 已有
+  state + episode_epoch pin 先例，L235）扩展 pin 字段：
+  `ClusterControlRootReadToken token; uint64 validated_tail;
+   uint64 checkpoint_lower; uint64 lifecycle; uint32 tail_tli;
+   uint32 checkpoint_tli; uint64 pin_episode_epoch;`（shmem 结构，
+  无磁盘布局，ABI 低风险）。
+- 构造函数（零锁点）：`cluster_control_root_read_canonical(tid, NULL,
+  STRONG, ...)` 一次 → 填 slot；episode 结束/重启即视为 stale（对比
+  pin_episode_epoch）。
+- 单测：pin 完整性（字段拷贝全等）+ token 比较 + episode 不匹配丢弃。

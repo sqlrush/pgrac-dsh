@@ -207,6 +207,19 @@ cluster_recovery_plan_candidate_set(ClusterRecoveryPlan *plan, uint16 tid)
 typedef struct ClusterThreadReplaySlot {
 	pg_atomic_uint32 state;			/* ClusterThreadRecReplayState (raw) */
 	pg_atomic_uint64 episode_epoch; /* GRD recovery_episode_epoch when REPLAYING */
+	/* RF-ROOT P7 G1b step 4 (specs-local increment 30/31): the pre-IR
+	 * pinned canonical-root projection.  Written ONCE by the constructor
+	 * (LMON tick before the episode freeze / startup pre-IR) under the
+	 * episode_epoch gate; consumed by the episode bgworker WITHOUT any
+	 * CF(S) — the worker compares the pinned token/episode instead of
+	 * re-reading the root (补记 31 item 2 / §1.3 projection discipline).
+	 * Plain fields, single-writer; stale when episode_epoch differs. */
+	ClusterControlRootReadToken pin_token;
+	uint64 pin_validated_tail;
+	uint64 pin_checkpoint_lower;
+	uint64 pin_lifecycle;
+	uint32 pin_tail_tli;
+	uint32 pin_checkpoint_tli;
 } ClusterThreadReplaySlot;
 
 /*
@@ -262,6 +275,78 @@ extern ClusterThreadReplaySlot *cluster_thread_recovery_replay_slot(uint16 dead_
  * orchestrator), mirroring the slot accessor + the worker-pool pointer.
  */
 extern ClusterThreadRecoveryCounters *cluster_thread_recovery_counters(void);
+
+/*
+ * cluster_thread_recovery_pin_fill -- RF-ROOT P7 G1b step 4 (increment
+ * 30/31): pure projection-pin copy — fill the slot's pin fields from a
+ * canonical-root snapshot + token.  Header-only so the field-completeness
+ * contract is unit-testable without shmem; the caller (pin_projection)
+ * pairs the stores with the episode_epoch publication fence.
+ */
+static inline void
+cluster_thread_recovery_pin_fill(ClusterThreadReplaySlot *slot,
+								 const ClusterControlRootSnapshot *snapshot,
+								 const ClusterControlRootReadToken *token)
+{
+	slot->pin_token = *token;
+	slot->pin_validated_tail = snapshot->validated_tail_lsn_exclusive;
+	slot->pin_checkpoint_lower = snapshot->checkpoint_lower_lsn;
+	slot->pin_lifecycle = snapshot->lifecycle;
+	slot->pin_tail_tli = snapshot->tail_tli;
+	slot->pin_checkpoint_tli = snapshot->checkpoint_tli;
+}
+
+/*
+ * cluster_thread_recovery_projection_read -- RF-ROOT P7 G1b step 4
+ * (increment 30/31): pure projection read against a caller-provided slot.
+ * Fail-closed: false unless the slot is non-NULL AND stamped with exactly
+ * the current episode.  Header-only so the stale-episode + field-copy
+ * contract is unit-testable; the shmem accessor layer
+ * (cluster_thread_recovery_projection_current in cluster_recovery_plan.c)
+ * supplies the slot and calls this.
+ */
+static inline bool
+cluster_thread_recovery_projection_read(ClusterThreadReplaySlot *slot, uint64 episode_epoch,
+										ClusterControlRootReadToken *token_out,
+										uint64 *validated_tail_out,
+										uint64 *checkpoint_lower_out,
+										uint64 *lifecycle_out,
+										uint32 *tail_tli_out,
+										uint32 *checkpoint_tli_out)
+{
+	if (slot == NULL
+		|| pg_atomic_read_u64(&slot->episode_epoch) != episode_epoch)
+		return false;
+	pg_read_barrier();
+	if (token_out != NULL)
+		*token_out = slot->pin_token;
+	if (validated_tail_out != NULL)
+		*validated_tail_out = slot->pin_validated_tail;
+	if (checkpoint_lower_out != NULL)
+		*checkpoint_lower_out = slot->pin_checkpoint_lower;
+	if (lifecycle_out != NULL)
+		*lifecycle_out = slot->pin_lifecycle;
+	if (tail_tli_out != NULL)
+		*tail_tli_out = slot->pin_tail_tli;
+	if (checkpoint_tli_out != NULL)
+		*checkpoint_tli_out = slot->pin_checkpoint_tli;
+	return true;
+}
+
+/* RF-ROOT P7 G1b step 4 (increment 30/31): the pre-IR pinned canonical-root
+ * projection.  Constructor runs at a zero-resource-lock point (LMON tick
+ * before the episode freeze / startup pre-IR) and STRONG-reads the root
+ * ONCE; the episode bgworker consumes only the pinned fields and must never
+ * re-acquire CF(S) inside the episode (补记 31 item 2, §1.3 projection
+ * discipline).  projection_current fails closed on a stale episode. */
+extern bool cluster_thread_recovery_pin_projection(uint16 dead_tid, uint64 episode_epoch);
+extern bool cluster_thread_recovery_projection_current(uint16 dead_tid, uint64 episode_epoch,
+													   ClusterControlRootReadToken *token_out,
+													   uint64 *validated_tail_out,
+													   uint64 *checkpoint_lower_out,
+													   uint64 *lifecycle_out,
+													   uint32 *tail_tli_out,
+													   uint32 *checkpoint_tli_out);
 
 #endif /* !FRONTEND */
 
