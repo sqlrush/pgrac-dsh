@@ -902,3 +902,38 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
 A. 接受增量 25 的 NODE_LOCAL_AUTHORITY 分类（改冻结清单语义，显式授权）；
 B. 走 DSH 建议的 node-local 镜像（冻结合规，改动略大）；
 C. 维持"迁移到 canonical 读"原义（需解决 bgworker CF(S) 窗口问题）。
+
+---
+
+## 复审补记 31（2026-08-18 14:40，⚠️ 执行指令：G1b step 4 = C / pre-IR pinned canonical projection）
+
+> 用户裁决（2026-08-18）：选 C。DSH 的 B（node-local mirror）被否决——
+> 撞 STOP-01 §17.7 "no compatibility mirror"（specs:960-964）与 STOP-02
+> §1.3 投影纪律（specs:106-109：不得跨重启 cache / 不得绕过 fresh root
+> read）。DSH 撤回补记 30 的 B 推荐，认领漏查两条冻结锚点。
+
+### 冻结主线形状（STOP-02 §15，specs:919-921 原文模式）
+
+零资源锁 → canonical STRONG read / revalidate → **pin root identity +
+token + 所需 snapshot 字段** → 进入 episode / CF(X) → bgworker 只消费
+本 episode 的 immutable projection（IR 内仅比较 pin 的 token，禁止自行
+CF(S)）→ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
+
+### 五站点处置（顺序执行，逐站提交）
+
+1. startup 上下文（recovery_plan.c:203、recovery_worker.c:192
+   revalidate）：pre-IR 直接 fresh canonical STRONG read，迁移到 root。
+2. episode bgworker（recovery_worker.c:247、orchestrator.c:572、
+   hw_remaster.c:487）：消费 episode 前固定的 projection；禁止 IR 内
+   CF(S)；投影构造者 = 同站的 startup/coordinator 上下文。
+3. max_highest_scn（plan.c）：无消费者 → 从 correctness 判定删除，
+   降为观测（registry 读仅剩 telemetry 面）。
+4. registry 独有且 root 无等价语义的字段：**禁止镜像**；改保守
+   root checkpoint/tail 判定或保持 BLOCKED，直到冻结 canonical 表达。
+5. census 保持 strict exactly-zero：每站关闭后同一提交从 C 表 +
+   scripts/ci DEFERRED 双处移除（G1b step 4 原协议）。
+
+### 验收
+
+census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
+13/13 + 聚焦单测绿；5 站逐站提交，等 DSH 逐站复审。
