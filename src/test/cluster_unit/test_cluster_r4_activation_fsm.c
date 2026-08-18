@@ -4530,7 +4530,7 @@ UT_TEST(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_roun
 	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
 	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->prepare_generation, 3);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 3);
 	test_gate_reset();
 }
 
@@ -4541,7 +4541,7 @@ UT_TEST(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept)
 	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(8, 4));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
 	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->prepare_generation, 3);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 3);
 	test_gate_reset();
 }
 
@@ -4566,10 +4566,155 @@ UT_TEST(test_130_bit22_latch_apply_refused_while_census_red)
 	test_gate_reset();
 }
 
+/* RF-ROOT P7 (增量 45): member-side OPEN_APPLIED apply.  Build a valid
+ * 2-node bit22-cutover ACK table (stage OPEN_APPLIED, target bit22,
+ * round identity {transition_epoch=7, record_generation=5}) and drive the
+ * member progress path. */
+static void
+ut_open_applied_table_setup(void)
+{
+	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	SemanticActivationAckTuple remote;
+	int node;
+
+	memset(table, 0, sizeof(*table));
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED;
+	table->coordinator_node = 0;
+	table->round_nonce = 42;
+	table->transition_epoch = 7;
+	table->record_generation = 5;
+	table->expected_members_lo = UINT64_C(0x03);
+	table->expected_members_hi = 0;
+	table->target_feature_bitmap
+		= PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	table->capability_sample_digest = UINT64_C(0xabcd);
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	/* The complete-image check derives each non-local member's tuple from
+	 * the remote admitted incarnation + peer capability sample, and the
+	 * local member's from self_tuple — mirror that here. */
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		if (!cluster_membership_is_member(node))
+			continue;
+		if (node == cluster_node_id) {
+			(void)semantic_activation_ack_self_tuple(
+				node, test_local_capability_word, 7, 5,
+				&table->expected[node]);
+			continue;
+		}
+		memset(&remote, 0, sizeof(remote));
+		remote.node_id = (uint32)node;
+		remote.boot_id = test_remote_admitted_incarnations[node];
+		remote.admitted_incarnation = test_remote_admitted_incarnations[node];
+		remote.control_connection_generation
+			= (uint64)test_peer_capability_generation;
+		remote.capability_word = test_peer_capability_word;
+		remote.capability_generation
+			= (uint64)test_peer_capability_generation;
+		remote.transition_epoch = 7;
+		remote.record_generation = 5;
+		table->expected[node] = remote;
+	}
+}
+
+static void
+ut_open_applied_env_setup(void)
+{
+	int node;
+
+	test_gate_reset();
+	cluster_node_id = 1;
+	test_qvotec_in_quorum = true;
+	test_membership_snapshot_valid = true;
+	test_membership_snapshot_lo = UINT64_C(0x03);
+	test_membership_snapshot_hi = 0;
+	test_membership_snapshot_epoch = 7;
+	test_local_capability_word
+		= CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS;
+	test_peer_capability_word_sample_ok = true;
+	test_peer_capability_word
+		= CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS;
+	test_peer_capability_generation = 19;
+	for (node = 0; node < CLUSTER_MAX_NODES; node++)
+		test_remote_admitted_incarnations[node]
+			= UINT64_C(0x100) + (uint64)node;
+	ut_open_applied_table_setup();
+}
+
+UT_TEST(test_131_member_open_applied_applies_latch_and_acks)
+{
+	ut_open_applied_env_setup();
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 5);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x02), UINT64_C(0x02));
+	/* COMPLETE awaits the coordinator's own observed bit, which the
+	 * coordinator-side OPEN_APPLIED advance (增量 43 步骤 ②) sets when all
+	 * members ACKed — covered there. */
+	test_gate_reset();
+}
+
+UT_TEST(test_132_member_open_applied_replay_is_idempotent)
+{
+	ut_open_applied_env_setup();
+	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x02), UINT64_C(0x02));
+	/* Replay (duplicate REQUEST) — the latch is monotonic, the member just
+	 * re-ACKs; the observed set and latch round identity must not move. */
+	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 5);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x02), UINT64_C(0x02));
+	test_gate_reset();
+}
+
+UT_TEST(test_133_member_open_applied_rejects_round_without_bit22)
+{
+	ut_open_applied_env_setup();
+	SemanticActivationAckTable->target_feature_bitmap
+		= CLUSTER_SEMANTIC_FEATURE_R4_SYNC_CR_V1; /* no bit22 */
+	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x02), UINT64_C(0));
+	test_gate_reset();
+}
+
+UT_TEST(test_134_member_open_applied_coordinator_does_not_apply)
+{
+	ut_open_applied_env_setup();
+	cluster_node_id = 0; /* the coordinator drives, it does not apply */
+	UT_ASSERT(!semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	test_gate_reset();
+}
+
+UT_TEST(test_135_member_open_applied_fail_closed_when_census_red)
+{
+	ut_open_applied_env_setup();
+	ut_r4fsm_census_ok = false; /* a KNOWN-DEFERRED regression turns RED */
+	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
+		SemanticActivationAckTable));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x02), UINT64_C(0)); /* un-observed, fail-closed */
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(179);
+	UT_PLAN(184);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -4749,6 +4894,11 @@ main(void)
 	UT_RUN(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept);
 	UT_RUN(test_129_bit22_latch_rejects_zero_round_identity);
 	UT_RUN(test_130_bit22_latch_apply_refused_while_census_red);
+	UT_RUN(test_131_member_open_applied_applies_latch_and_acks);
+	UT_RUN(test_132_member_open_applied_replay_is_idempotent);
+	UT_RUN(test_133_member_open_applied_rejects_round_without_bit22);
+	UT_RUN(test_134_member_open_applied_coordinator_does_not_apply);
+	UT_RUN(test_135_member_open_applied_fail_closed_when_census_red);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

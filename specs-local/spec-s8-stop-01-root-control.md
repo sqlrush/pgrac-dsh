@@ -3757,3 +3757,55 @@ round 参数驱动）。等 DSH 裁决后实施。
 - ✅ 增量 40/41/42/43/44：任务 4 设计 + 实施评估（含 activate 执行者锁序
   修正 + 本增量四成员耦合发现）
 - ⏳ 任务 4：等 DSH 裁决增量 44 的 A/B/C 后实施（步骤 ①-④ 见增量 43）
+
+---
+
+## 增量 45：latch round 身份修正 + 成员 OPEN_APPLIED 应用设计
+## （2026-08-18，实施取证修正；增量 39/42/43 的 {transition_epoch,
+## prepare_generation} 身份改为 {transition_epoch, record_generation}）
+
+### 修正动因（代码取证）
+
+1. ACK 表（ClusterSemanticActivationAckTableV1）是 **frozen shmem**
+   （StaticAssert sizeof == 16496，不可加字段），且**无
+   prepare_generation 字段**——只有 transition_epoch / record_generation /
+   round_nonce；
+2. 成员侧 OPEN_APPLIED 应用只能从 ACK 表取 round 身份；
+3. cutover 轮每 epoch 至多一轮（ACK 表 transition_epoch 绑定编排），
+   record_generation 是该轮代数——{transition_epoch, record_generation}
+   唯一且可得。
+
+**修正**：latch round 身份 = {transition_epoch, record_generation}。
+`cluster_r4_bit22_cutover_latch_apply(transition_epoch, round_generation)`
+（参数名 prepare_generation → round_generation，签名同形；latch shmem 观测
+字段同步改名；r4fsm test_127/128/129/130 参数值不变）。增量 39 §B 的
+"{transition_epoch, prepare_generation}" 以本增量为准。
+
+### 成员 OPEN_APPLIED 应用（步骤 ①，方案 A——round 参数化，不硬编码）
+
+分派点（progress_member 分派，:3812 一带）新增：
+
+```c
+if (before.stage == CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED)
+    return semantic_activation_ack_lmon_progress_member_open_applied(&before);
+```
+
+progress_member_open_applied 校验（**不做** COMMIT_APPLIED 段的四成员
+硬编码——round 参数化）：
+1. 非协调者（cluster_node_id != coordinator_node）；
+2. 表镜像：EXPECTED_VALID flag + observed ⊆ expected + expected 非空 +
+   round_nonce != 0 + transition_epoch != 0 + record_generation != 0 +
+   target 含 bit22（PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1）
+   ——**bit22 轮标识**；
+3. self tuple 与 expected[cluster_node_id] 匹配（semantic_activation_ack_
+   matches，复用）；
+4. **幂等**：observed 已含 self bit → true（latch 单调，重放安全）；
+5. 应用：`cluster_r4_bit22_cutover_latch_apply(before->transition_epoch,
+   before->record_generation)` → false（已置位异轮 / census RED 回归）→
+   不置 observed（轮失败，fail-closed）→ true → finish_member_open_applied
+   （observed 置位 + publish + ACK，模式同 finish_member_prepared）。
+
+**单测（r4fsm 扩展）**：构造 stage=OPEN_APPLIED 的 ACK 表 fixture →
+成员 progress → 断言 latch 置位（active + round 身份字段）+ observed 更新
++ COMPLETE flag（全成员时）；重放（observed 已含 self）幂等；target 无
+bit22 拒绝；非协调者拒绝；census RED（stub）拒绝。

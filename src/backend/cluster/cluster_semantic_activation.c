@@ -34,6 +34,7 @@
 #include "cluster/cluster_replacement_wire.h"
 #include "cluster/cluster_semantic_activation.h"
 #include "cluster/cluster_sf_dep.h"
+#include "cluster/cluster_control_root.h" /* bit22 feature bit (增量 45 OPEN_APPLIED) */
 #include "cluster/cluster_undo_smgr.h"
 #include "cluster/cluster_wal_state.h" /* GATE-BOUND census self-check (批 3, 补记 44 设计点 ②) */
 #include "common/cryptohash.h"
@@ -166,7 +167,7 @@ typedef struct ClusterR4Bit22CutoverLatchShmem {
 	pg_atomic_uint32 active; /* 0 = pre-bit22 (registry authority) */
 	uint32 reserved;
 	uint64 transition_epoch; /* round identity, observability only */
-	uint64 prepare_generation;
+	uint64 round_generation; /* ACK-table record_generation (增量 45) */
 } ClusterR4Bit22CutoverLatchShmem;
 
 static ClusterR4Bit22CutoverLatchShmem *SemanticActivationBit22Latch = NULL;
@@ -393,6 +394,19 @@ StaticAssertDecl(sizeof(SemanticActivationAckIngress) == 34832,
 				 "semantic activation ACK ingress must remain 34832 bytes");
 
 static ClusterSemanticActivationAckTableV1 *SemanticActivationAckTable = NULL;
+
+/* RF-ROOT P7 (增量 45): bit22 cutover round — member-side OPEN_APPLIED
+ * stage apply.  Round-parameterized (member set driven by the ACK table,
+ * target must carry bit22); deliberately does NOT reuse the R4
+ * four-member hardcoded checks (增量 44 option A). */
+static bool semantic_activation_ack_member_open_applied_image_current(
+	const ClusterSemanticActivationAckTableV1 *image,
+	SemanticActivationAckTuple *out_self);
+static bool semantic_activation_ack_lmon_progress_member_open_applied(
+	const ClusterSemanticActivationAckTableV1 *before);
+static bool semantic_activation_ack_lmon_finish_member_open_applied(
+	const ClusterSemanticActivationAckTableV1 *before,
+	bool latch_applied);
 
 static void semantic_activation_ack_ingress_init(
 	SemanticActivationAckIngress *ingress) pg_attribute_unused();
@@ -3598,6 +3612,165 @@ static const ClusterSemanticActivationDescriptor r4_descriptor = {
 	.open_target_admission = r4_stage_fail_closed,
 };
 
+/*
+ * RF-ROOT P7 (增量 45): bit22 cutover round — member-side OPEN_APPLIED
+ * stage.  The member applies the bit22 latch (one-shot, monotonic; the
+ * census self-check is inside the latch apply, so a KNOWN-DEFERRED
+ * regression turns the round RED).  Round-parameterized: the member set
+ * comes from the ACK table, the round identity from transition_epoch +
+ * record_generation, and the round is identified as the bit22 cutover by
+ * the bit22 target bit.  Idempotent: a member that already observed
+ * itself simply re-ACKs (the latch is monotonic, replay is safe).
+ */
+static bool
+semantic_activation_ack_member_open_applied_image_current(
+	const ClusterSemanticActivationAckTableV1 *image,
+	SemanticActivationAckTuple *out_self)
+{
+	SemanticActivationAckTuple self;
+	uint64 current_members_lo;
+	uint64 current_members_hi;
+	uint64 current_epoch;
+	uint32 local_capability_word;
+	int32 current_coordinator_node;
+
+	if (image == NULL || out_self == NULL
+		|| cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES
+		|| image->stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED
+		|| image->coordinator_node == (uint32)cluster_node_id
+		|| image->round_nonce == 0
+		|| image->transition_epoch == 0
+		|| image->record_generation == 0
+		|| (image->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| (image->flags
+			& ~(CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				| CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE)) != 0
+		|| (image->flags
+			& CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID) == 0
+		|| image->expected_members_lo == 0
+		|| image->expected_members_hi != 0 /* members < 64 (2-node t243) */
+		|| (image->observed_members_lo
+			& ~image->expected_members_lo) != 0
+		|| image->observed_members_hi != 0
+		|| semantic_activation_ack_local_pending_send.pending_members_lo != 0
+		|| semantic_activation_ack_local_pending_send.pending_members_hi != 0
+		|| semantic_activation_ack_local_pending_send.invalidated)
+		return false;
+	if (!semantic_activation_ack_current_authority(
+			cluster_node_id, &current_members_lo, &current_members_hi,
+			&current_epoch, &current_coordinator_node)
+		|| current_members_lo != image->expected_members_lo
+		|| current_members_hi != image->expected_members_hi
+		|| current_epoch != image->transition_epoch
+		|| current_coordinator_node != (int32)image->coordinator_node)
+		return false;
+	local_capability_word = cluster_ic_local_capability_word();
+	if (!semantic_activation_ack_expected_image_current(
+			image, current_members_lo, current_members_hi, current_epoch,
+			current_coordinator_node, cluster_node_id,
+			local_capability_word)
+		|| !semantic_activation_ack_self_tuple(
+			cluster_node_id, local_capability_word, current_epoch,
+			image->record_generation, &self)
+		|| !semantic_activation_ack_matches(
+			&image->expected[cluster_node_id], &self))
+		return false;
+	*out_self = self;
+	return true;
+}
+
+static bool
+semantic_activation_ack_lmon_finish_member_open_applied(
+	const ClusterSemanticActivationAckTableV1 *before,
+	bool latch_applied)
+{
+	ClusterSemanticActivationAckTableV1 after;
+	ClusterSemanticActivationAckTableV1 next;
+	SemanticActivationAckPendingSend pending;
+	SemanticActivationAckTuple self;
+	ClusterSemanticActivationAckWireV1 request;
+	uint64 self_bit;
+	bool all_observed;
+
+	/* Fail-closed: a refused latch apply (round invalid / census RED
+	 * regression) leaves the member un-observed — the round never reaches
+	 * COMPLETE and the coordinator's deadline fails the cutover. */
+	if (!latch_applied)
+		return true;
+	if (!semantic_activation_ack_member_open_applied_image_current(
+			before, &self)
+		|| !semantic_activation_ack_table_snapshot(&after)
+		|| memcmp(before, &after, sizeof(after)) != 0
+		|| !semantic_activation_ack_member_open_applied_image_current(
+			&after, &self))
+		return true;
+
+	self_bit = UINT64_C(1) << cluster_node_id;
+	if ((after.observed_members_lo & self_bit) != 0)
+		return true;
+
+	memset(&request, 0, sizeof(request));
+	request.kind = CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;
+	request.stage = after.stage;
+	request.result = CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST;
+	request.coordinator_node = after.coordinator_node;
+	request.member_node = (uint32)cluster_node_id;
+	request.transition_epoch = after.transition_epoch;
+	request.record_generation = after.record_generation;
+	request.round_nonce = after.round_nonce;
+	request.source_feature_bitmap = after.source_feature_bitmap;
+	request.target_feature_bitmap = after.target_feature_bitmap;
+	request.rollback_feature_bitmap = after.rollback_feature_bitmap;
+	request.admitted_members_lo = after.expected_members_lo;
+	request.admitted_members_hi = after.expected_members_hi;
+	request.capability_sample_digest = after.capability_sample_digest;
+	memset(&pending, 0, sizeof(pending));
+	if (!semantic_activation_ack_pending_send_begin_positive(
+			&pending, &request, cluster_node_id, &self))
+		return true;
+
+	next = after;
+	next.observed_members_lo |= self_bit;
+	next.observed[cluster_node_id] = self;
+	all_observed
+		= next.observed_members_lo == next.expected_members_lo;
+	next.flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	if (all_observed)
+		next.flags |= CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	if (!semantic_activation_ack_table_publish(&next))
+		return true;
+	semantic_activation_ack_local_pending_send = pending;
+	semantic_activation_ack_lmon_send_pending();
+	return true;
+}
+
+static bool
+semantic_activation_ack_lmon_progress_member_open_applied(
+	const ClusterSemanticActivationAckTableV1 *before)
+{
+	SemanticActivationAckTuple self;
+	uint64 self_bit;
+	bool latch_applied;
+
+	if (before == NULL || before->stage
+		!= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED)
+		return false;
+	if (cluster_node_id == (int32)before->coordinator_node)
+		return false;	/* the coordinator drives, it does not apply */
+	if (!semantic_activation_ack_member_open_applied_image_current(
+			before, &self))
+		return true;	/* image not current: retry on the next tick */
+	self_bit = UINT64_C(1) << cluster_node_id;
+	if ((before->observed_members_lo & self_bit) != 0)
+		return true;	/* idempotent: this member already applied */
+
+	latch_applied = cluster_r4_bit22_cutover_latch_apply(
+		before->transition_epoch, before->record_generation);
+	return semantic_activation_ack_lmon_finish_member_open_applied(
+		before, latch_applied);
+}
+
 static bool
 semantic_activation_ack_lmon_progress_member_commit_applied(
 	const ClusterSemanticActivationAckTableV1 *before)
@@ -3812,6 +3985,12 @@ semantic_activation_ack_lmon_progress_member_barrier(void)
 	if (before.stage
 		== CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED)
 		return semantic_activation_ack_lmon_progress_member_commit_applied(
+			&before);
+	/* RF-ROOT P7 (增量 45): bit22 cutover round — the member applies the
+	 * bit22 latch at OPEN_APPLIED (one-shot, monotonic). */
+	if (before.stage
+		== CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED)
+		return semantic_activation_ack_lmon_progress_member_open_applied(
 			&before);
 	if (before.stage == CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED) {
 		if (!semantic_activation_ack_member_prepared_image_current(
@@ -5321,7 +5500,7 @@ cluster_semantic_activation_shmem_init(void)
 		pg_atomic_init_u32(&SemanticActivationBit22Latch->active, 0);
 		SemanticActivationBit22Latch->reserved = 0;
 		SemanticActivationBit22Latch->transition_epoch = 0;
-		SemanticActivationBit22Latch->prepare_generation = 0;
+		SemanticActivationBit22Latch->round_generation = 0;
 	}
 }
 
@@ -5356,12 +5535,12 @@ cluster_r4_bit22_cutover_active(void)
  */
 bool
 cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
-									 uint64 prepare_generation)
+									 uint64 round_generation)
 {
 	uint32 expected = 0;
 
 	if (SemanticActivationBit22Latch == NULL
-		|| transition_epoch == 0 || prepare_generation == 0)
+		|| transition_epoch == 0 || round_generation == 0)
 		return false;
 	if (!cluster_wal_state_correctness_census_ok())
 		return false;
@@ -5369,7 +5548,7 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 										&expected, 1))
 		return false;
 	SemanticActivationBit22Latch->transition_epoch = transition_epoch;
-	SemanticActivationBit22Latch->prepare_generation = prepare_generation;
+	SemanticActivationBit22Latch->round_generation = round_generation;
 	return true;
 }
 

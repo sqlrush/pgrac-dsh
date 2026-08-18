@@ -271,7 +271,7 @@ extern void cluster_semantic_activation_shmem_init(void);
  * §17.8 wal-state authority; true = post-bit22 root-only. */
 extern bool cluster_r4_bit22_cutover_active(void);
 extern bool cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
-												 uint64 prepare_generation);
+												 uint64 round_generation);
 extern void
 cluster_semantic_activation_register(const ClusterSemanticActivationDescriptor *descriptor);
 extern bool cluster_semantic_activation_record_encode(const ClusterSemanticActivationRecord *record,
