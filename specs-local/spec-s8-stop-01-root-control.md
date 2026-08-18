@@ -4120,3 +4120,37 @@ multi-node harness 建设 = 独立工作项（P9 后）。
   补 plan 单测（root 读失败 → 0 candidate）；
 - RU-10/11/12（retirement 三连）：wal_retention 单测补（PAGE 全 SIDE 缺
   拒 / stable-base STOP 拒 / recycler 等待拒）。
+
+---
+
+## 增量 53：RL-07 实测结论 —— 节点重启模式不可行，unit 面已覆盖
+## （2026-08-18，t/272 三轮实测）
+
+### 实测发现
+
+1. **primary 坏 → bak fallback 合法降级**（DEGRADED 成功）——双副本兜底
+   是产品语义（非 mismatch 场景）；
+2. **双副本坏 → 节点重启失败，但失败在 phase3 formation**（"live
+   formation did not become ready"），**与 root 篡改无关**——clean-leave
+   后重启的 phase3 witness 窗口 = 增量 40 发现 3（survivor/joiner 不对称，
+   P6 rejoin 语义）；
+3. **RL-07 的"节点重启验证 root mismatch"模式在 2-node 语义下不可行**
+   （无篡改也会失败）——同增量 40/41 §A 裁。
+
+### 处置
+
+- t/272 删除（不可行腿）；
+- RL-07 的**单元面已充分**：test_cluster_control_root 的 identity
+  mismatch（:1228 STRONG 错 identity → IDENTITY_MISMATCH=12）、stale
+  token、valid_bak_blocks_corrupt_primary、双副本 CRC——**mutation/
+  release 拒绝语义全覆盖**；
+- RL-07 关 = unit 面 + 本审计（honest，合同允许）。
+
+### 剩余 RL 状态
+
+- RL-01 ✅（t/271 6/6）
+- RL-05/06/07/08/09/10/11/12：unit 面覆盖 + honest 标注（2-node 工具/
+  重启限制）；RL-09（source-loss）的单元面 = claim/registry 校验测试
+  （已有）——TAP 集成同受发现 3 限制。
+- **RU 补强为 P9 的实际新增测试**（unit 层）：RU-07 双路径 fail-closed
+  断言 + RU-10/11/12 retirement 三连。
