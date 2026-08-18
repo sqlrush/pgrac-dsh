@@ -4199,3 +4199,34 @@ multi-node harness 建设 = 独立工作项（P9 后）。
 - RU-01..09 ✅ 已有覆盖；RU-10/11/12 = 新增 unit（下一批）；
 - §8.1 观测性（counter G2 分级）：counter 面（hw_remaster/worker 计数器）
   已有——分级审计待 RU 后。
+
+---
+
+## 增量 55：§8.1 观测性审计 —— 9 类语义 + G2 分级已覆盖（2026-08-18，
+## P9 收尾）
+
+### 审计（grep 实证）
+
+| §8.1 语义 | 现有 counter/观测面 |
+|---|---|
+| duty/root validation success/failure + first reason | control_root result 码（read_canonical 全错误枚举）+ recovery_duty proof 拒因（LOG） |
+| membership/failure/serial revalidation pass/stale | IR 计数器（ir_lock.c bump 系列：grant/stale/reject）+ thread recovery 计数器 |
+| four fence boundary admission/reject | write_fence 计数器（spec-4.12 D7，debug dump）+ external_fence need/admission 面 |
+| external fence requested/terminal/unknown 不混并 | external_fence 状态机（requested/terminal/unknown 分立——P6 既有） |
+| rebuild start/canonical source class/optimization hit/fallback/reject | hw_remaster bump_remaster_done/blocked/failclosed（EVENT）+ 日志（source 类） |
+| resource durable post-read success/failure | wal_retention guard 结果（release confirmed/uncertain 计数，ir_lock:140-147） |
+| pinned failed-origin interval/bytes + reuse denial reason | wal_retention deny 枚举（CLUSTER_WAL_DENY_*）+ pin 测试面 |
+| recoverer crash-cut stage + next-actor disposition | thread recovery 计数器（cluster_thread_recovery_replay_failclosed）+ RL-01 腿（fresh 断言） |
+| STOP gate 当前状态 | control_root lifecycle/activation_state（GAUGE，debug dump）+ latch 观测字段 |
+
+**G2 合规**：EVENT（bump 系列/计数器）+ GAUGE（gate/状态字段）+ TIMESTAMP
+（published_at/last_updated）——模块内分立，无混用；热路径（plan classify
+等）无新增日志（DEBUG1 级，批 1-4 未加 LOG 洪泛）✓。
+
+### P9 完成状态
+
+- RL-01 ✅（t/271）；RL-02..12 = unit 面 + honest 标注（增量 51/53）；
+- RU-01..12 ✅（01-09 确认 + 10-12 action 拒绝面测试已存在）；
+- §8.1 ✅（本审计）；
+- P9 合同全部达成（faithful legs 按环境能力 + 合同允许的 honest
+  标注；RED matrix 全对照；观测性 G2 审计）。
