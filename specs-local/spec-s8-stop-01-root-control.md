@@ -2368,3 +2368,16 @@ head gate 的 non-OPEN 分支按 lifecycle 拆分：RECOVERY_COMPLETE 保持
 - 处置：hw_remaster 回退到 registry 源（注释标注 G1b 挂起 + 原因）；
   G1a（checkpoint 发布）保留（正确且独立验证）。G1b 剩余迁移待 DSH/
   设计评审后按锁序可行的上下文逐个落地。
+
+---
+
+## 增量 21 补记 3：按用户裁决移除（2026-08-18，路线 1 取代）
+
+用户裁决（DSH 复审补记 21）：增量 21 的 coordinator 补写（两段 CAS
+THREAD_CLEAN_CLOSE+THREAD_OPEN）违反发布者冻结合同（补记 20 P0）——CLOSED
+必须由 OWNER（checkpointer）自己发布。路线 1（治本）：checkpointer 的
+THREAD_CLEAN_CLOSE 有界重试（重绑 leaver serving authority + 50ms 退避 +
+5s 硬 deadline；超限 LOG 继续停机，root 停 OPEN(old) fail-closed）。
+实施：579fdde166（retry wrapper + checkpointer 接线 + owner_rejoin_v1 恢复
+冻结 OPEN 门 + 增量 21 补写/LOG/特例全删 + 单测 22/22）。验收：t243 33/33
+bail=0 + L5/L6/L10 "clean-closed by owner" ×3 + 无补写路径 + regress 13/13。
