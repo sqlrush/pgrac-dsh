@@ -2992,3 +2992,36 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
 - 待 DSH 指导：root 在 t243 L4 缺失的根因（cast 后文件去向 / GUC
   cluster.shared_data_dir 配置 / 是否需要 t243 适配或 root 存在性
   降级语义）。
+
+---
+
+## 增量 33：root 缺失根因查实进展（2026-08-18，补记 38 后）
+
+### 已排除的假设
+
+1. **cast 写路径**：fixture `--fixture-root-cast` 设 cluster_shared_data_dir
+   = argv[2]（$shared_root）+ DataDir = 同值，create_prepared 写
+   $shared_root/global/pgrac_control_root —— 写路径正确（t243 断言
+   -f 通过）。
+2. **node GUC**：ClusterPair 配 cluster.shared_data_dir = $shared_control_root
+   （ClusterPair.pm:242），node 读路径与 cast 写路径一致。
+
+### 关键新证据（16:08 运行日志，④ 修正 BOOTSTRAP 版）
+
+- hw_remaster **成功**："rebuilt authority from dead node 1 (snapshot
+  0/3456A40, validated end 0/3456AC0); marked 0 adopted shard(s) rebuilt
+  -> done"——**projection 在 root 存在时工作正常**；
+- root 操作活跃："thread 2 checkpoint advanced" / "thread 2 clean-reopened
+  (THREAD_OPEN, lineage 3/4/5)"——root 文件在 L4 时**存在**且被发布；
+- 但测试仍失败：关闭时 checkpointer **PANIC**："recovery anchor checkpoint
+  publication rejected by the write fence inside a critical section"。
+
+### 结论修正
+
+- 16:00 的 pin ABSENT 与 16:08 的 write-fence PANIC 是**两个不同失败**；
+  16:08 证明 ④ 的 projection 机制正确（root 存在时成功）。
+- write-fence PANIC 可能与 pin 的 BOOTSTRAP 读（storage_contract_check
+  在 multi_node 时查 cluster_cf_storage_write_allowed）在 episode/关闭
+  窗口干扰 write-fence 状态有关，或为偶发——**需 DSH 判断**。
+- 待办：不自行迭代 ④；把 16:08 运行日志（已被清理）的关键行 + 本增量
+  证据链交 DSH，由 DSH 指导 write-fence 交互验证或方案调整。
