@@ -517,3 +517,44 @@ A → 裁决(B) → C → D → 双绿 → 重新申请 P6 冻结。中途任何
   THREAD_OPEN 侧问题；修好后必拆回。
 - 验收清单：① t243 33/33 + 日志出现 "reopened by owner"；② recovery_duty
   单测全绿；③ 增量 19 的 C 端到端测试随后落地；④ cluster_regress 13/13。
+
+---
+🔴 [DSH-WATCH 08-18 09:28] t243 回归：上一轮完成 33 ok，新一轮完成仅 21 ok（reglog ��。
+   DSH 建议：先 diff 本轮相对上一绿轮的源码改动（git diff / 最近 uncommitted 变更），二分定位回归提交，
+   优先恢复上轮绿态（20:19 run-30 的 21ok）再继续；不要把回归归因为环境问题。
+
+---
+
+## 复审补记 16（2026-08-18 09:35，THREAD_OPEN 执行者设计转向分析）
+
+### 事实链
+
+1. 09:24 红轮（33→21）：StartupXLOG 版 THREAD_OPEN 上线后的跑批，L5-restore
+   重开断链（bail 在 ok-22 区）。xlog.c 已整体回退（现 0 diff）。
+2. 会话转向"join-commit 路径"设计：recovery_duty.c 的 owner-rejoin 对 CLOSED
+   root 改发 `CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN`（expected=CLOSED），
+   由协调者（survivor LMON，有 PGPROC）在 commit re-vet 里执行 CAS。
+3. 转向理由（startup_phase.c 新注释）：startup 进程在 phase-3 之后才 fork；
+   phase-3 barrier 等 survivor join commit；join commit re-vet 等 root 重开
+   → StartupXLOG 放 THREAD_OPEN = 结构死锁。该论证与代码结构一致，DSH 认同
+   原设计（增量 20 初稿的"StartupXLOG 1-2s 落地"收敛论证）不成立。
+
+### DSH 判定
+
+- 转向方向正确，但**执行者从 StartupProcess 移到协调者 LMON commit re-vet
+  这一步需要 spec 依据**：
+  AD-023 §4 冻结 StartupProcess-only（555890d2df 回退史）约束的是 CF(S)
+  锁执行者；THREAD_OPEN publish 内部若获取 CF(S)，则新路径是否仍满足 §4
+  必须在增量 20 的"corrected design"里写清（含 S1 准入/CF(S) 获取点分析），
+  若构成偏离 → 补用户裁决再继续。
+- 增量 20 文档当前仍是旧设计（StartupXLOG 版），必须同步为 corrected
+  design（裁决 + 死锁证据 + 执行者分析 + 验收标准）。
+- 单测（test_cluster_recovery_duty.c）需按新路由更新：CLOSED root →
+  THREAD_OPEN reason 发布（断言 reason 与 expected=CLOSED），而非拒绝。
+- t243 复跑待新路由落地后进行；若再红，二分 = 恢复 xlog.c StartupXLOG
+  版对照（排除其它因素）。
+
+### 验收不变
+
+t243 33/33 + "reopened by owner" 日志 + recovery_duty 单测绿 + regress
+13/13 + C 端到端测试（增量 19）落地。
