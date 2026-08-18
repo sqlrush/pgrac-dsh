@@ -1759,6 +1759,142 @@ UT_TEST(test_owner_rejoin_advances_exact_lineage_and_exhausts_at_max)
 	UT_ASSERT_EQ(new_token.file_txn_seq, 0);
 }
 
+UT_TEST(test_lifecycle_frozen_shape_matrix)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken file_token;
+	ClusterControlRootIdentity identity;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootSnapshot published;
+	ClusterControlRootReadToken read_token;
+	ClusterControlRootReadToken new_token;
+	ClusterControlRootPatch patch;
+	uint64 new_incarnation;
+
+	/* ① OWNER_REJOIN from RECOVERY_COMPLETE -> OPEN succeeds (frozen
+	 * crash-rejoin mainline). */
+	wipe_root_files();
+	build_migration(&image, &round);
+	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
+	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &file_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(cluster_control_root_lookup_owner_by_node_runtime(
+				 0, &identity, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	new_incarnation = snapshot.identity.origin_owner_incarnation + 1;
+	build_owner_rejoin_patch(&snapshot, new_incarnation,
+						 snapshot.identity.root_lineage_seq + 1, &patch);
+	memset(&published, 0xee, sizeof(published));
+	memset(&new_token, 0xee, sizeof(new_token));
+	UT_ASSERT_EQ(cluster_control_root_compare_and_publish(
+				 &read_token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
+				 &published, &new_token), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(published.lifecycle, CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ(published.identity.origin_owner_incarnation, new_incarnation);
+	UT_ASSERT_EQ(published.identity.root_lineage_seq,
+				 snapshot.identity.root_lineage_seq + 1);
+
+	/* ② OWNER_REJOIN from OPEN is rejected by patch_shape_valid BEFORE any
+	 * CF / file I/O (STOP-02 §17.4: pre-lifecycle must be
+	 * RECOVERY_COMPLETE). */
+	wipe_root_files();
+	build_migration(&image, &round);
+	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &file_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(cluster_control_root_lookup_owner_by_node_runtime(
+				 0, &identity, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	build_owner_rejoin_patch(&snapshot,
+						 snapshot.identity.origin_owner_incarnation + 1,
+						 snapshot.identity.root_lineage_seq + 1, &patch);
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	test_cf_lock_calls = 0;
+	test_durable_rename_calls = 0;
+	memset(&published, 0xee, sizeof(published));
+	memset(&new_token, 0xee, sizeof(new_token));
+	UT_ASSERT_EQ(cluster_control_root_compare_and_publish(
+				 &read_token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
+				 &published, &new_token), CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
+	UT_ASSERT_EQ(published.identity.system_identifier, 0);
+	UT_ASSERT_EQ(new_token.file_txn_seq, 0);
+	UT_ASSERT_EQ(test_cf_lock_calls, 0);
+	UT_ASSERT_EQ(test_durable_rename_calls, 0);
+
+	/* ②' OWNER_REJOIN from CLOSED is rejected the same way: the
+	 * clean-reopen mainline is THREAD_OPEN (CLOSED -> OPEN), never the
+	 * OWNER_REJOIN CAS (increment-13 allowance removed). */
+	wipe_root_files();
+	build_migration(&image, &round);
+	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &file_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(cluster_control_root_lookup_owner_by_node_runtime(
+				 0, &identity, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	build_owner_rejoin_patch(&snapshot,
+						 snapshot.identity.origin_owner_incarnation + 1,
+						 snapshot.identity.root_lineage_seq + 1, &patch);
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	test_cf_lock_calls = 0;
+	test_durable_rename_calls = 0;
+	memset(&published, 0xee, sizeof(published));
+	memset(&new_token, 0xee, sizeof(new_token));
+	UT_ASSERT_EQ(cluster_control_root_compare_and_publish(
+				 &read_token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
+				 &published, &new_token), CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
+	UT_ASSERT_EQ(published.identity.system_identifier, 0);
+	UT_ASSERT_EQ(new_token.file_txn_seq, 0);
+	UT_ASSERT_EQ(test_cf_lock_calls, 0);
+	UT_ASSERT_EQ(test_durable_rename_calls, 0);
+
+	/* ③ THREAD_OPEN CLOSED -> OPEN succeeds with owner re-stamp +
+	 * lineage+1 (the frozen clean-reopen mainline). */
+	wipe_root_files();
+	build_migration(&image, &round);
+	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &file_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(cluster_control_root_lookup_owner_by_node_runtime(
+				 0, &identity, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	new_incarnation = snapshot.identity.origin_owner_incarnation + 1;
+	memset(&patch, 0, sizeof(patch));
+	patch.mask = UINT64_C(0x3b);
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	patch.desired.identity.origin_owner_incarnation = new_incarnation;
+	patch.desired.identity.root_lineage_seq =
+		snapshot.identity.root_lineage_seq + 1;
+	patch.desired.root_flags = snapshot.root_flags;
+	patch.desired.checkpoint_tli = snapshot.checkpoint_tli;
+	patch.desired.checkpoint_source_kind = snapshot.checkpoint_source_kind;
+	patch.desired.checkpoint_lower_lsn = snapshot.checkpoint_lower_lsn;
+	patch.desired.checkpoint_record_crc32c = snapshot.checkpoint_record_crc32c;
+	patch.desired.tail_tli = snapshot.tail_tli;
+	patch.desired.tail_validation_kind = snapshot.tail_validation_kind;
+	patch.desired.validated_tail_lsn_exclusive =
+		snapshot.validated_tail_lsn_exclusive;
+	patch.desired.tail_last_record_lsn = snapshot.tail_last_record_lsn;
+	patch.desired.tail_last_record_crc32c = snapshot.tail_last_record_crc32c;
+	patch.desired.recovered_tli = snapshot.recovered_tli;
+	patch.desired.recovered_through_lsn_exclusive =
+		snapshot.recovered_through_lsn_exclusive;
+	patch.desired.recovered_last_record_lsn = snapshot.recovered_last_record_lsn;
+	patch.desired.recovered_last_record_crc32c =
+		snapshot.recovered_last_record_crc32c;
+	memset(&published, 0xee, sizeof(published));
+	memset(&new_token, 0xee, sizeof(new_token));
+	UT_ASSERT_EQ(cluster_control_root_compare_and_publish(
+				 &read_token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN,
+				 &published, &new_token), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(published.lifecycle, CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ(published.identity.origin_owner_incarnation, new_incarnation);
+	UT_ASSERT_EQ(published.identity.root_lineage_seq,
+				 snapshot.identity.root_lineage_seq + 1);
+}
+
 UT_TEST(test_initial_migration_requires_lineage_one)
 {
 	ClusterControlRootMigrationImage image;
@@ -1850,7 +1986,7 @@ main(int argc, char **argv)
 		return fixture_root_main(argc, argv);
 	setup_fixture();
 
-	UT_PLAN(25);
+	UT_PLAN(26);
 	UT_RUN(test_abi_identity_and_features);
 	UT_RUN(test_invalid_argument_precedes_authority_io);
 	UT_RUN(test_external_fence_bit24_activation_is_forbidden_without_provider);
@@ -1872,6 +2008,7 @@ main(int argc, char **argv)
 	UT_RUN(test_unbound_publisher_fails_before_cf_and_preserves_root);
 	UT_RUN(test_owner_rejoin_rejects_non_new_incarnation);
 	UT_RUN(test_owner_rejoin_advances_exact_lineage_and_exhausts_at_max);
+	UT_RUN(test_lifecycle_frozen_shape_matrix);
 	UT_RUN(test_initial_migration_requires_lineage_one);
 	UT_RUN(test_unconfirmed_release_returns_no_authority);
 	UT_RUN(test_primary_rename_failure_is_not_success);
