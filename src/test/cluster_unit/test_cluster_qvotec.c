@@ -162,6 +162,16 @@ int MyProcPid = 0;
 int cluster_node_id = 0;
 char *cluster_shared_data_dir = NULL;
 
+/* 批 3 (增量 39 §C): cluster_semantic_activation.o consults the runtime
+ * census at the latch apply; this binary does not link cluster_wal_state.o.
+ * GREEN stub — the RED refusal path is covered in
+ * test_cluster_r4_activation_fsm test_130. */
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return true;
+}
+
 void
 ExceptionalCondition(const char *conditionName pg_attribute_unused(),
 					 const char *fileName pg_attribute_unused(),

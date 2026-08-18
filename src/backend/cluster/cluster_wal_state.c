@@ -818,19 +818,20 @@ cluster_wal_state_refresh_fail_count(void)
  * removed from BOTH this table and the script's DEFERRED list in the same
  * commit (the script cross-checks the two lists stay in lockstep).
  *
- * 增量 39 / 补记 43-44 (batch 1 interim): the pre-bit22 root-only migration
- * order was ruled an inversion of the frozen §17.8/§17.9 cutover semantics;
- * the recovery_plan.c / recovery_worker.c registry reads are RESTORED behind
- * the bit22-gate idiom (cluster_r4_bit22_cutover_active) and are the legal
- * pre-bit22 authority.  They stay listed here (lockstep with the script)
- * until the batch-3 semantic flip (KNOWN-DEFERRED -> GATE-BOUND; census as
- * the post-bit22 static proof).
+ * 批 3 / 增量 39 §C / 补记 43-44 (2026-08-18): the census is redefined as
+ * the POST-bit22 static proof (gate modeling).  The recovery_plan.c /
+ * recovery_worker.c / cluster_thread_recovery_orchestrator.c registry reads
+ * are GATE-BOUND — legal pre-bit22 (frozen §17.8) and statically
+ * unreachable post-bit22 because they sit behind the recognized
+ * cluster_r4_bit22_cutover_active() gate idiom — so they leave this table.
+ * ONLY cluster_hw_remaster.c remains: its registry read is NOT gated (it
+ * stays §17.8-correct until the bit22 cutover round adds the root branch,
+ * 增量 39 §B S4), so the runtime self-check at the latch apply
+ * (cluster_r4_bit22_cutover_latch_apply) refuses to flip while it is
+ * listed: the cutover round must close it in the same commit.
  */
 static const char *const cluster_wal_state_census_deferred_sites[] = {
 	"cluster_hw_remaster.c",
-	"cluster_recovery_plan.c",
-	"cluster_recovery_worker.c",
-	"cluster_thread_recovery_orchestrator.c",
 	NULL
 };
 

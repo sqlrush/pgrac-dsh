@@ -5,32 +5,36 @@
 #    CI helper: static census of wal-state registry correctness
 #    reader/writer call sites (RF-ROOT P7 G4 / STOP-01 §17.9).
 #
-#    After bit22 (PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1)
-#    opens, EVERY wal-state correctness reader/writer must be statically
+#    Post-bit22 (PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1),
+#    EVERY wal-state correctness reader/writer must be statically
 #    unreachable — the canonical control root carries the checkpoint/tail/
 #    FPW bounds (CHECKPOINT_ADVANCE + FPW_STICKY publications), and the
-#    registry is telemetry only.  This script is the enforcement gate for
-#    the bit22 cutover (G3/G5): it must pass GREEN before the migration
-#    round opens bit22.
+#    registry is telemetry only.
 #
-#    The whitelist below is the TELEMETRY-ONLY surface (allowed forever):
-#      - W1/W2/W3/W4/W5 writers (cluster_wal_state.c / _rmw unit tests):
-#        ACTIVE/STOPPED/telemetry/checkpoint-registry publishes, and the
-#        W2 merge_recovered_lsn clear (the retained compatibility bytes).
-#      - the xlogrecovery raw_ignored diagnostic LOG (telemetry read).
-#      - the R4 migration-image binding (control_root.c:1113 requires
-#        merge_recovered_lsn == 0 — the source-zero evidence, not a
-#        correctness read).
+#    Batch 3 / 增量 39 §C / 补记 43-44: the census is the POST-bit22 static
+#    proof (gate modeling), NOT a pre-bit22 precondition.  The frozen
+#    §17.8 keeps the registry as the SELECTED authority before bit22 opens,
+#    so pre-bit22 registry reads are legal.  The modeling object is
+#    "no UNGATED correctness call site":
 #
-#    KNOWN-DEFERRED (must be closed before bit22 opens; the census stays
-#    RED while they exist — the script lists them so the cutover cannot
-#    proceed silently):
-#      - cluster_hw_remaster.c  validated_min <- registry highest_lsn
-#        (episode-worker CF(S) infeasible, hw_remaster evidenced)
-#    CLOSED (2026-08-18, increments 28-35): recovery_plan.c +
-#    recovery_worker.c + cluster_thread_recovery_orchestrator.c migrated to
-#    the canonical control root / pre-IR pinned projection; their registry
-#    reads are gone.
+#      - GATE-BOUND sites: their registry reads sit inside the recognized
+#        gate idiom `cluster_r4_bit22_cutover_active()` — legal pre-bit22
+#        and statically unreachable post-bit22 (the latch is monotonic), so
+#        the census does NOT count them; each file must still contain the
+#        idiom anchor (drift check below).
+#      - KNOWN-DEFERRED sites: ungated registry reads that stay
+#        §17.8-correct until the bit22 cutover round closes them in the
+#        same commit.  strict mode counts them (RED = the post-bit22 proof
+#        is not established yet); the runtime latch apply refuses to flip
+#        while they are listed (same table, lockstep).
+#      - the TELEMETRY-ONLY whitelist (allowed forever):
+#        W1-W5 writers, xlogrecovery raw_ignored LOG, the R4 migration
+#        binding (merge_recovered_lsn == 0 source-zero evidence).
+#
+#    The default (strict) mode is the post-bit22 proof gate: GREEN = every
+#    correctness call site is telemetry, GATE-BOUND behind the idiom, or
+#    closed.  `--deferred-ok` prints (not fails) the GATE-BOUND/KNOWN-
+#    DEFERRED sites for the cutover audit.
 #
 # IDENTIFICATION
 #    scripts/ci/check-wal-state-correctness-census.sh
@@ -41,9 +45,8 @@
 #
 # NOTES
 #    Strategy: enumerate the production correctness call sites of the
-#    wal-state registry read/update APIs and compare against the
-#    telemetry whitelist.  `--deferred-ok` prints (not fails) the
-#    known-deferred sites; the default (strict) mode is the bit22 gate.
+#    wal-state registry read/update APIs and classify each against the
+#    telemetry whitelist, the GATE-BOUND list and the KNOWN-DEFERRED list.
 #
 #-------------------------------------------------------------------------
 
@@ -53,9 +56,16 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 MODE="${1:-strict}"
+case "$MODE" in
+	--deferred-ok|-d) MODE="deferred-ok" ;;
+esac
 
 # The registry read/update entry points whose call sites this census counts.
 APIS='cluster_wal_state_read_slot|cluster_wal_state_update_own'
+
+# The gate idiom anchor.  Every GATE-BOUND file must contain this call; a
+# refactor that removes the gate without updating the list is a violation.
+GATE_ANCHOR='cluster_r4_bit22_cutover_active'
 
 # Telemetry-only whitelist (file:line-prefix or file).  Every other
 # production call site of the APIs above is a census violation.
@@ -71,28 +81,23 @@ TELEMETRY_OK=(
 	'src/backend/cluster/cluster_debug.c'          # observability SRF dump
 )
 
-# Known-deferred correctness sites (see header).  Listed explicitly so the
-# cutover audit can track them; they must move to the canonical root (or be
-# formally retired) before bit22 opens.
-# G1b step 4 (2026-08-18, increments 28-31): recovery_plan.c +
-# recovery_worker.c + cluster_thread_recovery_orchestrator.c migrated to the
-# canonical control root / pre-IR pinned projection and removed — their
-# registry reads are gone.
-# 增量 39 / 补记 43-44 (2026-08-18, batch 1 interim registration): the G1b
-# step-4 pre-bit22 root-only order was ruled an inversion of the frozen
-# §17.8/§17.9 cutover semantics.  recovery_plan.c + recovery_worker.c regain
-# their registry reads behind the bit22-gate idiom
-# (cluster_r4_bit22_cutover_active); pre-bit22 those reads are the LEGAL
-# authority source.  They are registered here so the interim strict census
-# keeps lockstep with the runtime table; the KNOWN-DEFERRED -> GATE-BOUND
-# semantic flip (census as the post-bit22 static proof) lands in batch 3.
-# 补记 46 (batch 1 补充): orchestrator window derivation also regained its
-# pre-bit22 registry read (bb7fda782e^ shape restored under the gate idiom).
-DEFERRED=(
-	'src/backend/cluster/cluster_hw_remaster.c'
+# GATE-BOUND correctness sites (增量 39 §B / 补记 43-44): registry reads
+# restored behind the bit22 gate idiom — legal pre-bit22 (§17.8), statically
+# unreachable post-bit22 (monotonic latch).  Not counted; anchor-checked.
+GATE_BOUND=(
 	'src/backend/cluster/cluster_recovery_plan.c'
 	'src/backend/cluster/cluster_recovery_worker.c'
 	'src/backend/cluster/cluster_thread_recovery_orchestrator.c'
+)
+
+# KNOWN-DEFERRED correctness sites: ungated registry reads that stay
+# §17.8-correct until the bit22 cutover round closes them in the same commit
+# (hw_remaster.c: validated_min <- registry highest_lsn; its root branch
+# enters with the cutover round, 增量 39 §B S4).  strict counts them; the
+# runtime latch apply (cluster_r4_bit22_cutover_latch_apply) refuses while
+# they are listed — same table, lockstep-checked below.
+KNOWN_DEFERRED=(
+	'src/backend/cluster/cluster_hw_remaster.c'
 )
 
 violations=0
@@ -116,8 +121,21 @@ while IFS=: read -r file line rest; do
 	if [ "$ok" = 1 ]; then
 		continue
 	fi
+	gated=0
+	for g in "${GATE_BOUND[@]}"; do
+		case "$file" in
+			"$g"*) gated=1 ;;
+		esac
+		[ "$gated" = 1 ] && break
+	done
+	if [ "$gated" = 1 ]; then
+		if [ "$MODE" = "deferred-ok" ]; then
+			echo "gate-bound: $file:$line"
+		fi
+		continue
+	fi
 	deferred=0
-	for d in "${DEFERRED[@]}"; do
+	for d in "${KNOWN_DEFERRED[@]}"; do
 		case "$file" in
 			"$d"*) deferred=1 ;;
 		esac
@@ -127,41 +145,51 @@ while IFS=: read -r file line rest; do
 		if [ "$MODE" = "deferred-ok" ]; then
 			echo "deferred: $file:$line"
 		else
-			echo "VIOLATION (deferred, blocks bit22): $file:$line"
+			echo "VIOLATION (KNOWN-DEFERRED, must close in the bit22 cutover round): $file:$line"
 			violations=$((violations + 1))
 		fi
 		continue
 	fi
-	echo "VIOLATION (unlisted correctness read/write): $file:$line"
+	echo "VIOLATION (ungated correctness read/write): $file:$line"
 	violations=$((violations + 1))
 done < <(grep -nE "$APIS" src/backend --include='*.c' -r 2>/dev/null || true)
 
+# GATE-BOUND anchor drift check: every listed file must contain the gate
+# idiom call, otherwise its registry reads are NOT proven post-bit22-
+# unreachable and the modeling breaks silently.
+for g in "${GATE_BOUND[@]}"; do
+	if ! grep -q "$GATE_ANCHOR" "$g"; then
+		echo "VIOLATION (GATE-BOUND drift: $g no longer contains the $GATE_ANCHOR gate idiom)"
+		violations=$((violations + 1))
+	fi
+done
+
 if [ "$violations" -gt 0 ]; then
-	echo "wal-state correctness census: $violations violation(s) — bit22 must NOT open."
+	echo "wal-state correctness census: $violations violation(s) — post-bit22 exactly-zero proof NOT established."
 	exit 1
 fi
 
 # Lockstep check: the runtime mirror table in cluster_wal_state.c
-# (cluster_wal_state_correctness_census_ok) must list EXACTLY the same
-# deferred sites as this script's DEFERRED list.  Closing a deferred site
-# removes it from both in the same commit; a mismatch means the runtime gate
-# and the static census disagree about whether bit22 may open.
+# (cluster_wal_state_correctness_census_ok, consulted by the latch apply)
+# must list EXACTLY the same KNOWN-DEFERRED sites as this script.  Closing a
+# deferred site removes it from both in the same commit; a mismatch means
+# the runtime self-check and the static census disagree about the cutover.
 CENSUS_TABLE='src/backend/cluster/cluster_wal_state.c'
 if [ -f "$CENSUS_TABLE" ]; then
 	table_sites=$(sed -n '/cluster_wal_state_census_deferred_sites\[\]/,/^};/p' "$CENSUS_TABLE" \
 		| grep -oE '"[a-z_./]+\.c"' | tr -d '"' || true)
-	# The script's DEFERRED entries carry src/... paths; the runtime table
-	# uses basenames — compare normalized basenames.
-	script_sites=$(printf '%s\n' "${DEFERRED[@]}" | sed 's#^.*/##' | grep -v '^$' || true)
+	# The script's KNOWN_DEFERRED entries carry src/... paths; the runtime
+	# table uses basenames — compare normalized basenames.
+	script_sites=$(printf '%s\n' "${KNOWN_DEFERRED[@]}" | sed 's#^.*/##' | grep -v '^$' || true)
 	table_diff=$(comm -3 <(printf '%s\n' $table_sites | sort) \
 		<(printf '%s\n' "$script_sites" | sort))
 	if [ -n "$table_diff" ]; then
-		echo "VIOLATION (lockstep drift between the runtime census table and the script DEFERRED list):"
+		echo "VIOLATION (lockstep drift between the runtime census table and the script KNOWN_DEFERRED list):"
 		printf '%s\n' "$table_diff" | sed 's/^/  /'
-		echo "bit22 must NOT open."
+		echo "the cutover round cannot close cleanly."
 		exit 1
 	fi
 fi
 
-echo "wal-state correctness census: clean (all registry call sites are telemetry)."
+echo "wal-state correctness census: clean (every correctness call site is telemetry, GATE-BOUND behind the bit22 idiom, or closed)."
 exit 0

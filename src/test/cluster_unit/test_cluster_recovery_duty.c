@@ -474,8 +474,11 @@ cluster_semantic_activation_ack_complete_matches(
 	return ut_ack_complete_ok;
 }
 
-/* RF-ROOT P7 G4: the runtime census gate stub.  The activate proof fails
- * closed while the census is RED (deferred correctness sites still linked). */
+/* RF-ROOT P7 G4: the runtime census stub.  批 3 / 补记 43-44: the census
+ * gate moved from the activate proof to the bit22 latch apply (cutover
+ * round binding), so this stub now only serves the "census must not gate
+ * activate" assertion in test_activate_authority_requires_complete_ack_round.
+ */
 static bool ut_census_ok = false;
 
 bool
@@ -646,13 +649,16 @@ UT_TEST(test_create_authority_requires_complete_ack_round)
 		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
 }
 
-UT_TEST(test_activate_authority_requires_complete_ack_round_census)
+UT_TEST(test_activate_authority_requires_complete_ack_round)
 {
-	/* RF-ROOT P7 G3 (DSH review note 28: the bit22 OPEN gate needs the
-	 * census strict gate as a runtime call): the activate proof demands
-	 * coordinator identity, the PREPARED-stage all-member COMPLETE ACK
-	 * bound to the round (W6 clause 3 CLOSED binding), bit22 in the target,
-	 * and a GREEN runtime census.  Fail-closed on each. */
+	/* RF-ROOT P7 G3 (DSH review note 28 + 批 3 / 补记 43-44): the activate
+	 * proof demands coordinator identity, the PREPARED-stage all-member
+	 * COMPLETE ACK bound to the round (W6 clause 3 CLOSED binding), and
+	 * bit22 in the target.  The runtime census gate was REMOVED here in
+	 * batch 3 — the census is the post-bit22 proof and binds inside the
+	 * cutover round at the latch apply
+	 * (cluster_r4_bit22_cutover_latch_apply), not as a pre-bit22
+	 * precondition on activate.  Fail-closed on each remaining check. */
 	ClusterControlRootFileToken token;
 	ClusterControlRootMigrationRoundV1 round;
 	uint8 sha[32];
@@ -675,16 +681,17 @@ UT_TEST(test_activate_authority_requires_complete_ack_round_census)
 	cluster_node_id = 0;
 	memset(sha, 0x11, sizeof(sha));
 
-	/* Census RED -> refused (补记 28: runtime call, fail-closed). */
+	/* 批 3: the census no longer gates activate — a RED census (deferred
+	 * hw_remaster still linked) must NOT refuse the ACK-bound proof. */
 	ut_census_ok = false;
 	ut_ack_complete_ok = true;
 	ut_ack_complete_calls = 0;
-	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+	UT_ASSERT(cluster_control_root_activate_authority_current_v1(
 		&token, sha, &round));
-	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
 
-	/* Census GREEN + ACK COMPLETE + bit22 target -> granted, and the
-	 * activate proof demands the PREPARED stage (W6 clause 3). */
+	/* ACK COMPLETE + bit22 target -> granted, and the activate proof
+	 * demands the PREPARED stage (W6 clause 3). */
 	ut_census_ok = true;
 	ut_ack_min_stage = 0;
 	UT_ASSERT(cluster_control_root_activate_authority_current_v1(
@@ -700,7 +707,7 @@ UT_TEST(test_activate_authority_requires_complete_ack_round_census)
 	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
 	ut_ack_complete_ok = true;
 
-	/* Non-coordinator -> refused BEFORE any ACK/census read (fail-fast). */
+	/* Non-coordinator -> refused BEFORE any ACK read (fail-fast). */
 	cluster_node_id = 1;
 	ut_ack_complete_calls = 0;
 	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
@@ -1303,7 +1310,7 @@ main(void)
 	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
 	UT_RUN(test_fpw_sticky_publishes_canonical_flag);
 	UT_RUN(test_create_authority_requires_complete_ack_round);
-	UT_RUN(test_activate_authority_requires_complete_ack_round_census);
+	UT_RUN(test_activate_authority_requires_complete_ack_round);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
 	UT_RUN(test_owner_rejoin_rejects_open_stale_owner_frozen);
 	UT_RUN(test_clean_close_retry_transient_refusal_then_success);

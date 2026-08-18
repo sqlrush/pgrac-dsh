@@ -212,6 +212,19 @@ cluster_epoch_get_current(void)
 	return test_current_epoch;
 }
 
+/* 批 3 (增量 39 §C / 补记 44 设计点 ②): the runtime census self-check
+ * stub — the bit22 latch apply consults it; RED (a KNOWN-DEFERRED site
+ * still linked) refuses the flip, so the cutover round must close every
+ * deferred site before the latch opens.  This binary does not link
+ * cluster_wal_state.o, hence the stub. */
+static bool ut_r4fsm_census_ok = true;
+
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return ut_r4fsm_census_ok;
+}
+
 bool
 cluster_qvotec_in_quorum(void)
 {
@@ -646,6 +659,7 @@ test_gate_reset(void)
 	test_current_epoch = 7;
 	test_read_barrier_count = 0;
 	test_advance_epoch_on_read_barrier = 0;
+	ut_r4fsm_census_ok = true;
 	test_peer_capability_matches = false;
 	test_peer_capability_match_calls = 0;
 	test_peer_capability_match_peer = -1;
@@ -4540,10 +4554,22 @@ UT_TEST(test_129_bit22_latch_rejects_zero_round_identity)
 	test_gate_reset();
 }
 
+UT_TEST(test_130_bit22_latch_apply_refused_while_census_red)
+{
+	test_gate_reset();
+	ut_r4fsm_census_ok = false; /* KNOWN-DEFERRED hw_remaster still linked */
+	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 1));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	ut_r4fsm_census_ok = true;
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 1));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(178);
+	UT_PLAN(179);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -4722,6 +4748,7 @@ main(void)
 	UT_RUN(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_round);
 	UT_RUN(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept);
 	UT_RUN(test_129_bit22_latch_rejects_zero_round_identity);
+	UT_RUN(test_130_bit22_latch_apply_refused_while_census_red);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

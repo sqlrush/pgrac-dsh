@@ -83,24 +83,23 @@ cluster_control_root_activate_authority_current_v1(
 	const uint8 expected_round_sha256[32],
 	const ClusterControlRootMigrationRoundV1 *round)
 {
-	/* RF-ROOT P7 G3 (R4 cutover batch, specs-local increment 23): the
-	 * activate proof — the bit22 OPEN gate.  This process must be the
-	 * round's coordinator; the ACK table must be COMPLETE (every member
-	 * observed == expected) AND stand at (or beyond) the PREPARED stage
-	 * (W6 clause 3: only the PREPARED-stage all-member ACK is the CLOSED
-	 * binding that opens bit22); the round must carry bit22 in its target
-	 * bitmap; the runtime census gate must pass (补记 28: the census strict
-	 * gate is a runtime call, not only a documented promise).  Fail-closed
-	 * on any mismatch.  The expected token/sha freshness is established by
-	 * the caller against the canonical PREPARED image. */
+	/* RF-ROOT P7 G3 (R4 cutover batch, specs-local increment 23 + 批 3 /
+	 * 补记 43-44): the activate proof — the bit22 OPEN gate.  This process
+	 * must be the round's coordinator; the ACK table must be COMPLETE (every
+	 * member observed == expected) AND stand at (or beyond) the PREPARED
+	 * stage (W6 clause 3: only the PREPARED-stage all-member ACK is the
+	 * CLOSED binding that opens bit22); the round must carry bit22 in its
+	 * target bitmap.  Fail-closed on any mismatch.  The runtime census gate
+	 * was REMOVED here (批 3): the pre-bit22 census requirement forced the
+	 * inverted root-only cutover order; the census now binds INSIDE the
+	 * cutover round at the latch apply (cluster_r4_bit22_cutover_latch_apply
+	 * refuses while KNOWN-DEFERRED sites remain).  The expected token/sha
+	 * freshness is established by the caller against the canonical PREPARED
+	 * image. */
 	if (expected_token == NULL || expected_round_sha256 == NULL || round == NULL
 		|| cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES)
 		return false;
 	if ((int32) round->coordinator_node_id != cluster_node_id)
-		return false;
-	/* Census gate first (fail-fast before any ACK read): while the runtime
-	 * census is RED, bit22 must not open regardless of the ACK table. */
-	if (!cluster_wal_state_correctness_census_ok())
 		return false;
 	if (!cluster_semantic_activation_ack_complete_matches(
 			round->transition_epoch, round->prepare_generation,

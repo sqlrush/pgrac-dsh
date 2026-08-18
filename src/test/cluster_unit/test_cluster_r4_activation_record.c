@@ -20,6 +20,16 @@
 
 int cluster_node_id = 0;
 
+/* 批 3 (增量 39 §C): cluster_semantic_activation.c now consults the
+ * runtime census at the latch apply; this binary does not link
+ * cluster_wal_state.o.  GREEN stub — the RED refusal path is covered in
+ * test_cluster_r4_activation_fsm test_130. */
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return true;
+}
+
 void *
 palloc(Size size)
 {
@@ -1307,7 +1317,9 @@ UT_TEST(test_64_shmem_size_includes_exact_ack_table)
 	Size expected = MAXALIGN(sizeof(ClusterSemanticActivationShmem))
 					+ MAXALIGN(sizeof(ClusterSemanticActivationUtilityMailboxShmem))
 					+ MAXALIGN(CLUSTER_SEMANTIC_ACTIVATION_ACK_TABLE_BYTES)
-					+ MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem));
+					+ MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem))
+					/* 批 1/批 3: the bit22 cutover latch (增量 39 §B). */
+					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem));
 
 	UT_ASSERT_EQ(cluster_semantic_activation_shmem_size(), expected);
 }

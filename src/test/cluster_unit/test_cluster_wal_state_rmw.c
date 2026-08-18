@@ -859,12 +859,13 @@ UT_TEST(test_a1_w3_publish_stopped_cf_failure_preserves_active)
 
 UT_TEST(test_g4_census_gate_red_while_deferred_sites_linked)
 {
-	/* RF-ROOT P7 G4 (补记 28: the census strict gate is a runtime call):
-	 * the real runtime census table must be RED while the known-deferred
-	 * correctness sites are still linked, so the activate authority proof
-	 * fails closed and bit22 cannot open.  When G1b step 4 migrates the
-	 * last deferred site, this table entry is removed AND this test flips
-	 * to asserting GREEN in the same commit. */
+	/* RF-ROOT P7 G4 (补记 28 + 批 3 / 增量 39 §C): the runtime census
+	 * table must be RED while the KNOWN-DEFERRED site (hw_remaster) is
+	 * still linked, so the bit22 latch apply
+	 * (cluster_r4_bit22_cutover_latch_apply) refuses to flip — the census
+	 * GREEN is the POST-bit22 proof, bound inside the cutover round.  When
+	 * the cutover round closes hw_remaster, this table entry is removed
+	 * AND this test flips to asserting GREEN in the same commit. */
 	UT_ASSERT(!cluster_wal_state_correctness_census_ok());
 }
 

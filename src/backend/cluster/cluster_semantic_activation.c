@@ -35,6 +35,7 @@
 #include "cluster/cluster_semantic_activation.h"
 #include "cluster/cluster_sf_dep.h"
 #include "cluster/cluster_undo_smgr.h"
+#include "cluster/cluster_wal_state.h" /* GATE-BOUND census self-check (批 3, 补记 44 设计点 ②) */
 #include "common/cryptohash.h"
 #include "common/sha2.h"
 #include "port/atomics.h"
@@ -5346,6 +5347,12 @@ cluster_r4_bit22_cutover_active(void)
  *	so a losing apply never overwrites the bound round.  Monotonic: a second
  *	apply (any round) is rejected.  Returns true iff this call flipped the
  *	latch.
+ *
+ *	批 3 / 补记 44 设计点 ②: the runtime census self-check moved HERE from
+ *	the activate proof (recovery_duty.c) — census GREEN is the POST-bit22
+ *	proof, so it binds INSIDE the cutover round: the round must close every
+ *	KNOWN-DEFERRED correctness site (hw_remaster) before the latch flips.
+ *	While any deferred site remains the apply is refused (fail-closed).
  */
 bool
 cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
@@ -5355,6 +5362,8 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 
 	if (SemanticActivationBit22Latch == NULL
 		|| transition_epoch == 0 || prepare_generation == 0)
+		return false;
+	if (!cluster_wal_state_correctness_census_ok())
 		return false;
 	if (!pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
 										&expected, 1))
