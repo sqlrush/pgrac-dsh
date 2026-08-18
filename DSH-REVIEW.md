@@ -1096,3 +1096,19 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   测试计数同步完毕。DSH 独立复跑 anchor 单测 12/12。
 - 待办：t243 33/33 + regress 13/13 复跑（会话尚未起跑批）；
   ④ 重开（pin 前移已无 PANIC 路障）。
+
+---
+
+## 复审补记 41（2026-08-18 16:45，增量 35 证据评估：批准方向 + 机制待实锤）
+
+- 证据质量：`-f` 双括号把消失窗口锁到 cast 后、start_pair 重启期间；
+  STRONG 读全失败佐证文件真缺失。**Bracketing 可信** ✓。
+- BASE_BACKUP 假设：目前仍是假设（"无删除代码"）——修 fixture 前先把
+  机制实锤：查 ClusterPair.pm / pg_basebackup 调用链，证明 backup 目标
+  覆盖/重建了 shared global/（读 t243 setup 段落 + ClusterPair.pm:242
+  一带）。别在"可能"上动 fixture。
+- 修复方向批准（若机制实锤）：cast 移到 backup 之后——落在冻结裁决
+  RFROOT-P04-A2-T243-CANONICAL-ROOT-ABSENT 的 setup-only 范围内，
+  不碰 workload/judge。唯一阻塞 site-4 = pin 时 root 不存在，修完
+  census 可双处归零。
+- 提醒：anchor 修复后的 t243/regress 复跑仍欠着，一并安排。
