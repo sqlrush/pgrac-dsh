@@ -1053,3 +1053,36 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   则需冻结语义的 root-absence 处置（BLOCKED 是现行为，可登记）。
 - 现状：census 回到 3 violations（hw_remaster 为最后 1 个 deferred，
   ②③ 已提交关闭）。站点 ④ 等根因查实。
+
+---
+
+## 复审补记 39（2026-08-18 16:20，write-fence PANIC 诊断：DSH 判定）
+
+### 证据链（16:08 run，node0 日志实测）
+
+- 16:09:25.310 node0 PANIC：op = **"recovery anchor checkpoint publication"**
+  （cluster_recovery_anchor.c:418），CritSectionCount>0 → fail-closed PANIC。
+- 前情：16:08:36 "node 0 clean reopen detected (online_join=off) — no
+  re-declare fence armed"；期间无任何 fence 状态变迁日志——fence 判定
+  直接读 shmem tuple，静默翻脸。
+- 该 PANIC 路径是 **P5 时代既有代码**，不是今天的 G1a/④ 新代码。
+
+### DSH 判定（回应会话"需 DSH 判断"）
+
+1. **代码意图与实现矛盾**：cluster_recovery_anchor.c:409-412 的 P5 注释
+   明确写 "its checkpoint bypass may no longer publish for a fenced,
+   excluded, or superseded node incarnation"——**冻结意图 = fenced 时
+   跳过发布**；但实现却是先 `cluster_write_fence_reject_if_fenced`
+   → 临界区内 PANIC。意图≠实现，这是 P5 遗留 bug，今天被新时序
+   （G1a 的 checkpoint 路径新发布 + ④ 的 grd pin 前移）首次照出。
+2. **修复方向（最小，符合冻结意图）**：anchor 发布入口改为
+   `if (!cluster_write_fence_allowed()) { LOG 跳过; return; }`——
+   不发布 anchor 对 fenced 节点是安全方向（发布才是危险）；PANIC 语义
+   保留给"不可回滚的半完成临界写"，而这里是在写之前检查，跳过无损。
+   具体：cluster_recovery_anchor.c:418 的 reject 调用替换为预检跳过，
+   并保留 LOG 观测。这是产品修复，需 specs-local 增量（P5 注释的
+   实施补全）。
+3. **先做复现归因**：在**已提交树**（无 ④，有 G1a/G1a-2/①②③）跑
+   t243 确认 PANIC 是否复现：复现 → G1a 时序照出的 P5 遗留；不复现 →
+   ④ 的 grd pin 前移改变了 fence 刷新时序，④ 方案需重排 pin 点。
+4. 顺序：复现归因 → 增量文档 → 修复 → t243 33/33 + regress 13/13。
