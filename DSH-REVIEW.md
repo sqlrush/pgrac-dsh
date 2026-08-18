@@ -1385,3 +1385,40 @@ state（ALIVE 偏置防撕裂读：活 peer 的流可能 mid-write torn → 误�
 - **绿跑 node0 日志 plan 行必须恢复 registry 分类**（ALIVE/candidate 出现，
   不再是 127 unknown）——latch=false 下 S1 走 registry 的正面证据；
 - 问题 ① 的处置声明。
+
+---
+
+## 复审补记 47（2026-08-18 19:30，S3 orchestrator + worker_main 门控落地核准；census 锁步缺一站必须补）
+
+### 本轮新增（orchestrator.c +108/-59 —— 批 1 总量 11 文件 +543/-114）
+
+**S3 orchestrator gating 核准 ✅**：
+- post-bit22：`cluster_thread_recovery_projection_current` 消费（惰性，latch 永不置位 → 动态不可达，符合增量 39 §B 设计）
+- pre-bit22：`cluster_wal_state_read_slot` → `checkpoint_redo_lsn` / `highest_lsn` 直接读 registry slot，fail-closed 双重（slot 不可读→BLOCKED；界非法→BLOCKED），bb7fda782e^ 原形恢复
+- 无 state 检查——但 orchestrator 的 `dead_tid` 参数已由调用方确认为 dead，state 检查冗余，合理
+
+**S3 worker_main gating 核准 ✅**（worker.c:328，已在前轮 diff 中但因截断未显式审）：
+- post-bit22：projection_current 消费（惰性）；pre-bit22：registry read_slot + classify_slot + validate_stream，a9be5590d0^ 原形恢复
+
+### ❌ 必须补：census 锁步缺口
+
+**orchestrator.c 的 gate-bound registry 读（`cluster_wal_state_read_slot`）不在 DEFERRED 列表**：
+- census 脚本：DEFERRED 当前 = `hw_remaster.c, plan.c, worker.c`，缺 orchestrator.c
+- C 表（wal_state.c:821）：同缺
+- 脚本头部 "CLOSED" 标签仍声称 orchestrator 已迁移至 root-only（已过时——现在的 registry 读已恢复在 gate 内）
+- 严格 census 下 orchestrator 的 `cluster_wal_state_read_slot` 调用会被当成 ungated violation → RED
+
+**处置**：批 1 commit 前在 census 脚本 DEFERRED 列表 + C 表各加 `cluster_thread_recovery_orchestrator.c`，脚本头部注释同步更新，锁步保持。
+
+### ⚠️ 次要：pin_projection 仍无条件调用
+
+worker.c:484 的 `cluster_thread_recovery_pin_projection` 仍对每个 candidate 调用，STRONG+NULL→23 恒返 false，但返回值被丢弃——pre-bit22 下无害（slot 不 stamp 也无消费者），只是浪费一次计算。建议后续优化（加 latch 门：`if (bit22_active) pin_projection(...)`），不入批 1 阻塞项。
+
+### 批 1 验收清单（更新）
+
+- ✅ 单测 control_root 29/29 + r4_activation_fsm 178/178（前轮）
+- ⬜ 单测 plan / recovery_worker 聚焦套（本论跑批）
+- ⬜ t243 33/33 + regress 13/13
+- ⬜ 绿跑 node0 日志 plan 行恢复 registry 分类（不再是 127 unknown）
+- ⬜ **census 锁步补 orchestrator（见上）**
+- ⬜ 问题 ① 处置声明（S3 已门控，可结案；或 commit message 确认批 1 含 S3）
