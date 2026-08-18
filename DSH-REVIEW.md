@@ -1605,3 +1605,22 @@ latch apply census 自检、C 表锁步。P7 三批全部完成。
 - ✅ 批 3（d88369e91a）：census 重定义 + activate proof 门移除 + latch apply census 自检
 - ⬜ 任务 4：bit22 首开轮（coordinator 驱动 + latch 置位 + hw_remaster root 分支入场 +
   all-member CLOSED-ACK + census strict→GREEN）
+
+---
+
+## 复审补记 54（2026-08-18 20:20，任务 4 新增 crash-leg TAP 核准）
+
+### 270_wal_plan_candidate_crash_leg.pl（152 行，新文件）
+
+补记 44 §D 选项 2 落地：独立 crash 腿，不动 t243。
+
+- L1-L2：node1 写 WAL → stop('immediate') 崩溃（slot 2 保持 ACTIVE），sleep 12s
+  超 stale 窗口（10s）
+- L3：node0 clean restart，plan 从 registry 分类
+- **L4**：`like(qr/1 crashed candidate \[2\]/)` — 核心断言，计划产 candidate；
+  `unlike(qr/127 unknown/)` — 惰性签名禁入。**若 NULL-identity 回归，此断言必红** ✅
+- **L5**：`like(qr/recovery stream validation: thread 2 verdict/)` — worker 真启动、
+  真验证——惰性回归的第二道防线 ✅
+- L6：node1 crash-rejoin，pair 重建
+
+测试锁定补记 43 E1 惰性类，设计正确。不碰 t243（红线），符合补记 44 裁定。
