@@ -729,3 +729,12 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
 3. 删增量 21 补写 + 单测，t243 再跑 33/33、bail=0；
 4. cluster_regress 13/13；
 5. 全部绿 → 提交并等 DSH 复审，P6 冻结门才可重新申请。
+
+---
+🔴 [DSH-WATCH 08-18 10:43] t243 回归：上一轮完成 33 ok，新一轮完成仅 0 ok（reglog ��。
+   DSH 建议：先 diff 本轮相对上一绿轮的源码改动（git diff / 最近 uncommitted 变更），二分定位回归提交，
+   优先恢复上轮绿态（20:19 run-30 的 21ok）再继续；不要把回归归因为环境问题。
+
+---
+🔴 [DSH-WATCH 08-18 10:43] t243 启动级失败：跑批 bail 且仅 0 ok（reglog ��——节点启动/bootstrap 层被打断。
+   DSH 建议：查 tmp_check/log 两节点日志尾部的第一个 FATAL/PANIC；这类回归通常来自最新改动，先回退再修。

@@ -61,7 +61,13 @@ cluster_control_root_publish_authority_bind_v1(
 	if (root_publish_authority.active || expected_token == NULL || patch == NULL
 		|| (reason != CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
 			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN
-			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE))
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE
+			/* RF-ROOT P7 G1a: the checkpointer's per-checkpoint canonical
+			 * root advertisement (CHECKPOINT_ADVANCE, frozen 0x38 shape).
+			 * Sole publisher = the checkpointer; no cross-publisher mixing
+			 * with the three lifecycle reasons (DSH review note 1 F3
+			 * re-check: the token/patch/reason triple stays exact). */
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE))
 		return false;
 	memset(&root_publish_authority, 0, sizeof(root_publish_authority));
 	root_publish_authority.active = true;
@@ -697,6 +703,129 @@ cluster_control_root_thread_open_publish(uint64 boot_incarnation)
 						identity.root_lineage_seq + 1)));
 		return true;
 	}
+	return false;
+}
+
+/*
+ * cluster_control_root_checkpoint_advance_publish -- RF-ROOT P7 G1a: the
+ * checkpointer advertises its durable checkpoint in the canonical control
+ * root (STOP-01 §17.2 reason CHECKPOINT_ADVANCE, frozen 0x38 shape =
+ * CHECKPOINT | TAIL | RECOVERY_PROGRESS — owner lineage untouched).
+ *
+ *	The root's per-thread checkpoint_lower_lsn becomes the canonical
+ *	merged-recovery start / retention bound for the correctness readers
+ *	(G1b migration target); the wal-state registry keeps only telemetry.
+ *	Called by CreateCheckPoint AFTER the clusterwide CF(X) is released
+ *	(the frozen lock order forbids CF -> WALR and a held CF(X) deadlocks
+ *	the STRONG root read's own CF(S)) and BEFORE the guarded WAL recycle
+ *	(the advertised checkpoint must precede any removal of WAL it needs).
+ *	Non-fatal: on any failure the checkpoint still completes and the next
+ *	checkpoint retries (mirrors ClusterWalStatePublishCheckpointRedo).
+ *
+ *	record_crc32c = the exact CRC32C of the just-written checkpoint WAL
+ *	record (read back by the caller after XLogFlush).
+ */
+bool
+cluster_control_root_checkpoint_advance_publish(XLogRecPtr redo,
+												TimeLineID tli,
+												XLogRecPtr ckpt_record_start,
+												XLogRecPtr ckpt_record_end,
+												uint32 record_crc32c)
+{
+	ClusterControlRootIdentity identity;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootSnapshot published;
+	ClusterControlRootReadToken token;
+	ClusterControlRootReadToken published_token;
+	ClusterControlRootPatch patch;
+	ClusterControlRootResult root_result;
+
+	if (cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES
+		|| XLogRecPtrIsInvalid(redo) || tli == 0 || record_crc32c == 0
+		|| XLogRecPtrIsInvalid(ckpt_record_start)
+		|| XLogRecPtrIsInvalid(ckpt_record_end)
+		|| ckpt_record_start >= ckpt_record_end)
+		return false;
+	root_result = cluster_control_root_lookup_owner_by_node_runtime(
+		cluster_node_id, &identity, &snapshot, &token);
+	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		|| !cluster_recovery_duty_key_valid_v1(&identity)
+		|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
+			   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
+		|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		|| (snapshot.root_flags & CLUSTER_CONTROL_ROOT_FLAG_CHECKPOINT_VALID) == 0
+		|| snapshot.checkpoint_lower_lsn == 0)
+		return false; /* not an OPEN owner thread with a valid checkpoint */
+
+	/*
+	 * Only advance: a checkpoint redo at or below the root's current bound
+	 * (e.g. an end-of-recovery re-checkpoint) is a no-op — never move the
+	 * advertised bound backwards.
+	 */
+	if ((uint64) redo <= snapshot.checkpoint_lower_lsn)
+		return false;
+
+	memset(&patch, 0, sizeof(patch));
+	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
+				 | CLUSTER_CONTROL_ROOT_PATCH_TAIL
+				 | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	/* No LIFECYCLE bit in the 0x38 mask: the shape rule requires the
+	 * unmasked desired.lifecycle to stay at the zero value (UNUSED). */
+	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_UNUSED;
+	patch.desired.root_flags = snapshot.root_flags
+							   | CLUSTER_CONTROL_ROOT_FLAG_TAIL_VALID
+							   | CLUSTER_CONTROL_ROOT_FLAG_TAIL_LAST_RECORD_VALID;
+	patch.desired.checkpoint_tli = tli;
+	patch.desired.checkpoint_source_kind = CLUSTER_CONTROL_ROOT_CHECKPOINT_NATIVE_V1;
+	patch.desired.checkpoint_lower_lsn = (uint64) redo;
+	patch.desired.checkpoint_record_crc32c = record_crc32c;
+	/*
+	 * The just-written checkpoint record is the WAL-extent validation point:
+	 * the root's validated tail advances to the checkpoint record's end, and
+	 * the tail's LAST record = the checkpoint record itself (start + CRC).
+	 * This keeps the RANGE invariant validated_tail >= checkpoint_lower_lsn
+	 * exact while the canonical bound moves forward.
+	 */
+	patch.desired.tail_tli = tli;
+	patch.desired.tail_validation_kind = CLUSTER_CONTROL_ROOT_TAIL_WAL_RECORD_SCAN_V1;
+	patch.desired.validated_tail_lsn_exclusive = (uint64) ckpt_record_end;
+	patch.desired.tail_last_record_lsn = (uint64) ckpt_record_start;
+	patch.desired.tail_last_record_crc32c = record_crc32c;
+	/* recovery progress preserved from the durable snapshot. */
+	patch.desired.recovered_tli = snapshot.recovered_tli;
+	patch.desired.recovered_through_lsn_exclusive =
+		snapshot.recovered_through_lsn_exclusive;
+	patch.desired.recovered_last_record_lsn = snapshot.recovered_last_record_lsn;
+	patch.desired.recovered_last_record_crc32c =
+		snapshot.recovered_last_record_crc32c;
+
+	if (!cluster_control_root_publish_authority_bind_v1(
+			&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE))
+		return false;
+	root_result = cluster_control_root_compare_and_publish(
+		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE,
+		&published, &published_token);
+	cluster_control_root_publish_authority_clear_v1();
+	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& published.checkpoint_lower_lsn == (uint64) redo
+		&& published.checkpoint_record_crc32c == record_crc32c
+		&& published.validated_tail_lsn_exclusive == (uint64) ckpt_record_end) {
+		ereport(LOG,
+				(errmsg("cluster control root: thread %u checkpoint advanced by node %d "
+						"(redo %X/%X, tli %u, tail %X/%X, root publish seq " UINT64_FORMAT ")",
+						identity.origin_thread_id, cluster_node_id,
+						LSN_FORMAT_ARGS(redo), (unsigned) tli,
+						LSN_FORMAT_ARGS(ckpt_record_end),
+						published.root_publish_seq)));
+		return true;
+	}
+	ereport(WARNING,
+			(errmsg("cluster control root: checkpoint advance publish failed for thread %u "
+					"(result %d); the next checkpoint will retry",
+					identity.origin_thread_id, (int) root_result)));
 	return false;
 }
 

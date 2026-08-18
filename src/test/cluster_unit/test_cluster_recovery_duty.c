@@ -112,11 +112,35 @@ cluster_control_root_compare_and_publish(
 		return CLUSTER_CONTROL_ROOT_CAS_CONFLICT;
 	if (ut_root_publish_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
 		*out_snapshot = ut_root_snapshot;
-		out_snapshot->lifecycle = patch->desired.lifecycle;
-		out_snapshot->identity.origin_owner_incarnation =
-			patch->desired.identity.origin_owner_incarnation;
-		out_snapshot->identity.root_lineage_seq =
-			patch->desired.identity.root_lineage_seq;
+		/* Mirror the real apply_patch: only MASKED fields change. */
+		if ((patch->mask & CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE) != 0)
+			out_snapshot->lifecycle = patch->desired.lifecycle;
+		if ((patch->mask & CLUSTER_CONTROL_ROOT_PATCH_OWNER_LINEAGE) != 0) {
+			out_snapshot->identity.origin_owner_incarnation =
+				patch->desired.identity.origin_owner_incarnation;
+			out_snapshot->identity.root_lineage_seq =
+				patch->desired.identity.root_lineage_seq;
+		}
+		if ((patch->mask & CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT) != 0) {
+			out_snapshot->checkpoint_tli = patch->desired.checkpoint_tli;
+			out_snapshot->checkpoint_source_kind =
+				patch->desired.checkpoint_source_kind;
+			out_snapshot->checkpoint_lower_lsn =
+				patch->desired.checkpoint_lower_lsn;
+			out_snapshot->checkpoint_record_crc32c =
+				patch->desired.checkpoint_record_crc32c;
+		}
+		if ((patch->mask & CLUSTER_CONTROL_ROOT_PATCH_TAIL) != 0) {
+			out_snapshot->tail_tli = patch->desired.tail_tli;
+			out_snapshot->tail_validation_kind =
+				patch->desired.tail_validation_kind;
+			out_snapshot->validated_tail_lsn_exclusive =
+				patch->desired.validated_tail_lsn_exclusive;
+			out_snapshot->tail_last_record_lsn =
+				patch->desired.tail_last_record_lsn;
+			out_snapshot->tail_last_record_crc32c =
+				patch->desired.tail_last_record_crc32c;
+		}
 		memset(out_token, 0, sizeof(*out_token));
 	}
 	return ut_root_publish_result;
@@ -354,6 +378,59 @@ bool
 cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
 {
 	return ut_clean_departed;
+}
+
+UT_TEST(test_checkpoint_advance_publishes_canonical_bound)
+{
+	/* RF-ROOT P7 G1a: the checkpointer's canonical checkpoint advertisement
+	 * (CHECKPOINT_ADVANCE, frozen 0x38 shape) advances the root's
+	 * checkpoint_lower_lsn + record CRC + the validated tail (the just
+	 * written checkpoint record is the WAL-extent validation point);
+	 * owner lineage untouched. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	UT_ASSERT(cluster_control_root_checkpoint_advance_publish(
+		UINT64_C(0x2000000), 1, UINT64_C(0x1fffff0), UINT64_C(0x2000020),
+		UINT32_C(0x44556677)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 1);
+	UT_ASSERT(ut_root_publish_context_authorized);
+	UT_ASSERT_EQ((int)ut_root_published_reason,
+				 (int)CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE);
+	UT_ASSERT_EQ(ut_root_published_patch.mask, UINT64_C(0x38));
+	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	/* The 0x38 mask has no LIFECYCLE bit: desired.lifecycle stays 0. */
+	UT_ASSERT_EQ(ut_root_published_patch.desired.lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_UNUSED);
+	UT_ASSERT_EQ(ut_root_published_patch.desired.checkpoint_lower_lsn,
+				 UINT64_C(0x2000000));
+	UT_ASSERT_EQ(ut_root_published_patch.desired.checkpoint_record_crc32c,
+				 UINT32_C(0x44556677));
+	UT_ASSERT_EQ(ut_root_published_patch.desired.validated_tail_lsn_exclusive,
+				 UINT64_C(0x2000020));
+	UT_ASSERT_EQ(ut_root_published_patch.desired.tail_last_record_lsn,
+				 UINT64_C(0x1fffff0));
+	UT_ASSERT_EQ(ut_root_published_patch.desired.tail_last_record_crc32c,
+				 UINT32_C(0x44556677));
+	UT_ASSERT_EQ(
+		ut_root_published_patch.desired.identity.origin_owner_incarnation, 0);
+	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq, 0);
+
+	/* A non-advancing redo (<= current bound) is a no-op: zero publishes. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	UT_ASSERT(!cluster_control_root_checkpoint_advance_publish(
+		UINT64_C(0x1000000), 1, UINT64_C(0xfffff0), UINT64_C(0x1000020),
+		UINT32_C(0x44556677)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+
+	/* Not OPEN (e.g. CLOSED / RECOVERY_COMPLETE) is fail-closed. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT(!cluster_control_root_checkpoint_advance_publish(
+		UINT64_C(0x2000000), 1, UINT64_C(0x1fffff0), UINT64_C(0x2000020),
+		UINT32_C(0x44556677)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 }
 
 UT_TEST(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas)
@@ -888,7 +965,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(19);
+	UT_PLAN(20);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -899,6 +976,7 @@ main(void)
 	UT_RUN(test_owner_import_never_falls_back_from_split_jcmk);
 	UT_RUN(test_owner_import_slot_fallback_requires_absent_jcmk_and_claim);
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
+	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
 	UT_RUN(test_owner_rejoin_repairs_missed_clean_close_open_stale_owner);
 	UT_RUN(test_owner_rejoin_closed_lifecycle_routes_to_thread_open);

@@ -135,6 +135,9 @@ extern bool cluster_recovery_owner_rejoin_v1(int32 node_id,
 extern bool cluster_control_root_thread_clean_close_publish(void); /* RF-ROOT P6 */
 extern bool cluster_control_root_thread_open_publish(
 	uint64 boot_incarnation); /* RF-ROOT P6 */
+extern bool cluster_control_root_checkpoint_advance_publish(
+	XLogRecPtr redo, TimeLineID tli, XLogRecPtr ckpt_record_start,
+	XLogRecPtr ckpt_record_end, uint32 record_crc32c); /* RF-ROOT P7 G1a */
 extern ClusterFormationWitnessResult cluster_formation_witness_decide_v1(
 	const ClusterFormationSnapshotV1 *f1, const ClusterFenceAuthorityProof *authority,
 	const ClusterFormationSnapshotV1 *f2, uint16 origin_thread, bool opening_new_duty);

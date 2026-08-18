@@ -209,6 +209,7 @@
 #include "cluster/cluster_recovery_anchor.h" /* PGRAC: spec-5.6a per-node recovery anchor */
 #include "cluster/cluster_write_fence.h" /* PGRAC: RF-ROOT P6 checkpoint fence deferral */
 #include "cluster/cluster_lms.h" /* PGRAC: spec-5.6 GES-ready boundary for CF X */
+#include "cluster/cluster_recovery_duty.h" /* PGRAC: RF-ROOT P7 G1a canonical checkpoint advance */
 #endif
 
 extern uint32 bootstrap_data_checksum_version;
@@ -797,6 +798,7 @@ static void RemoveOldXlogFilesCluster(
 static void ClusterWalStateValidateHistoricalFpwOff(void);
 static void UpdateFullPageWritesForCheckpoint(void);
 static void ClusterWalStatePublishCheckpointRedo(XLogRecPtr redo);
+static uint32 ClusterCheckpointRecordCrc32(XLogRecPtr recptr); /* RF-ROOT P7 G1a */
 #endif
 static char *str_time(pg_time_t tnow);
 
@@ -8313,6 +8315,35 @@ CreateCheckPoint(int flags)
 		cluster_cf_unlock(ExclusiveLock);
 		cf_x_taken = false;
 	}
+#ifdef USE_PGRAC_CLUSTER
+	/*
+	 * RF-ROOT P7 G1a: advertise the durable checkpoint in the canonical
+	 * control root (CHECKPOINT_ADVANCE, frozen 0x38 shape) BEFORE the
+	 * guarded recycle removes any WAL the checkpoint needs.  The clusterwide
+	 * CF(X) is already released above (the frozen lock order forbids CF ->
+	 * WALR and a held CF(X) would deadlock the STRONG root read's own
+	 * CF(S)); the root's checkpoint_lower_lsn becomes the canonical
+	 * merged-recovery start / retention bound (G1b reader-migration
+	 * target).  The registry publish (ClusterWalStatePublishCheckpointRedo)
+	 * ran in the critical section above and stays telemetry.  Non-fatal:
+	 * any failure is retried by the next checkpoint.
+	 *
+	 * The END-OF-RECOVERY checkpoint is exempt: it runs before the first
+	 * authority (the frozen fence-deferral exemption), the root is not yet
+	 * canonical, and its WAL-read/CF interactions inside the recovery
+	 * window stall the phase-3 barrier (observed t243 bail).
+	 */
+	if (ClusterWalStateConfigured()
+		&& (flags & CHECKPOINT_END_OF_RECOVERY) == 0)
+	{
+		uint32		ckpt_record_crc = ClusterCheckpointRecordCrc32(recptr);
+
+		if (ckpt_record_crc != 0)
+			(void) cluster_control_root_checkpoint_advance_publish(
+				checkPoint.redo, checkPoint.ThisTimeLineID, ProcLastRecPtr,
+				recptr, ckpt_record_crc);
+	}
+#endif
 	if (ClusterWalStateConfigured())
 	{
 		ClusterWalRetentionE1Context context = {0};
@@ -9359,6 +9390,38 @@ ClusterWalStatePublishCheckpointRedo(XLogRecPtr redo)
 				 errmsg("could not publish durable checkpoint redo to the WAL state registry"),
 				 errdetail("WAL state update result was %d; the next checkpoint will retry.",
 						   (int) result)));
+}
+
+/*
+ * ClusterCheckpointRecordCrc32 -- RF-ROOT P7 G1a: read back the just-written
+ * (and XLogFlush()ed) checkpoint WAL record and return its exact on-disk
+ * CRC32C (the header's xl_crc, spec-4.5 layout).  The canonical control-root
+ * CHECKPOINT_ADVANCE carries this CRC so a future E2 candidate intersection
+ * against the actual checkpoint record is exact.  Returns 0 on any read
+ * failure (fail-closed: the checkpoint advance is skipped, next checkpoint
+ * retries).  The local read is durable and cheap (one WAL page).
+ */
+static uint32
+ClusterCheckpointRecordCrc32(XLogRecPtr recptr)
+{
+	XLogReaderState *reader;
+	XLogRecord *record;
+	uint32 crc = 0;
+	char *errormsg = NULL;
+
+	reader = XLogReaderAllocate(wal_segment_size, NULL,
+								XL_ROUTINE(.page_read = &read_local_xlog_page,
+										   .segment_open = &wal_segment_open,
+										   .segment_close = &wal_segment_close),
+								NULL);
+	if (reader == NULL)
+		return 0;
+	XLogBeginRead(reader, ProcLastRecPtr);
+	record = XLogReadRecord(reader, &errormsg);
+	if (record != NULL)
+		crc = record->xl_crc;
+	XLogReaderFree(reader);
+	return crc;
 }
 #endif
 
