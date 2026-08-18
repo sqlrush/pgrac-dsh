@@ -1681,3 +1681,31 @@ DSH 独立核验）。270 TAP 开发文件保留在工作区不提交，三个�
 ### 任务 4 开工授权
 
 按 §B 设计要点 + 增量 39 §E 落地。单次提交含全部 5 项。
+
+---
+
+## 复审补记 57（2026-08-18 21:40，任务 4 未提交代码中级评审：全部核准，一个 bash 小修）
+
+### 任务 4 变更（4 文件 +78/-39）
+
+1. **hw_remaster.c S4 双路径** ✅：post-bit22 两步读 → validated_tail_lsn_exclusive；
+   ABSENT 时 registry 判别器（highest_lsn!=0→minted-lost→BLOCKED_STRUCTURAL
+   fail-stop 不持 gate；无发布→never-minted→registry 降级）。pre-bit22 不变。
+   goto window_derived 共享 validated_end 推导。增量 37 硬约束兑现。
+2. **census 脚本** ✅：hw_remaster 从 KNOWN_DEFERRED→GATE_BOUND；KNOWN_DEFERRED
+   空数组；注释更新。
+3. **C 表** ✅：hw_remaster 移除，表空。census_ok() 返回 true。
+4. **单测** ✅：test_g4 断言从 RED→GREEN。
+
+### census 验证
+
+- strict：**GREEN**（exit 0，"clean"）✅
+- bash 小修：`KNOWN_DEFERRED[@]` 空数组时 `set -u` 产生 stderr 警告（line 185），
+  不影响 exit code。建议 commit 前用 `"${KNOWN_DEFERRED[@]+${KNOWN_DEFERRED[@]}}"` 消音。
+
+### 任务 4 验收
+
+- 单测：wal_state_rmw（census GREEN 断言）+ hw_remaster 聚焦套
+- t243 33/33 + regress 13/13
+- census strict GREEN（0 violation）
+- bash 警告消音
