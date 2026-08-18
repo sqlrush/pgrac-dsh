@@ -2965,3 +2965,30 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
   STRONG, ...)` 一次 → 填 slot；episode 结束/重启即视为 stale（对比
   pin_episode_epoch）。
 - 单测：pin 完整性（字段拷贝全等）+ token 比较 + episode 不匹配丢弃。
+
+---
+
+## 增量 32：实施④ 回归根因 + 回退（2026-08-18，t243 33→2 ok）
+
+### 回归根因（二分定位）
+
+- 实施③（bb7fda782e，orchestrator 迁移）t243 **33/33 绿**（复跑确认）；
+- 实施④（未提交：grd P0 pin + hw_remaster 投影迁移）→ t243 **2 ok**：
+  node1 崩溃（L4 stop immediate）→ node0 grd episode → P0 pin 读 root
+  tid 2 → **ABSENT**（root 文件在 L4 时缺失）→ pin 失败 → hw_remaster
+  BLOCKED → hw_gate=held → WAIT_CLUSTER watchdog → episode 卡死 →
+  CHECKPOINT 无法获取 CF。
+- **根因**：t243 的 L4 场景中 canonical root 文件（$shared/global/
+  pgrac_control_root）在 node1 崩溃时**不存在**（cast 断言通过后消失，
+  或 node 进程的 cluster_shared_data_dir 指向无 root 的目录）→ 投影
+  pin 无法取数 → 原 registry 读（写位置 watermark，独立于 root）可用。
+- 这是 **C 路线与 legacy TAP 基础设施的交互问题**：root 生命周期/
+  可见性在 t243 场景未就绪，非代码逻辑 bug。
+
+### 处置
+
+- **回退实施④**（丢弃 grd pin + hw_remaster 迁移），恢复实施③ 绿态；
+  hw_remaster 保持 registry 读 + census DEFERRED（1 violation）。
+- 待 DSH 指导：root 在 t243 L4 缺失的根因（cast 后文件去向 / GUC
+  cluster.shared_data_dir 配置 / 是否需要 t243 适配或 root 存在性
+  降级语义）。
