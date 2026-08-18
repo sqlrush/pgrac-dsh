@@ -1492,10 +1492,28 @@ cluster_control_root_build_migration_image(
 							 | CLUSTER_CONTROL_ROOT_FLAG_CHECKPOINT_VALID
 							 | CLUSTER_CONTROL_ROOT_FLAG_TAIL_VALID
 							 | CLUSTER_CONTROL_ROOT_FLAG_RECOVERED_VALID;
+		/* RF-ROOT P9 审计 #1b (增量 58): every snapshot_validate field
+		 * must be backed — lineage/publish/kind/tli/CRC.  The record
+		 * CRCs (checkpoint + tail-last) come from the WAL stream via
+		 * migration_wal_scan (step b-2); the fold-recovery bounds are
+		 * new-mint values (no recovery progress yet). */
+		record->identity.root_lineage_seq = 1;
+		record->root_publish_seq = 1;
 		record->checkpoint_lower_lsn = slot.checkpoint_redo_lsn;
 		record->checkpoint_tli = slot.tli;
+		record->checkpoint_source_kind
+			= CLUSTER_CONTROL_ROOT_CHECKPOINT_NATIVE_V1;
 		record->validated_tail_lsn_exclusive = slot.highest_lsn;
 		record->tail_tli = slot.tli;
+		record->tail_validation_kind
+			= CLUSTER_CONTROL_ROOT_TAIL_WAL_RECORD_SCAN_V1;
+		record->recovered_through_lsn_exclusive = slot.checkpoint_redo_lsn;
+		record->recovered_tli = slot.tli;
+		/* RF-ROOT P9 审计 #1b step-2 (增量 58, 待续): the checkpoint /
+		 * tail-last record CRCs come from the thread WAL stream; the scan
+		 * lands after the thread-stream reader mechanism is confirmed.
+		 * Until then the fields stay 0 and migration_image_validate
+		 * refuses the image (honest: the round cannot begin yet). */
 		record->published_at_usec = image.created_at_usec;
 		record->lifecycle_reason
 			= CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT;

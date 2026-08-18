@@ -7827,6 +7827,12 @@ pgrac_r4_bit22_cutover_begin(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 
 	memset(&round, 0, sizeof(round));
+	/* RF-ROOT P9 审计 #1a (增量 58): every wire-encoded field must be
+	 * filled — encode_round rejects a zeroed magic/version/bytes and the
+	 * create proof binds the coordinator incarnation. */
+	memcpy(round.magic, "PCRM", 4);
+	round.version = 1;
+	round.bytes = sizeof(round);
 	round.prepare_generation = snapshot.record_generation + 1;
 	round.transition_epoch = current_epoch;
 	round.source_feature_bitmap = snapshot.active_bits;
@@ -7836,6 +7842,8 @@ pgrac_r4_bit22_cutover_begin(PG_FUNCTION_ARGS)
 	round.admitted_bitmap_high = current_members_hi;
 	round.capability_sample_digest
 		= cutover_round_capability_digest(current_members_lo);
+	round.coordinator_incarnation = cluster_qvotec_get_self_incarnation();
+	round.coordinator_node_id = cluster_node_id;
 
 	build_result = cluster_control_root_build_migration_image(&image);
 	if (build_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY

@@ -4282,3 +4282,47 @@ RED 回归 / round 无效）时 observed 已发布（轮看似推进）但协调
 - r4fsm：open_applied_advance 的 census-RED 路径（stub）→ observed 不置
   位 + 表 stage 保持 PREPARED（新增断言，原 test_138 扩展或新用例）；
 - t243/regress 复跑。
+
+---
+
+## 增量 58：外部审计 #1 修复设计 —— bit22 首开可达（2026-08-18，
+## 补记 62 #1 / 63 第 3 项）
+
+### 三点拆解
+
+**a) operator round 字段补填（立即）**：pgrac_r4_bit22_cutover_begin 补
+magic="PCRM"、version=1、bytes=sizeof(round)、coordinator_incarnation
+= cluster_qvotec_get_self_incarnation()（encode_round 拒零字段）。
+
+**c) create proof 的 SAMPLE 前置 —— 选 (b)：bit22 轮的 create 免除 ACK
+前置**（论证）：
+- create（PREPARED mint）**不授予权威**（activation_state=PREPARED，
+  非 ACTIVE；root 在 activate 前无 authority）；
+- **W6 条款 3 的 CLOSED-ACK 绑定在 activate**：activate_authority_
+  current_v1 已要求 PREPARED-stage 全成员 COMPLETE（补记 28 核准的
+  proof）——**create 免除 ACK 与 CLOSED 绑定不冲突**（绑定在开门点）；
+- SAMPLE 是 R4 能力采样语义（bit22 轮绕过——成员集由 begin 的
+  current_authority + IC 采样承担）；
+- 实施：create_authority_current_v1 的 ACK-COMPLETE 检查对 round target
+  含 bit22 时跳过（保留协调者身份 + feature bit 白名单检查）；
+  R4 round（无 bit22）原样。
+
+**b) image 字段补填（含 WAL 读取）**：
+- identity.root_lineage_seq = 1（migration_image_validate 强制）；
+- root_publish_seq = 1（新 mint）；
+- checkpoint_source_kind = NATIVE_V1；tail_validation_kind =
+  TAIL_WAL_RECORD_SCAN_V1；
+- **checkpoint_record_crc32c / tail_last_record_lsn / tail_last_record_
+  crc32c：从 WAL 读取**（XLogReader 读 checkpoint_redo_lsn 处的 CheckPoint
+  记录 CRC + validated 界前最后完整记录）——新实现（读 checkpoint 记录 +
+  尾记录，~100 行）；
+- recovered_through = checkpoint_lower、recovered_tli = checkpoint_tli
+  （migration 无恢复进度——== checkpoint 时不要求 recovered_last）；
+- 不得只设 VALID flags 不填字段（审计命中）。
+
+### 验收
+
+- operator 单测端到端（stub 成员 ACK 表 → begin 返回 true——create 过
+  migration_image_validate）；
+- r4fsm/control_root 补字段断言；
+- t243/regress 复跑。

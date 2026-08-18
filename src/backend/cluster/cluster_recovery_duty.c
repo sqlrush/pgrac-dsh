@@ -60,7 +60,18 @@ cluster_control_root_create_authority_current_v1(
 		return false;
 	if ((int32) round->coordinator_node_id != cluster_node_id)
 		return false;
-	if (!cluster_semantic_activation_ack_complete_matches(
+	/* RF-ROOT P9 审计 #1c (增量 58, 补记 63 选项 b): the bit22 cutover
+	 * round's create is EXEMPT from the SAMPLE-stage ACK precondition —
+	 * create only mints the PREPARED root (no authority granted until
+	 * activate), and the W6 clause-3 CLOSED-ACK binding lives in the
+	 * activate proof (activate_authority_current_v1 requires the
+	 * PREPARED-stage all-member COMPLETE).  The SAMPLE stage is R4
+	 * capability sampling, which the cutover round bypasses (member set +
+	 * capabilities come from current_authority + IC sampling in begin).
+	 * R4 rounds (no bit22) keep the frozen precondition. */
+	if ((round->target_feature_bitmap
+		 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		&& !cluster_semantic_activation_ack_complete_matches(
 			round->transition_epoch, round->prepare_generation,
 			round->admitted_bitmap_low, round->admitted_bitmap_high,
 			round->source_feature_bitmap, round->target_feature_bitmap,
