@@ -1624,3 +1624,28 @@ latch apply census 自检、C 表锁步。P7 三批全部完成。
 - L6：node1 crash-rejoin，pair 重建
 
 测试锁定补记 43 E1 惰性类，设计正确。不碰 t243（红线），符合补记 44 裁定。
+
+---
+
+## 复审补记 55（2026-08-18 21:20，270 TAP v2 重审：crash-leg→stale-peer 升级，核准）
+
+### v1→v2 变化（152→147 行）
+
+原版：node1 崩溃 → node0 单独重启运行 plan（人工构造）
+v2：node1 崩溃 → node1 自然 crash-rejoin 运行 plan（生产场景）
+
+- **核心机制**：node0 的 cluster_stats liveness tick 被 SIGHUP 拖慢到 60s，
+  node0 保持 cssd/formation ALIVE 但 registry last_updated 超 stale 窗口
+  （10s）→ node1 crash-rejoin 时 plan 从 registry 分类 node0 为
+  CRASHED_CANDIDATE
+- **断言**：`own thread 2, 1 crashed candidate [1]`（node1 看 node0 为候选）
+  + `unlike 127 unknown` + `stream validation: thread 1`
+- **时序**：crash 后 sleep 8s 等 cssd death detection(3s) + fail-stop epoch
+  bump + hw_remaster 落定，node1 再重启——自然 crash-rejoin 路径
+- **清理**：移除 `reg_slot_state` helper（不再直接读 slot state），L7 恢复
+  GUC 至 1000
+
+### 评估
+
+v2 比 v1 更接近生产场景：利用 crash-rejoin 天然路径而非人工重启。GUC 操纵
+仅在测试内且恢复。设计正确，无问题。
