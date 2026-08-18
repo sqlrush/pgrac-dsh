@@ -2863,3 +2863,19 @@ C. **保持 BLOCKED**：root 无写位置期间 revalidate 返回 UNREADABLE →
 
 - A 的"预检范围收窄由 replay validated_end 兜底"论证；
 - tli 字段选择（tail_tli vs checkpoint_tli）。
+
+---
+
+## 增量 29 补记：worker.c:192 revalidate 实施（2026-08-18，随提交）
+
+- `cluster_recovery_worker_revalidate` 迁移 canonical root：STRONG read
+  （startup 准入）→ `validate_stream_from_root`（新 static）——锚 =
+  snapshot.validated_tail_lsn_exclusive（0 → UNREADABLE 同现语义），
+  tli = snapshot.tail_tli；claim 内容 + 段首页验证逻辑与 registry 版
+  逐字节一致（仅锚来源变化）。
+- 单测说明：validate_stream_from_root 依赖 worker.c static（claim 读 +
+  页 pread），且 worker.o 无 unit 链接——锚语义由既有
+  test_target_page_math / test_target_page_zero_lsn（header 内联）
+  覆盖，root 读路径由 t243 merge 场景覆盖。
+- census：worker.c:192 关闭，:247（worker_main）仍 deferred（行号
+  位移至 :309）——按文件登记不变，census 违规数保持 4。

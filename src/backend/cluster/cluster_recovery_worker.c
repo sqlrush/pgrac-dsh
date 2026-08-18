@@ -179,19 +179,81 @@ validate_stream(uint16 tid, const ClusterWalStateSlot *slot)
 }
 
 /*
+ * validate_stream_from_root -- RF-ROOT P7 G1b step 4 (site worker.c:192,
+ * specs-local increment 29 / 补记 31 item 4): the §3.2 stream precheck with
+ * the canonical root as the only source.  The registry's write-position
+ * watermark (highest_lsn) has no root equivalent; the target-page anchor is
+ * the canonical validated_tail_lsn_exclusive (the CHECKPOINT_ADVANCE
+ * validated extent) with its matching tail_tli.  The precheck range narrows
+ * to the checkpoint-validated extent; final stream completeness stays with
+ * the replay-side validated_end scan (fail-closed direction — a torn page
+ * after the validated boundary is caught there, never silently accepted).
+ */
+static ClusterRecoveryStreamVerdict
+validate_stream_from_root(uint16 tid, const ClusterControlRootSnapshot *snapshot)
+{
+	char fname[MAXFNAMELEN];
+	char segpath[MAXPGPATH];
+	uint64 segno;
+	uint32 page_offset;
+	uint64 pageaddr;
+	ClusterRecoveryStreamVerdict v;
+
+	if (snapshot == NULL
+		|| snapshot->validated_tail_lsn_exclusive == 0
+		|| snapshot->tail_tli == 0)
+		return CLUSTER_RECOVERY_STREAM_UNREADABLE; /* no validated bytes */
+
+	if (!validate_claim_content(tid))
+		return CLUSTER_RECOVERY_STREAM_SUSPECT;
+
+	if (!cluster_recovery_worker_target_page(snapshot->validated_tail_lsn_exclusive,
+											 wal_segment_size, &segno,
+											 &page_offset, &pageaddr))
+		return CLUSTER_RECOVERY_STREAM_UNREADABLE; /* no written bytes */
+
+	/* Segment file name is CONSTRUCTED (never a directory scan; the
+	 * claim file would sort after hex segment names -- spec-4.4 P0). */
+	XLogFileName(fname, (TimeLineID)snapshot->tail_tli, (XLogSegNo)segno, wal_segment_size);
+	snprintf(segpath, sizeof(segpath), "%s/thread_%u/%s", cluster_wal_threads_dir, (unsigned)tid,
+			 fname);
+
+	v = check_written_page(segpath, page_offset, pageaddr, tid);
+	if (v != CLUSTER_RECOVERY_STREAM_OK)
+		return v;
+
+	/* Cheap extra anchor: the segment's own first page. */
+	if (page_offset != 0) {
+		uint64 seg_start_addr = (uint64)segno * wal_segment_size;
+
+		v = check_written_page(segpath, 0, seg_start_addr, tid);
+		if (v != CLUSTER_RECOVERY_STREAM_OK)
+			return v;
+	}
+	return CLUSTER_RECOVERY_STREAM_OK;
+}
+
+/*
  * cluster_recovery_worker_revalidate -- spec-4.5 Q6 inline path.
  *	The merge coordinator calls this when the worker pool verdict is
  *	NONE/FAILED (workers did not finish in time): re-run the same
- *	validation serially in the startup process.
+ *	validation serially in the startup process.  RF-ROOT P7 G1b step 4:
+ *	the source is the canonical control root (STRONG read — the startup
+ *	process is the frozen CF(S) recovery admission), not the registry.
  */
 ClusterRecoveryStreamVerdict
 cluster_recovery_worker_revalidate(uint16 thread_id)
 {
-	ClusterWalStateSlot slot;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootReadToken token;
+	ClusterControlRootResult root_result;
 
-	if (cluster_wal_state_read_slot(thread_id, &slot) != CLUSTER_WAL_SLOT_OK)
+	root_result = cluster_control_root_read_canonical(
+		thread_id, NULL, CLUSTER_CONTROL_ROOT_READ_STRONG, &snapshot, &token);
+	if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
 		return CLUSTER_RECOVERY_STREAM_UNREADABLE;
-	return validate_stream(thread_id, &slot);
+	return validate_stream_from_root(thread_id, &snapshot);
 }
 
 /*
