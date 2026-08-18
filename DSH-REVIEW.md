@@ -581,3 +581,33 @@ t243 33/33 + "reopened by owner" 日志 + recovery_duty 单测绿 + regress
      "reopened by owner" 日志是硬验收；跑前请先全量重建（结构体/头文件
      变更后构建纪律）。
 - 之后：C 端到端测试（增量 19）落地 + cluster_regress 13/13。
+
+---
+
+## 复审补记 18（2026-08-18 09:50，L10 尾腿重开仍红——head gate 方向性缺陷诊断）
+
+### 事实
+
+- 09:39-09:41 run：ok 1-33 全过，但 ok 33 之后的 L10 尾腿（node1 clean-stop
+  → 最终重启）pg_ctl 62s 超时 bail；全 run 无 "reopened by owner" 类日志。
+- 该 run 测试的是 958b941130（commit 时点路由）；09:47 的增量 21 编辑在
+  run 之后，未参与本轮。
+
+### DSH 诊断（结构性，请验证后修）
+
+- head gate 的 non-OPEN 分支（recovery_duty.c ~349-352）：
+  `lineage == UINT64_MAX || owner >= admitted` 拒绝方向**对 CLOSED 是反的**。
+  clean-reopen 场景：root 存的 owner = 旧 boot 化身 I1；admitted = 新进程
+  化身 I2 > I1 → `I1 >= I2` 为假 → gate 拒绝 → THREAD_OPEN 路由不可达 →
+  root 永不重开 → 62s 超时。
+- run-60 之所以绿：重启落在 qvotec prior-incarnation self-slot 新鲜窗口
+  （admitted == I1，同化身）→ 侥幸过门。化身一变（正常 boot）即触发。
+- 修复方向（最小）：按 lifecycle 拆分 non-OPEN 分支——
+  ① RECOVERY_COMPLETE：保持 `owner >= admitted`（stale-owner 拒绝，
+     OWNER_REJOIN §17.4 语义）；
+  ② CLOSED：**不要**用 owner>=admitted 拒（fresh boot 化身更新是 THREAD_OPEN
+     主线语义），放行后由 CAS 单调性检查兜底（control_root.c:1750 已强制
+     desired.owner > current.owner + lineage+1 + 形状 CLOSED→OPEN）。
+- 增量 21 的 OPEN+owner<admitted 修复路径方向合理，勿回退；但要与 CLOSED
+  分支拆分一并落 spec（增量 21 文档补"CLOSED 分支豁免 owner>=admitted"）。
+- 验收仍以 t243 全绿 + reopen 日志 + regress 13/13 为准。
