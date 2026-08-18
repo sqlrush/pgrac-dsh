@@ -850,3 +850,19 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   （真正开 bit22）必须接入 census strict 强制门（scripts/ci/
   check-wal-state-correctness-census.sh，当前 5 violation 必须为 0 才可
   activate），并把该门做成运行时调用而非仅文档承诺。
+
+---
+
+## 复审补记 29（2026-08-18 13:35，G3 step 2-3 复审：通过）
+
+- b482d49669（activate authority proof + bit22 gate + runtime census）：
+  ① activate proof 四门齐全（coordinator 身份 / ACK COMPLETE 绑 round
+  且 stage>=PREPARED〔W6 条款 3〕/ bit22 target 白名单 / census 运行时门）；
+  ② **census 已做成运行时调用**（补记 28 硬要求兑现）：
+  cluster_wal_state_correctness_census_ok 用静态 deferred 表
+  （presence-based fail-closed，明确拒绝 liveness 注册=fail-open，理由正确）；
+  ③ CI 脚本与 C 表 lockstep 交叉校验（漂移即 "bit22 must NOT open"）。
+- DSH 独立复跑：recovery_duty 25/25、r4_activation_fsm 174/174、
+  wal_state 21/21；census 脚本实跑仍 RED（5 deferred violation，按设计）。
+- 通过。剩余：G1b step 4（关闭 5 个 deferred site，同一提交里从
+  C 表 + 脚本 DEFERRED 双处移除）→ census 转 GREEN 才是 bit22 可开时刻。
