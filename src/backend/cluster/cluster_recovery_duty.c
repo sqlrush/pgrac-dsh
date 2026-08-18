@@ -333,11 +333,17 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		|| (snapshot.lifecycle
 				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE
 			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-			/* RF-ROOT P6 (specs-local STOP-01 increment 13): a CLOSED root
-			 * is the same-owner clean release (THREAD_CLEAN_CLOSE contract);
-			 * the same-owner clean reopen is admitted under the exact
-			 * RECOVERY_COMPLETE pre-conditions below (monotonic newer
-			 * incarnation + write-once claim CRC + durable JCMK majority). */
+			/* RF-ROOT P6 (specs-local STOP-01 increment 20, corrected
+			 * design):  a CLOSED root is the same-owner clean release
+			 * (THREAD_CLEAN_CLOSE contract).  Its reopen is the frozen
+			 * STOP-01 THREAD_OPEN mainline — CLOSED -> OPEN with the
+			 * fresh boot incarnation and lineage+1, executed HERE (the
+			 * commit-time re-vet, by the coordinator holding the full
+			 * proof set:  write-once claim CRC + durable JCMK majority +
+			 * monotonic newer incarnation) because the phase-3 postmaster
+			 * driver has no PGPROC (S1 r=10) and the startup process is
+			 * forked only after phase-3, whose barrier waits on this very
+			 * commit — running the reopen later deadlocks. */
 			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& identity.origin_owner_incarnation != admitted_incarnation)
@@ -368,14 +374,14 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 				 | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
 				 | CLUSTER_CONTROL_ROOT_PATCH_TAIL
 				 | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
-	patch.expected_lifecycle = snapshot.lifecycle;
-	/* RF-ROOT P6 (specs-local STOP-01 increment 13): the head gate now
-	 * admits the CLOSED lifecycle for the same-owner clean reopen, so the
-	 * CAS must expect the OBSERVED lifecycle (RECOVERY_COMPLETE for the
-	 * crash-rejoin mainline, CLOSED for the clean reopen) instead of a
-	 * hardcoded RECOVERY_COMPLETE — otherwise every clean-reopen join
-	 * fails the compare against the still-CLOSED root forever.  The OPEN
-	 * case never reaches here (already-satisfied shortcut above). */
+	/* Frozen shapes (STOP-01 §17.4 + STOP-02): OWNER_REJOIN admits only the
+	 * RECOVERY_COMPLETE pre-lifecycle (crash-rejoin mainline); a CLOSED root
+	 * (clean release) reopens under the THREAD_OPEN reason with its frozen
+	 * CLOSED -> OPEN shape.  Same owner-lineage monotonicity + proof set. */
+	patch.expected_lifecycle =
+		(snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+		? CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
+		: CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
 	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
 	patch.desired.identity.origin_owner_incarnation = admitted_incarnation;
 	patch.desired.identity.root_lineage_seq = identity.root_lineage_seq + 1;
@@ -398,10 +404,16 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		snapshot.recovered_last_record_crc32c;
 
 	if (!cluster_control_root_publish_authority_bind_v1(
-			&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN))
+			&token, &patch,
+			(snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+			? CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN
+			: CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN))
 		return false;
 	root_result = cluster_control_root_compare_and_publish(
-		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
+		&token, &patch,
+		(snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+		? CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN
+		: CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
 		&published, &published_token);
 	cluster_control_root_publish_authority_clear_v1();
 	return root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY

@@ -2097,3 +2097,67 @@ CLOSED→OPEN 成功。放 test_cluster_control_root 或 recovery_duty 集成段
   recovery_duty 单测的 ut_root_publish_calls mock，补记 10.1.5）。
 - ①/②(OPEN)/③ 在 B 裁决前即可绿（均冻结行为）；②(CLOSED) 随 B 落地。
 - 提交节奏：随 B 裁决一起落（避免与裁决冲突的双写）。
+
+---
+
+## 增量 20：THREAD_OPEN 执行者接通（2026-08-18，补记 13-B 裁决 = 按 DSH 倾向执行）
+
+### 裁决（用户 2026-08-18）
+
+clean-reopen 改走 STOP-01 冻结主线 THREAD_OPEN（CLOSED→OPEN）：
+① 先实现 THREAD_OPEN 路由接通 L10 场景 → ② t243 33/33 复证 →
+③ 再摘除 OWNER_REJOIN 的 CLOSED 允许（每步单独提交）。
+
+### 现状证据（2026-08-18 回退后 t243 run，post-revert 二进制 33/33）
+
+1. `cluster_control_root_thread_open_publish`（recovery_duty.c:506）已存在：
+   CLOSED→OPEN + owner=boot_incarnation + lineage+1 + 0x3b mask，冻结形状。
+2. 唯一调用点 = startup_phase.c:1594（phase-3 bind 循环，postmaster 上下文），
+   但 S1 准入（cluster_lock_acquire.c:216 注释原文）"The phase-3 THREAD_OPEN
+   retry therefore fails closed here (r=10)；the root reopen needs a PGPROC
+   executor (deferred to the L5 leg work)"——postmaster 无 PGPROC，AD-023 §4
+   冻结 StartupProcess-only（555890d2df 回退史，postmaster CF call count=0）。
+3. 回退后 t243 全 run **无一条 "reopened by owner"（THREAD_OPEN 成功 LOG）**，
+   但 L5/L10 全绿 → 实际重开 = join 链协调者的 OWNER_REJOIN+CLOSED
+   （增量 13 的 CAS）。
+4. 时序：joiner StartupXLOG 在 phase-3 之后、phase-4 之前；survivor join
+   commit 的重 vet 在 commit 时（可早于 joiner phase-4，增量 16 无门排水）。
+
+### 设计（修正版，2026-08-18 实证后定稿）
+
+**阴性结果（StartupXLOG 执行者方案，已废弃）**：THREAD_OPEN 移入
+StartupXLOG 与 ③（摘除 CLOSED）组合实测 t243 bail（pg_ctl start failed，
+L5 restore boot 卡 phase-3 60s）：startup 进程在 phase-3 **之后**才 fork，
+而 phase-3 barrier 依赖 survivor 的 join commit，commit 的 re-vet 又需要
+root OPEN —— 循环死锁（增量 16 同构）。postmaster phase-3 driver 无
+PGPROC（S1 r=10，AD-023 §4 冻结），不能执行。
+
+**终态设计（commit 时点 THREAD_OPEN 路由）**：
+
+- `cluster_recovery_owner_rejoin_v1`（commit 时点 re-vet，协调者执行）：
+  head gate 允许 CLOSED，但 CLOSED 分支走 **THREAD_OPEN reason** 的冻结
+  形状（expected CLOSED → desired OPEN + owner=admitted + lineage+1，
+  0x3b mask）；RECOVERY_COMPLETE 分支保持 OWNER_REJOIN（冻结 §17.4）。
+  协调者持完整 proof 集（write-once claim CRC + durable JCMK majority +
+  单调更新化身）——与既有 crash-rejoin 主线的 authority 模式一致；
+  时序与 P6 已验证的 OWNER_REJOIN+CLOSED 完全相同（commit 时点重开），
+  仅 reason/形状归位到冻结 THREAD_OPEN。
+- control_root patch_shape_valid：OWNER_REJOIN 严格 RECOVERY_COMPLETE-only
+  （③，已完成）；THREAD_OPEN 严格 CLOSED→OPEN（冻结，未动）。
+- phase-3 的 postmaster THREAD_OPEN 调用点移除（死代码，r=10 空转）。
+
+**证据**：t243 33/33 PASS（修正版，含 L5/L10 clean-reopen 全腿）；
+recovery_duty 18/18（CLOSED→THREAD_OPEN 路由断言：reason 捕获 =
+PUBLISH_THREAD_OPEN、expected CLOSED、owner=admitted、lineage+1）。
+
+- L10 serving-stale 变体（clean-close 被拒 → root 停 OPEN(old)）：THREAD_OPEN
+  不匹配 CLOSED，仍由冻结 FSM（survivor-driven recovery）承接；该变体
+  概率由 fence-deferral（94791471d5）+ leaver serving-rebind（run130/131）
+  已压低，残留以 t243 多轮取证评估。
+
+### 验收
+
+- t243 33/33（THREAD_OPEN 独担 clean-reopen）✓ 已达成；
+- recovery_duty 18/18（CLOSED 路由断言）✓ 已达成；
+- C 测试（增量 19）落地：RECOVERY_COMPLETE OWNER_REJOIN 成功 /
+  OPEN 与 CLOSED 的 OWNER_REJOIN INVALID_ARGUMENT / THREAD_OPEN CLOSED→OPEN 成功。

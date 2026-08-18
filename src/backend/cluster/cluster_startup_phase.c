@@ -1574,25 +1574,25 @@ phase_3_handler(PhaseRunFailContext *fail_ctx)
 		{
 			lms_generation = cluster_lms_get_lms_restart_generation();
 			/*
-			 * RF-ROOT P6 (STOP-01 frozen THREAD_OPEN, the Oracle
-			 * clean-reopen mainline):  bind the LMS generation into the
-			 * STARTING binding, then retry the root reopen every
-			 * iteration until it lands.  The components-only transport
-			 * proof (which the S1 recovery lock admission uses for the
-			 * clusterwide CF share-lock) reads the bound generation, and
-			 * the phase-2 cross-node storage contract can verify late
-			 * (the survivor's cssd publishes its probe response on the
-			 * heartbeat cadence).  The CAS is idempotent:  after the
-			 * first success the root is OPEN and later expected-CLOSED
-			 * attempts fail closed as harmless no-ops;  first-formation /
-			 * crash / already-OPEN roots never match the expected CLOSED
-			 * lifecycle either.
+			 * The clean-reopen mainline (STOP-01 frozen THREAD_OPEN) is
+			 * executed by the JOIN COMMIT path:  the coordinator's commit
+			 * re-vet (cluster_recovery_owner_rejoin_v1) issues the frozen
+			 * CLOSED -> OPEN CAS under the THREAD_OPEN reason when the
+			 * root is clean-closed (specs-local increment 20, corrected
+			 * design).  The postmaster phase-3 driver has no PGPROC and
+			 * its S1 admission fails closed (r=10), and the startup
+			 * process is forked only AFTER phase-3 — running the reopen
+			 * there deadlocks the phase-3 barrier, which waits on the
+			 * survivor's join commit, which re-vets the root.  The
+			 * components-only transport proof (which the S1 recovery lock
+			 * admission uses for the clusterwide CF share-lock) reads the
+			 * bound generation, and the phase-2 cross-node storage
+			 * contract can verify late (the survivor's cssd publishes its
+			 * probe response on the heartbeat cadence).
 			 */
 			if (cluster_phase4_wal_state_configured()) {
 				(void)cluster_authority_readiness_bind_recovery_generation(
 					lms_generation);
-				(void)cluster_control_root_thread_open_publish(
-					cluster_qvotec_get_self_incarnation());
 			}
 			if (!cluster_authority_readiness_bind_recovery_generation(
 					lms_generation)) {
