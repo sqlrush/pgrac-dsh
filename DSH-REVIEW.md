@@ -611,3 +611,31 @@ t243 33/33 + "reopened by owner" 日志 + recovery_duty 单测绿 + regress
 - 增量 21 的 OPEN+owner<admitted 修复路径方向合理，勿回退；但要与 CLOSED
   分支拆分一并落 spec（增量 21 文档补"CLOSED 分支豁免 owner>=admitted"）。
 - 验收仍以 t243 全绿 + reopen 日志 + regress 13/13 为准。
+
+---
+
+## 复审补记 19（2026-08-18 10:20，P6 重新冻结审计终裁）
+
+### 审计表（DSH 逐项独立核证）
+
+| 条件 | 证据 | 结论 |
+|---|---|---|
+| A 回退增量 17 | 5074881fa7 | ✅ 已审（补记 13/14） |
+| B 摘除增量 13 + THREAD_OPEN 主线 | 958b941130 | ✅ 已审（补记 15-17） |
+| B 尾腿修复：门拆分 | b4fb9ece30（RECOVERY_COMPLETE 单独走 owner>=admitted；CLOSED 仅拒 lineage==UINT64_MAX）= 补记 18 处方 | ✅ 刚审 |
+| B 尾腿修复：增量 21 双 CAS | 3d5faac3ac（OPEN+owner<admitted+clean-departed → THREAD_CLEAN_CLOSE 关到 CLOSED → 落入 THREAD_OPEN 重开；理由绑定正确） | ✅ 刚审 |
+| t243 | 09:55 与 10:01 双轮 33ok、bail=0 | ✅ 独立核 reglog |
+| cluster_regress | **DSH 独立复跑 All 13 tests passed**（会话未跑，证据由 DSH 补） | ✅ |
+| 单测闭包 | 232 二进制 3 失败 = 8 断言（reconfig 77/92 + r4_static 9-13 + r4_activation 50；75/76 经 test-55 重写已转绿，pre-existing 从 10 降 8） | ✅ |
+| C 矩阵 | d7820ab33e | ⚠️ 待逐行补审 |
+
+### 两个小尾巴（不阻塞 P7，但 P6 归档前须清）
+
+1. cluster_lock_acquire.c 仍有 1 处 "TEMP "（P1 提交宣称清除，实际漏 1 处）。
+2. C 矩阵测试代码逐行审查未做（DSH 将补）。
+其余 26 个含 TEMP 文件均为更早 stage 遗留（catalog/planner 等），登记不阻塞。
+
+### 裁定
+
+P6 重新冻结条件实质满足：t243 双绿无 bail + regress 13/13 + 单测闭包 +
+A/B/C 落地。**放行 P7**；上述两个小尾巴在 P7 推进中顺手清理并提交。
