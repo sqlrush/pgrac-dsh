@@ -138,6 +138,17 @@
       t243 33/33；census strict 仍 RED（5 deferred violation，按设计）。
       **待 DSH 复审**；剩余：coordinator R4 驱动接线（utility mailbox
       cutover）+ census strict 转 GREEN（deferred 站点关闭，G1b step 4）。
+- [x] **【补记 29 已到达】**：G3 step 2-3 复审通过（activate proof 四门 +
+      census 运行时门兑现；DSH 复跑 25/25+174/174+wal_state 21/21）。
+      剩余定序：G1b step 4 关闭 5 个 deferred site → census 转 GREEN。
+- [ ] **【P7 G1b step 4 设计稿已提交】**（2026-08-18，88d819eb38，
+      specs-local 增量 25）：5 个 deferred 站点降级为 NODE_LOCAL_AUTHORITY
+      类别（merged.authority 同型，解 R4 调度环）——plan.c:203 与
+      worker.c:192 实证在 startup 上下文但含 registry 独有语义（SCN 观测 /
+      写位置字段 root 无）；worker:247 / orchestrator:572 / hw_remaster:487
+      为 episode worker（CF(S) 不可行）+ registry 独有数据。census strict
+      转 GREEN 条件 = DEFERRED 空 + C 表与脚本 NODE_LOCAL_AUTHORITY 一致。
+      **待 DSH 复审设计后再实施**。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
