@@ -199,9 +199,7 @@ validate_stream_from_root(uint16 tid, const ClusterControlRootSnapshot *snapshot
 	uint64 pageaddr;
 	ClusterRecoveryStreamVerdict v;
 
-	if (snapshot == NULL
-		|| snapshot->validated_tail_lsn_exclusive == 0
-		|| snapshot->tail_tli == 0)
+	if (!cluster_recovery_worker_root_anchor_valid(snapshot))
 		return CLUSTER_RECOVERY_STREAM_UNREADABLE; /* no validated bytes */
 
 	if (!validate_claim_content(tid))
