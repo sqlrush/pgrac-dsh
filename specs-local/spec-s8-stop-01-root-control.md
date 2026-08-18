@@ -2419,3 +2419,31 @@ canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X
 4. G1b-C（worker/plan）：先探针取证 episode 窗口 CF(S) 可行性，可行则迁，
    不可行则按 hw_remaster 模式显式降级登记；
 5. G4 census 脚本（G1b 完成后归零）+ G3/G5（R4 接线 + bit22 ACK 门）。
+
+---
+
+## 增量 22 补记 5：G1b 边界收敛 + G4 census 落地（2026-08-18）
+
+### G1b 实施结果（按上下文实证）
+
+- **G1b-A 完成**（c79c078221）：recovery_merge engage gate + merge_begin
+  迁 canonical root（startup 上下文，CF(S) 合法；:1366 同窗 root 读先例）。
+  等价格式：root.checkpoint_lower_lsn（G1a 刷新）→ 合并起点；
+  root.FLAG_FPW_WAS_OFF（G1a-2 刷新）→ 53RA3 门；root.validated_tail →
+  validated_min（VALIDATED 界强于 registry 写位置界；间隔窗口由扫描自身
+  记录 framing 兜底）。t243 33/33 ×2。
+- **B4（plan 生成）**：上下文 = startup（可迁），但 (a) verdict 分类的
+  语义映射（registry state+last_updated → root lifecycle+published_at）
+  非恒等；(b) **SCN 维度无 root 等价字段**（root 仅 bit21 conservative
+  下界，非 highest_scn）→ 需 spec 级决策，暂留 registry（降级登记）。
+- **B5/B6/hw_remaster**：窗口推导实测在 thread-recovery worker（episode
+  上下文）——与 hw_remaster 同型 CF(S) 不可行 → 保留 registry +
+  显式降级登记，待 R4 时代（G3/G5）的 CF(S)/episode CF(X) 窗口调度。
+
+### G4 census 落地（scripts/ci/check-wal-state-correctness-census.sh）
+
+- 枚举生产 registry read/update 调用点 vs telemetry 白名单；5 个
+  known-deferred 站点（plan/worker×2/hw_remaster/orchestrator）显式登记。
+- **strict 模式 = bit22 打开强制门**：当前 RED（5 deferred）→ G5 的
+  bit22 打开被 census 拦住（fail-closed 正确方向）；deferred 站点全部
+  关闭后转 GREEN 才允许 R4 迁移轮打开 bit22。
