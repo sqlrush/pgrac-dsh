@@ -1319,7 +1319,9 @@ UT_TEST(test_64_shmem_size_includes_exact_ack_table)
 					+ MAXALIGN(CLUSTER_SEMANTIC_ACTIVATION_ACK_TABLE_BYTES)
 					+ MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem))
 					/* 批 1/批 3: the bit22 cutover latch (增量 39 §B). */
-					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem));
+					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem))
+					/* 增量 46: the cutover round seam (step ②). */
+					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverSeamShmem));
 
 	UT_ASSERT_EQ(cluster_semantic_activation_shmem_size(), expected);
 }

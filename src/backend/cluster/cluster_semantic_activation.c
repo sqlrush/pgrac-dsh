@@ -171,6 +171,27 @@ typedef struct ClusterR4Bit22CutoverLatchShmem {
 } ClusterR4Bit22CutoverLatchShmem;
 
 static ClusterR4Bit22CutoverLatchShmem *SemanticActivationBit22Latch = NULL;
+
+/*
+ * RF-ROOT P7 (增量 46, step ②): the bit22 cutover round seam.  The round
+ * DRIVER (step ④) stores the PREPARED file token + round sha + round copy
+ * here after create_prepared; the coordinator LMON consumes it when the
+ * PREPARED-stage all-member ACK is COMPLETE, to call
+ * cluster_control_root_activate_prepared (executor: coordinator LMON —
+ * CF(X) has no frozen executor, AD-023 §4 binds CF(S) only; 补记 17-19
+ * precedent).  Kept OUT of the frozen ACK table and the frozen gate struct.
+ */
+typedef struct ClusterR4Bit22CutoverSeamShmem {
+	pg_atomic_uint32 valid; /* 1 = staged by the driver */
+	uint32 reserved;
+	uint64 transition_epoch; /* round identity, cross-checked vs the ACK table */
+	uint64 prepare_generation;
+	ClusterControlRootFileToken file_token;
+	uint8 round_sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootMigrationRoundV1 round;
+} ClusterR4Bit22CutoverSeamShmem;
+
+static ClusterR4Bit22CutoverSeamShmem *SemanticActivationBit22Seam = NULL;
 static uint32 semantic_activation_local_inflight[2][64];
 static int semantic_activation_exit_hook_pid;
 static uint64 semantic_activation_lmon_record_read_seq;
@@ -407,6 +428,11 @@ static bool semantic_activation_ack_lmon_progress_member_open_applied(
 static bool semantic_activation_ack_lmon_finish_member_open_applied(
 	const ClusterSemanticActivationAckTableV1 *before,
 	bool latch_applied);
+static bool semantic_activation_ack_lmon_open_applied_advance(
+	const ClusterSemanticActivationAckTableV1 *before,
+	uint64 current_members_lo, uint64 current_members_hi,
+	uint64 current_epoch, int32 current_coordinator_node,
+	uint32 local_capability_word);
 
 static void semantic_activation_ack_ingress_init(
 	SemanticActivationAckIngress *ingress) pg_attribute_unused();
@@ -2543,6 +2569,18 @@ semantic_activation_ack_lmon_install_commit(
 			current_epoch, current_coordinator_node, cluster_node_id,
 			local_capability_word))
 		return false;
+	/* RF-ROOT P7 (增量 46, step ②): the bit22 cutover round branches off
+	 * here — the PREPARED-stage all-member CLOSED-ACK (W6 clause 3) is
+	 * COMPLETE, so the coordinator activates the canonical root and
+	 * advances the round to OPEN_APPLIED instead of the R4 COMMIT_APPLIED
+	 * path (增量 44 option A: the cutover round is an independent stage
+	 * sequence). */
+	if ((desired.target_feature_bitmap
+		 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+		return semantic_activation_ack_lmon_open_applied_advance(
+			&before, current_members_lo, current_members_hi,
+			current_epoch, current_coordinator_node,
+			local_capability_word);
 	if (!semantic_activation_record_cas_mailbox_poll_completion(
 			semantic_activation_lmon_commit_cas_seq, &result))
 		return true;
@@ -2599,6 +2637,98 @@ semantic_activation_ack_lmon_install_commit(
 	origin->unsent_members_lo = UINT64_C(0x0e);
 	origin->active = true;
 	return semantic_activation_ack_lmon_send_origin_requests();
+}
+
+/*
+ * RF-ROOT P7 (增量 46, step ②): the coordinator-side OPEN_APPLIED advance
+ * for the bit22 cutover round.  Called when the PREPARED-stage all-member
+ * ACK is COMPLETE and the round target carries bit22.  Executor of the
+ * root activation is the coordinator LMON: CF(X) has no frozen executor
+ * (AD-023 §4 binds CF(S) only) and the 补记 17-19 precedent approves
+ * coordinator-LMON CF operations.  The round driver (step ④) staged the
+ * PREPARED file token + round sha + round copy in the seam shmem after
+ * create_prepared; a missing seam (driver not staged) or an activate
+ * failure leaves the round un-advanced (fail-closed, retried on later
+ * ticks; the driver's deadline bounds the stall).  On success the
+ * coordinator applies its own latch, stamps its observed bit and
+ * publishes the OPEN_APPLIED REQUEST to the members (their side applies
+ * the latch and ACKs — 步骤 ①).
+ */
+static bool
+semantic_activation_ack_lmon_open_applied_advance(
+	const ClusterSemanticActivationAckTableV1 *before,
+	uint64 current_members_lo, uint64 current_members_hi,
+	uint64 current_epoch, int32 current_coordinator_node,
+	uint32 local_capability_word)
+{
+	ClusterSemanticActivationAckTableV1 after;
+	ClusterSemanticActivationAckTableV1 next;
+	SemanticActivationAckPendingSend pending;
+	SemanticActivationAckTuple self;
+	ClusterSemanticActivationAckWireV1 request;
+	ClusterControlRootFileToken out_token;
+	ClusterControlRootResult act_result;
+	uint64 self_bit;
+
+	if (before == NULL || before->stage
+			!= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED
+		|| SemanticActivationBit22Seam == NULL
+		|| pg_atomic_read_u32(&SemanticActivationBit22Seam->valid) == 0
+		|| SemanticActivationBit22Seam->transition_epoch
+		   != before->transition_epoch)
+		return true;	/* seam not staged / round mismatch: retry later */
+	act_result = cluster_control_root_activate_prepared(
+		&SemanticActivationBit22Seam->file_token,
+		SemanticActivationBit22Seam->round_sha,
+		&SemanticActivationBit22Seam->round, &out_token);
+	if (act_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& act_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return true;	/* fail-closed: the round stays PREPARED */
+
+	if (!semantic_activation_ack_table_snapshot(&after)
+		|| memcmp(before, &after, sizeof(after)) != 0
+		|| !semantic_activation_ack_self_tuple(
+			cluster_node_id, local_capability_word, current_epoch,
+			after.record_generation, &self)
+		|| !semantic_activation_ack_matches(
+			&after.expected[cluster_node_id], &self))
+		return true;
+
+	self_bit = UINT64_C(1) << cluster_node_id;
+	next = after;
+	next.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED;
+	next.flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	next.observed_members_lo |= self_bit;
+	next.observed[cluster_node_id] = self;
+	if (!semantic_activation_ack_table_publish(&next))
+		return true;
+
+	/* The coordinator is a reader too — its latch flips now. */
+	(void) cluster_r4_bit22_cutover_latch_apply(
+		next.transition_epoch, next.record_generation);
+
+	memset(&request, 0, sizeof(request));
+	request.kind = CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;
+	request.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED;
+	request.result = CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST;
+	request.coordinator_node = after.coordinator_node;
+	request.member_node = (uint32)cluster_node_id;
+	request.transition_epoch = after.transition_epoch;
+	request.record_generation = after.record_generation;
+	request.round_nonce = after.round_nonce;
+	request.source_feature_bitmap = after.source_feature_bitmap;
+	request.target_feature_bitmap = after.target_feature_bitmap;
+	request.rollback_feature_bitmap = after.rollback_feature_bitmap;
+	request.admitted_members_lo = after.expected_members_lo;
+	request.admitted_members_hi = after.expected_members_hi;
+	request.capability_sample_digest = after.capability_sample_digest;
+	memset(&pending, 0, sizeof(pending));
+	if (!semantic_activation_ack_pending_send_begin_positive(
+			&pending, &request, cluster_node_id, &self))
+		return true;
+	semantic_activation_ack_local_pending_send = pending;
+	semantic_activation_ack_lmon_send_pending();
+	return true;
 }
 
 static bool
@@ -5399,7 +5529,8 @@ cluster_semantic_activation_shmem_size(void)
 		   + MAXALIGN(sizeof(ClusterSemanticActivationUtilityMailboxShmem))
 		   + MAXALIGN(sizeof(ClusterSemanticActivationAckTableV1))
 		   + MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem))
-		   + MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem));
+		   + MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem))
+		   + MAXALIGN(sizeof(ClusterR4Bit22CutoverSeamShmem));
 }
 
 void
@@ -5410,6 +5541,7 @@ cluster_semantic_activation_shmem_init(void)
 	bool ack_table_found;
 	bool pgrd_snapshot_found;
 	bool latch_found;
+	bool seam_found;
 	int side;
 	int feature_index;
 
@@ -5436,11 +5568,17 @@ cluster_semantic_activation_shmem_init(void)
 			"pgrac cluster r4 bit22 cutover latch",
 			MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem)),
 			&latch_found);
+	SemanticActivationBit22Seam
+		= (ClusterR4Bit22CutoverSeamShmem *)ShmemInitStruct(
+			"pgrac cluster r4 bit22 cutover seam",
+			MAXALIGN(sizeof(ClusterR4Bit22CutoverSeamShmem)),
+			&seam_found);
 	if (SemanticActivationShmem == NULL
 		|| SemanticActivationUtilityMailbox == NULL
 		|| SemanticActivationAckTable == NULL
 		|| SemanticActivationPgrdSnapshot == NULL
-		|| SemanticActivationBit22Latch == NULL)
+		|| SemanticActivationBit22Latch == NULL
+		|| SemanticActivationBit22Seam == NULL)
 		return;
 	if (!ack_table_found) {
 		memset(SemanticActivationAckTable, 0,
@@ -5502,6 +5640,15 @@ cluster_semantic_activation_shmem_init(void)
 		SemanticActivationBit22Latch->transition_epoch = 0;
 		SemanticActivationBit22Latch->round_generation = 0;
 	}
+	if (!seam_found) {
+		pg_atomic_init_u32(&SemanticActivationBit22Seam->valid, 0);
+		memset(&SemanticActivationBit22Seam->file_token, 0,
+			   sizeof(SemanticActivationBit22Seam->file_token));
+		memset(SemanticActivationBit22Seam->round_sha, 0,
+			   sizeof(SemanticActivationBit22Seam->round_sha));
+		memset(&SemanticActivationBit22Seam->round, 0,
+			   sizeof(SemanticActivationBit22Seam->round));
+	}
 }
 
 /*
@@ -5549,6 +5696,39 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 		return false;
 	SemanticActivationBit22Latch->transition_epoch = transition_epoch;
 	SemanticActivationBit22Latch->round_generation = round_generation;
+	return true;
+}
+
+/*
+ * cluster_r4_bit22_cutover_seam_store -- RF-ROOT P7 (增量 46, step ②/④):
+ * the round DRIVER stages the PREPARED root token + round sha + round copy
+ * after create_prepared.  The coordinator LMON consumes the seam at the
+ * OPEN_APPLIED advance.  One-shot per round: a later store re-stages (the
+ * advance cross-checks transition_epoch vs the ACK table, so a stale seam
+ * is inert).  Fail-closed on NULL/zero inputs.
+ */
+bool
+cluster_r4_bit22_cutover_seam_store(
+	const ClusterControlRootFileToken *file_token,
+	const uint8 round_sha[PG_SHA256_DIGEST_LENGTH],
+	const ClusterControlRootMigrationRoundV1 *round)
+{
+	if (SemanticActivationBit22Seam == NULL || file_token == NULL
+		|| round_sha == NULL || round == NULL
+		|| file_token->file_txn_seq == 0
+		|| round->transition_epoch == 0
+		|| semantic_activation_bytes_are_zero(
+			round_sha, PG_SHA256_DIGEST_LENGTH))
+		return false;
+	SemanticActivationBit22Seam->file_token = *file_token;
+	memcpy(SemanticActivationBit22Seam->round_sha, round_sha,
+		   PG_SHA256_DIGEST_LENGTH);
+	SemanticActivationBit22Seam->round = *round;
+	SemanticActivationBit22Seam->transition_epoch = round->transition_epoch;
+	SemanticActivationBit22Seam->prepare_generation
+		= round->prepare_generation;
+	pg_write_barrier();
+	pg_atomic_write_u32(&SemanticActivationBit22Seam->valid, 1);
 	return true;
 }
 

@@ -38,6 +38,8 @@ extern bool cluster_semantic_activation_resolve_shared_undo_root_live_owner_sour
 #define TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES 528
 /* RF-ROOT P7 (增量 39 §B): ClusterR4Bit22CutoverLatchShmem = u32+u32+u64+u64 */
 #define TEST_SEMANTIC_BIT22_LATCH_BYTES 24
+/* RF-ROOT P7 (增量 46): ClusterR4Bit22CutoverSeamShmem */
+#define TEST_SEMANTIC_BIT22_SEAM_BYTES 216
 #define TEST_GATE_SEQ_OFFSET 552
 #define TEST_GATE_ACTIVE_BITS_OFFSET 560
 #define TEST_GATE_RECORD_GENERATION_OFFSET 568
@@ -70,21 +72,29 @@ typedef union TestSemanticBit22LatchStorage {
 	uint8 bytes[TEST_SEMANTIC_BIT22_LATCH_BYTES];
 } TestSemanticBit22LatchStorage;
 
+typedef union TestSemanticBit22SeamStorage {
+	pg_atomic_uint64 align;
+	uint8 bytes[TEST_SEMANTIC_BIT22_SEAM_BYTES];
+} TestSemanticBit22SeamStorage;
+
 static TestSemanticShmemStorage test_semantic_shmem;
 static TestSemanticUtilityMailboxStorage test_semantic_utility_mailbox;
 static TestSemanticAckTableStorage test_semantic_ack_table;
 static TestSemanticPgrdSnapshotStorage test_semantic_pgrd_snapshot;
 static TestSemanticBit22LatchStorage test_semantic_bit22_latch;
+static TestSemanticBit22SeamStorage test_semantic_bit22_seam;
 static bool test_shmem_found;
 static bool test_utility_mailbox_found;
 static bool test_ack_table_found;
 static bool test_pgrd_snapshot_found;
 static bool test_bit22_latch_found;
+static bool test_bit22_seam_found;
 static Size test_shmem_requested_size;
 static Size test_utility_mailbox_requested_size;
 static Size test_ack_table_requested_size;
 static Size test_pgrd_snapshot_requested_size;
 static Size test_bit22_latch_requested_size;
+static Size test_bit22_seam_requested_size;
 static pg_on_exit_callback test_exit_callback;
 static Datum test_exit_callback_arg;
 static int test_exit_registration_count;
@@ -201,6 +211,11 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 		*foundPtr = test_bit22_latch_found;
 		return test_semantic_bit22_latch.bytes;
 	}
+	if (strcmp(name, "pgrac cluster r4 bit22 cutover seam") == 0) {
+		test_bit22_seam_requested_size = size;
+		*foundPtr = test_bit22_seam_found;
+		return test_semantic_bit22_seam.bytes;
+	}
 	test_shmem_requested_size = size;
 	*foundPtr = test_shmem_found;
 	return test_semantic_shmem.bytes;
@@ -223,6 +238,26 @@ bool
 cluster_wal_state_correctness_census_ok(void)
 {
 	return ut_r4fsm_census_ok;
+}
+
+/* RF-ROOT P7 (增量 46, step ②): the root activation stub — this binary
+ * does not link cluster_control_root.o.  The advance's executor path is
+ * exercised via ut_activate_result (OK advances; non-OK stays PREPARED). */
+static ClusterControlRootResult ut_activate_result
+	= CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+static int ut_activate_calls = 0;
+
+ClusterControlRootResult
+cluster_control_root_activate_prepared(
+	const ClusterControlRootFileToken *expected_token pg_attribute_unused(),
+	const uint8 expected_round_sha256[32] pg_attribute_unused(),
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
+	ClusterControlRootFileToken *out_token)
+{
+	ut_activate_calls++;
+	if (out_token != NULL)
+		memset(out_token, 0, sizeof(*out_token));
+	return ut_activate_result;
 }
 
 bool
@@ -643,16 +678,19 @@ test_gate_reset(void)
 	memset(&test_semantic_pgrd_snapshot, 0xa5,
 		   sizeof(test_semantic_pgrd_snapshot));
 	memset(&test_semantic_bit22_latch, 0, sizeof(test_semantic_bit22_latch));
+	memset(&test_semantic_bit22_seam, 0, sizeof(test_semantic_bit22_seam));
 	test_shmem_found = false;
 	test_utility_mailbox_found = false;
 	test_ack_table_found = false;
 	test_pgrd_snapshot_found = false;
 	test_bit22_latch_found = false;
+	test_bit22_seam_found = false;
 	test_shmem_requested_size = 0;
 	test_utility_mailbox_requested_size = 0;
 	test_ack_table_requested_size = 0;
 	test_pgrd_snapshot_requested_size = 0;
 	test_bit22_latch_requested_size = 0;
+	test_bit22_seam_requested_size = 0;
 	test_exit_callback = NULL;
 	test_exit_callback_arg = (Datum)0;
 	test_exit_registration_count = 0;
@@ -660,6 +698,8 @@ test_gate_reset(void)
 	test_read_barrier_count = 0;
 	test_advance_epoch_on_read_barrier = 0;
 	ut_r4fsm_census_ok = true;
+	ut_activate_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+	ut_activate_calls = 0;
 	test_peer_capability_matches = false;
 	test_peer_capability_match_calls = 0;
 	test_peer_capability_match_peer = -1;
@@ -739,6 +779,7 @@ test_gate_reset(void)
 	SemanticActivationAckTable = NULL;
 	SemanticActivationPgrdSnapshot = NULL;
 	SemanticActivationBit22Latch = NULL;
+	SemanticActivationBit22Seam = NULL;
 	memset(semantic_activation_local_inflight, 0, sizeof(semantic_activation_local_inflight));
 	semantic_activation_exit_hook_pid = 0;
 	semantic_activation_lmon_record_read_seq = 0;
@@ -3354,7 +3395,8 @@ UT_TEST(test_99_shared_gate_layout_and_bootstrap_are_fail_closed)
 				 + TEST_SEMANTIC_UTILITY_MAILBOX_BYTES
 				 + TEST_SEMANTIC_ACK_TABLE_BYTES
 				 + TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES
-				 + MAXALIGN(TEST_SEMANTIC_BIT22_LATCH_BYTES));
+				 + MAXALIGN(TEST_SEMANTIC_BIT22_LATCH_BYTES)
+				 + MAXALIGN(TEST_SEMANTIC_BIT22_SEAM_BYTES));
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(SemanticActivationAckTable
 			  == (ClusterSemanticActivationAckTableV1 *)test_semantic_ack_table.bytes);
@@ -4516,7 +4558,8 @@ UT_TEST(test_125_pgrd_snapshot_requires_majority_mirror_and_current_admission)
 UT_TEST(test_126_bit22_latch_fail_closed_without_shmem)
 {
 	test_gate_reset();
-	SemanticActivationBit22Latch = NULL; /* shmem unattached */
+	SemanticActivationBit22Latch = NULL;
+	SemanticActivationBit22Seam = NULL; /* shmem unattached */
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 1));
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
@@ -4561,6 +4604,8 @@ UT_TEST(test_130_bit22_latch_apply_refused_while_census_red)
 	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 1));
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	ut_r4fsm_census_ok = true;
+	ut_activate_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+	ut_activate_calls = 0;
 	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 1));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
 	test_gate_reset();
@@ -4711,10 +4756,173 @@ UT_TEST(test_135_member_open_applied_fail_closed_when_census_red)
 	test_gate_reset();
 }
 
+/* RF-ROOT P7 (增量 46, step ②): coordinator-side OPEN_APPLIED advance.
+ * Build a PREPARED-COMPLETE bit22-cutover table (2 nodes, target bit22),
+ * stage the seam, and drive semantic_activation_ack_lmon_open_applied_advance. */
+static void
+ut_open_applied_prepared_table_setup(void)
+{
+	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	int node;
+
+	memset(table, 0, sizeof(*table));
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
+	table->coordinator_node = 0;
+	table->round_nonce = 42;
+	table->transition_epoch = 7;
+	table->record_generation = 5;
+	table->expected_members_lo = UINT64_C(0x03);
+	table->expected_members_hi = 0;
+	table->observed_members_lo = UINT64_C(0x03); /* all-member ACK */
+	table->observed_members_hi = 0;
+	table->target_feature_bitmap
+		= PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	table->capability_sample_digest = UINT64_C(0xabcd);
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		if (!cluster_membership_is_member(node))
+			continue;
+		if (node == cluster_node_id) {
+			(void)semantic_activation_ack_self_tuple(
+				node, test_local_capability_word, 7, 5,
+				&table->expected[node]);
+			(void)semantic_activation_ack_self_tuple(
+				node, test_local_capability_word, 7, 5,
+				&table->observed[node]);
+			continue;
+		}
+		/* remote tuple (mirror of ut_open_applied_table_setup) */
+		table->expected[node].node_id = (uint32)node;
+		table->expected[node].boot_id = test_remote_admitted_incarnations[node];
+		table->expected[node].admitted_incarnation
+			= test_remote_admitted_incarnations[node];
+		table->expected[node].control_connection_generation
+			= (uint64)test_peer_capability_generation;
+		table->expected[node].capability_word = test_peer_capability_word;
+		table->expected[node].capability_generation
+			= (uint64)test_peer_capability_generation;
+		table->expected[node].transition_epoch = 7;
+		table->expected[node].record_generation = 5;
+		table->observed[node] = table->expected[node];
+	}
+}
+
+static void
+ut_open_applied_env_setup_coordinator(void)
+{
+	int node;
+
+	ut_open_applied_env_setup();
+	cluster_node_id = 0; /* the coordinator drives */
+	test_membership_snapshot_lo = UINT64_C(0x03);
+	test_membership_snapshot_epoch = 7;
+	for (node = 0; node < CLUSTER_MAX_NODES; node++)
+		test_remote_admitted_incarnations[node]
+			= UINT64_C(0x100) + (uint64)node;
+}
+
+UT_TEST(test_136_coordinator_open_applied_advance_activates_and_publishes)
+{
+	ClusterControlRootFileToken token;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootMigrationRoundV1 round;
+
+	ut_open_applied_env_setup_coordinator();
+	ut_open_applied_prepared_table_setup();
+	memset(&token, 0, sizeof(token));
+	token.file_txn_seq = 1;
+	memset(sha, 0x11, sizeof(sha));
+	memset(&round, 0, sizeof(round));
+	round.transition_epoch = 7;
+	round.prepare_generation = 5;
+	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
+	ut_activate_calls = 0;
+	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
+		test_local_capability_word));
+	UT_ASSERT_EQ(ut_activate_calls, 1);
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED);
+	/* coordinator observed itself (bit 0) */
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
+				 & UINT64_C(0x01), UINT64_C(0x01));
+	test_gate_reset();
+}
+
+UT_TEST(test_137_coordinator_open_applied_advance_waits_for_seam)
+{
+	ut_open_applied_env_setup_coordinator();
+	ut_open_applied_prepared_table_setup();
+	/* no seam staged */
+	ut_activate_calls = 0;
+	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
+		test_local_capability_word));
+	UT_ASSERT_EQ(ut_activate_calls, 0);
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	test_gate_reset();
+}
+
+UT_TEST(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failure)
+{
+	ClusterControlRootFileToken token;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootMigrationRoundV1 round;
+
+	ut_open_applied_env_setup_coordinator();
+	ut_open_applied_prepared_table_setup();
+	memset(&token, 0, sizeof(token));
+	token.file_txn_seq = 1;
+	memset(sha, 0x11, sizeof(sha));
+	memset(&round, 0, sizeof(round));
+	round.transition_epoch = 7;
+	round.prepare_generation = 5;
+	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
+	ut_activate_result = CLUSTER_CONTROL_ROOT_IO_ERROR;
+	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
+		test_local_capability_word));
+	UT_ASSERT_EQ(ut_activate_calls, 1);
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	test_gate_reset();
+}
+
+UT_TEST(test_139_coordinator_open_applied_advance_rejects_mismatched_seam)
+{
+	ClusterControlRootFileToken token;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootMigrationRoundV1 round;
+
+	ut_open_applied_env_setup_coordinator();
+	ut_open_applied_prepared_table_setup();
+	memset(&token, 0, sizeof(token));
+	token.file_txn_seq = 1;
+	memset(sha, 0x11, sizeof(sha));
+	memset(&round, 0, sizeof(round));
+	round.transition_epoch = 99; /* != table epoch 7 */
+	round.prepare_generation = 5;
+	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
+	ut_activate_calls = 0;
+	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
+		test_local_capability_word));
+	UT_ASSERT_EQ(ut_activate_calls, 0);
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(184);
+	UT_PLAN(188);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -4899,6 +5107,10 @@ main(void)
 	UT_RUN(test_133_member_open_applied_rejects_round_without_bit22);
 	UT_RUN(test_134_member_open_applied_coordinator_does_not_apply);
 	UT_RUN(test_135_member_open_applied_fail_closed_when_census_red);
+	UT_RUN(test_136_coordinator_open_applied_advance_activates_and_publishes);
+	UT_RUN(test_137_coordinator_open_applied_advance_waits_for_seam);
+	UT_RUN(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failure);
+	UT_RUN(test_139_coordinator_open_applied_advance_rejects_mismatched_seam);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

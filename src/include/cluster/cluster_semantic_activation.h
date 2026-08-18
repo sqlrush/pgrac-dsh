@@ -13,6 +13,8 @@
 #define CLUSTER_SEMANTIC_ACTIVATION_H
 
 #include "c.h"
+#include "common/sha2.h" /* PG_SHA256_DIGEST_LENGTH (增量 46 seam) */
+#include "cluster/cluster_control_root.h" /* file token + round (增量 46 seam) */
 #include "cluster/cluster_ic.h"
 #include "cluster/cluster_undo_root_descriptor.h"
 #include "nodes/parsenodes.h"
@@ -272,6 +274,13 @@ extern void cluster_semantic_activation_shmem_init(void);
 extern bool cluster_r4_bit22_cutover_active(void);
 extern bool cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 												 uint64 round_generation);
+/* 增量 46: the round driver stages the PREPARED token/sha/round here after
+ * create_prepared; the coordinator LMON consumes it at the OPEN_APPLIED
+ * advance (step ②). */
+extern bool cluster_r4_bit22_cutover_seam_store(
+	const ClusterControlRootFileToken *file_token,
+	const uint8 round_sha[PG_SHA256_DIGEST_LENGTH],
+	const ClusterControlRootMigrationRoundV1 *round);
 extern void
 cluster_semantic_activation_register(const ClusterSemanticActivationDescriptor *descriptor);
 extern bool cluster_semantic_activation_record_encode(const ClusterSemanticActivationRecord *record,
