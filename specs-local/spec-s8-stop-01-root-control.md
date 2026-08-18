@@ -3851,3 +3851,51 @@ activate seam → OPEN_APPLIED 发布 + 协调者 observed/latch + 全收
 COMPLETE；activate 失败 → 轮失败）；t243 不回归。实施 = 步骤 ② 骨架
 （activate 调用 seam 化，先不接真实 round 构造——驱动（步骤 ④）落地时
 接通）。
+
+---
+
+## 增量 47：bit22 轮前段编排评估 —— 最小驱动路径（2026-08-18，步骤 ④
+## 实施评估；步骤 ①② 已落（成员 OPEN_APPLIED + 协调者 advance + seam））
+
+### 评估（代码取证）
+
+成员侧 R4 编排前段（SAMPLE→BARRIER→PREPARED）校验**全部四成员硬编码**：
+member_barrier 段（:4105 一带 "The approved Stage 8 path is the exact
+four-member formation"）、member_prepared_image_current（:3414，coordinator
+==0 / 0x0f / target == R4_SYNC_CR_V1）、成员 PREPARED 回调
+（r4_descriptor.prepare_target = fail_closed stub）。bit22 轮若走完整 R4
+stage 序列，在 SAMPLE/BARRIER/PREPARED 全部被拒。
+
+### 最小驱动路径（替代完整参数化）
+
+bit22 cutover 的 W6 条款 3 只需要**全成员 CLOSED-ACK（PREPARED）→
+activate → OPEN_APPLIED**——**SAMPLE/BARRIER 段对 bit22 轮无语义**（那是
+R4 cr 同步的采样/屏障）。驱动路径：
+
+1. **协调者侧**（新函数 `bit22_prepared_begin`，submit 的 bit22 变体）：
+   create_prepared（image 构造见下）→ seam store → **直接发布 PREPARED
+   REQUEST**（stage=PREPARED，round 身份绑定；绕开 SAMPLE/BARRIER 的
+   四成员段）→ 等成员 PREPARED ACK 全收（COMPLETE）→ 步骤 ② 的
+   open_applied_advance（已实现）接管。
+2. **成员侧 PREPARED 参数化**（最小改）：
+   - member_prepared_image_current 加 bit22 分支（round 参数化校验，
+     同 open_applied 模式——不硬编码成员集/coordinator/target）；
+   - 成员 PREPARED 回调分派：target 含 bit22 → no-op OK（`bit22_stage_ok`；
+     bit22 轮 PREPARED 无成员动作，激活在协调者）；否则 r4_descriptor。
+3. **image 构造**（create_prepared 输入）：从 wal-state registry + claim
+   文件构造 ClusterControlRootMigrationImage（records + header）——复用
+   activate 的 read_source_wal_state 模式（control_root.c:1417 一带），
+   提取为共享构造函数；**这是步骤 ④ 的最大件**，单独子步。
+4. **operator 入口**：SQL 函数（协调者 backend）→ 构造 round（当前
+   formation：members/epoch/generation/capability digest）→ image 构造 →
+   create_prepared → seam store → bit22_prepared_begin。
+
+### 验收
+
+r4fsm：成员 PREPARED bit22 分支（参数化校验 + no-op 回调 + COMPLETE）→
+advance 链（已测）→ OPEN_APPLIED 完成（已测）；驱动子步（image 构造 +
+SQL 入口）单测；t243 33/33 不回归（latch 不置位 → pre-bit22 行为不变）。
+TAP 端到端（2 节点 bit22 开门）——R4 编排的 SAMPLE/BARRIER 四成员段对
+bit22 轮已绕开（协调者直发 PREPARED），**成员侧 barrier 段不再触达**；
+若 2 节点编排仍有其他四成员耦合（wire/ingress 校验），TAP 腿再降级 unit
+（与增量 40/41 §A 同裁）。
