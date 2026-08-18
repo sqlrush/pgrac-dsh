@@ -1579,3 +1579,29 @@ GATE_BOUND 锚点检查用 `grep -q "$GATE_ANCHOR" "$g"`，`$g` 是 `src/backend
 - t243 33/33 + regress 13/13
 - census 脚本 strict 模式 GREEN（`check-wal-state-correctness-census.sh` 输出 "clean"）
 - commit message 记录 latch 单测更新
+
+---
+
+## 复审补记 53（2026-08-18 20:15，批 3 commit d88369e91a 终审：批准封板）
+
+### 独立核验
+
+- census strict：1 violation（hw_remaster:487，KNOWN-DEFERRED，RED by design）✅
+- census deferred-ok：gate-bound（plan:261/worker:273,386/orchestrator:612）+ deferred
+  （hw_remaster:487）+ "clean" ✅
+- t243：33 ok / 0 not ok ✅
+- regress：零 regression.diffs ✅
+- commit message：完整（test_130 census-RED + 全部单测更新记录 + census 严格模式预期）✅
+
+### 批 3 封板
+
+census 重定义为 post-bit22 静态证明（gate 建模）、activate proof 运行时门移除、
+latch apply census 自检、C 表锁步。P7 三批全部完成。
+
+### P7 状态
+
+- ✅ 批 1（9a72084695）：S1-S3 门控双路径 + §A 两步读 + §B latch + census 锁步
+- ✅ 批 2（11d6ac246a）：pin 修复 + 调用者门控
+- ✅ 批 3（d88369e91a）：census 重定义 + activate proof 门移除 + latch apply census 自检
+- ⬜ 任务 4：bit22 首开轮（coordinator 驱动 + latch 置位 + hw_remaster root 分支入场 +
+  all-member CLOSED-ACK + census strict→GREEN）
