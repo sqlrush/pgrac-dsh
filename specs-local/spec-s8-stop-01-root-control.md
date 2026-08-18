@@ -3087,3 +3087,59 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
   RFROOT-P04-A2 禁 workload/judge 改动，setup-only 经生产 producer）。
 - ④ 现状：BOOTSTRAP pin（正确）+ hw_remaster 投影迁移（正确）+ census
   双处归零（GREEN）；唯一阻塞 = pin 时 root 不存在。
+
+## 增量 36：增量 35 勘误 —— BASE_BACKUP 假设不成立；真实机制 = cast 前 stop 触发
+## 的 remaster 在 root 未 mint 时 BLOCKED（2026-08-18，交 DSH）
+
+### 勘误：增量 35 的两处事实错误
+
+1. **"cast 断言通过（cast 时文件存在）"不成立**：16:41 run 的 node0 日志显示
+   `CHECKPOINT`（t243 L148，cast 前 node0 的 CHECKPOINT）在 16:41:53.105 失败
+   （"could not acquire the cluster control-file lock for a checkpoint"）——
+   **测试死在 cast 之前，cast 从未执行，root 文件从未被 mint**。
+   tmp_test_XDjz/global/ 无 pgrac_control_root 是"从未创建"而非"创建后消失"。
+2. **BASE_BACKUP 假设不成立**：ClusterPair.pm 实测 backup 只在 new_pair 的
+   seed 阶段发生一次（node0 init -> start -> backup -> node1 init_from_backup，
+   :263-267），start_pair 无任何 backup 调用（:459-561 全文核对）——
+   16:41 run 的 BASE_BACKUP（16:41:13.331）在 cast 之前很久（cast 从未执行）。
+
+### 真实机制（16:41 run，④ 应用版）
+
+时间线（node0 日志实测）：
+- 16:41:23.013  node1 CHECKPOINT（t243 L146，cast 前）
+- 16:41:23.022  node1 fast shutdown（t243 L147，cast 前 clean stop）
+- 16:41:23.202  node0 "committed departure of node 1 at epoch 1"
+- 16:41:23.203  node0 pin tid2 -> result 3（root ABSENT——**cast 尚未 mint，
+  预期状态**）
+- 16:41:24.202  node0 "HW remaster: dead node 1 canonical projection is
+  unusable (tid 2, episode 1)" -> BLOCKED
+- 16:41:25.205  PCM-X runtime fail-closed（hw_gate held）
+- 16:41:53.105  node0 CHECKPOINT（cast 前 L148）拿不到 CF -> 失败 -> 测试死
+
+对照（17:04 run，当前树 ③ registry 版，同样 cast 前 node1 stop）：
+- 17:04:07.038  node0 "HW remaster: rebuilt authority from dead node 1 ...
+  marked 2048 adopted shard(s) rebuilt -> done"（registry 读成功，不阻塞）
+- 17:04:12.161  node0 CHECKPOINT（cast 前 L148）成功 -> cast 执行 -> root minted
+
+**结论**：clean stop（cast 前）触发 node0 对 departed node 的 HW remaster 是
+**既有行为**（③ 版同样发生）。④ 的投影读把"root 尚未 mint（ABSENT）"当
+BLOCKED -> hw_gate held -> CF 死锁；registry 版（highest_lsn 有值）成功。
+**④ 的投影语义必须处理 root 尚未 mint 的 ABSENT 状态**（cast 前 stop 是
+t243 的正常流程；生产首次 root mint 前同理）——不能把 ABSENT 当永久 BLOCKED。
+
+### 另：17:04 run（当前树 = ③ + P5 修复）t243 也失败（P5 后首次复跑）
+
+- 这是补记 40 欠着的 P5 修复后首次 t243 复跑，结果 Bailout（pg_ctl start
+  failed）：L10 后 node1 重启（17:05:21.562 pre_init）-> 17:05:22.629 HELLO
+  CONNECTED -> 17:05:24.586 node1 "PCM-X runtime fail-closed (recovery
+  blocked)" -> 17:06:26 node1 判 node0 DEAD（cssd 超时）-> fail-stop epoch
+  bump 12->13 -> GRD WAIT_CLUSTER episode 13 hw_gate=held 卡死。
+- node0 侧 17:05:21.436 起持续 "peer 1 closed: connect failed"（IC 连接失败）。
+- 待查：P5 修复回归 or 环境偶发（复跑确认）。
+
+### 待 DSH 指导
+
+1. ④ 的 ABSENT 语义：pin 失败（root 未 mint）时 hw_remaster 应如何处置
+   （降级 validated_min=0 无下界？或 hw_remaster 对 ABSENT 跳过/重试？）
+2. t243 是否需要 setup 调整（冻结裁决 RFROOT-P04-A2 范围内）。
+3. 17:04 run 失败归因（P5 回归 or 偶发）——复跑证据。
