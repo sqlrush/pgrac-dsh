@@ -7,7 +7,7 @@
 # baseline. DSH-REVIEW.md and .dsh-watch.* are excluded so the reviewer's own
 # writes never self-trigger.
 REPO=/Users/sqlrush/pgrac-dsh
-INTERVAL=45
+INTERVAL=60
 
 sig() {
   local h d

@@ -959,3 +959,18 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
      场景的端到端可接受性（fallback 路径存在且不依赖本判定）。
 - site-1 范围确认：本轮 = plan.c:203 的 verdict CLEAN/EMPTY 维迁移 +
   活性维按 A 落地；worker.c:192 写位置锚问题另站处理（增量 26 表）。
+
+---
+
+## 复审补记 33（2026-08-18 15:20，site-1 提交复审：通过）
+
+- 29efc553b0（plan verdict 迁移 canonical root，方案 A）：
+  - 读源/classifier/阈值/ALIVE 偏向 全部与补记 32 批准一致；
+  - truth-table 单测 11 例超预期覆盖（全象限 + 边界精确/含界 +
+    未来时间戳 + 非 OPEN 生命周期 + identity 违规 + 读失败 + own-thread
+    优先 + 60s floor）；DSH 独立复跑 27/27；
+  - census 双处同提交移除：违规 5→4，lockstep 交叉校验绿；
+  - max_highest_scn 从 correctness 删除（补记 31 项 3）。
+- 通过。剩余 4 站：worker.c:192（startup）/ worker.c:247 +
+  orchestrator.c:572 + hw_remaster.c:487（bgworker，等 episode-pinned
+  projection 设计落地后逐站关）。
