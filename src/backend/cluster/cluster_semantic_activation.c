@@ -431,6 +431,7 @@ static bool semantic_activation_ack_lmon_finish_member_open_applied(
 static bool semantic_activation_ack_member_prepared_image_current_bit22(
 	const ClusterSemanticActivationAckTableV1 *image,
 	SemanticActivationAckTuple *out_self);
+static bool semantic_activation_ack_lmon_send_bit22_prepared_requests(void);
 static bool semantic_activation_ack_lmon_open_applied_advance(
 	const ClusterSemanticActivationAckTableV1 *before,
 	uint64 current_members_lo, uint64 current_members_hi,
@@ -5795,6 +5796,273 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 	SemanticActivationBit22Latch->transition_epoch = transition_epoch;
 	SemanticActivationBit22Latch->round_generation = round_generation;
 	return true;
+}
+
+/*
+ * cluster_r4_bit22_cutover_begin -- RF-ROOT P7 (增量 47, step ④c): the
+ * round DRIVER entry.  Coordinator backend calls this with the constructed
+ * migration image + round: create_prepared (root PREPARED), round sha,
+ * seam stage, then publishes the PREPARED-stage ACK-table image and sends
+ * the PREPARED REQUEST to the members — skipping the R4 SAMPLE/BARRIER
+ * four-member stages (W6 clause 3 needs only the PREPARED CLOSED-ACK).
+ * Member expected-tuples are filled by actively sampling each member's
+ * admitted incarnation + capability (IC) — no SAMPLE round needed.  The
+ * member side applies the parameterized PREPARED check (步骤 ④a), ACKs,
+ * and the coordinator's open_applied_advance (步骤 ②) takes over once the
+ * CLOSED-ACK is COMPLETE.
+ */
+bool
+cluster_r4_bit22_cutover_begin(
+	const ClusterControlRootMigrationImage *image,
+	const ClusterControlRootMigrationRoundV1 *round)
+{
+	ClusterControlRootFileToken token;
+	ClusterSemanticActivationAckTableV1 table;
+	SemanticActivationAckPendingSend pending;
+	ClusterSemanticActivationAckWireV1 request;
+	SemanticActivationAckTuple self;
+	SemanticActivationAdmissionSnapshot snapshot;
+	ClusterControlRootResult create_result;
+	uint64 current_members_lo;
+	uint64 current_members_hi;
+	uint64 current_epoch;
+	uint32 local_capability_word;
+	int32 current_coordinator_node;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	int node;
+
+	if (image == NULL || round == NULL
+		|| (round->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| SemanticActivationAckTable == NULL
+		|| SemanticActivationBit22Seam == NULL
+		|| !semantic_activation_snapshot(&snapshot)
+		|| !semantic_activation_ack_current_authority(
+			cluster_node_id, &current_members_lo, &current_members_hi,
+			&current_epoch, &current_coordinator_node)
+		|| cluster_node_id != current_coordinator_node
+		|| round->transition_epoch != current_epoch
+		|| round->admitted_bitmap_low != current_members_lo
+		|| round->admitted_bitmap_high != current_members_hi
+		|| round->prepare_generation == 0)
+		return false;
+
+	create_result = cluster_control_root_create_prepared(image, round, &token);
+	if (create_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		|| !cluster_control_root_round_sha256(round, sha)
+		|| !cluster_r4_bit22_cutover_seam_store(&token, sha, round))
+		return false;
+
+	memset(&table, 0, sizeof(table));
+	table.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
+	table.coordinator_node = (uint32)cluster_node_id;
+	table.round_nonce = token.file_txn_seq;
+	table.transition_epoch = round->transition_epoch;
+	table.record_generation = round->prepare_generation;
+	table.expected_members_lo = round->admitted_bitmap_low;
+	table.expected_members_hi = round->admitted_bitmap_high;
+	table.source_feature_bitmap = round->source_feature_bitmap;
+	table.target_feature_bitmap = round->target_feature_bitmap;
+	table.rollback_feature_bitmap = 0; /* the cutover round has no rollback
+									   * surface: activate failure keeps the
+									   * root PREPARED and stays retryable */
+	table.capability_sample_digest = round->capability_sample_digest;
+	table.flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	local_capability_word = cluster_ic_local_capability_word();
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		SemanticActivationAckTuple remote;
+		uint32 peer_word;
+		uint32 peer_gen;
+
+		if (!semantic_activation_ack_member_present(
+				current_members_lo, current_members_hi, node))
+			continue;
+		if (node == cluster_node_id) {
+			if (!semantic_activation_ack_self_tuple(
+					node, local_capability_word, round->transition_epoch,
+					round->prepare_generation, &table.expected[node]))
+				return false;
+			continue;
+		}
+		memset(&remote, 0, sizeof(remote));
+		remote.node_id = (uint32)node;
+		remote.boot_id
+			= cluster_membership_get_last_admitted_incarnation(node);
+		remote.admitted_incarnation = remote.boot_id;
+		if (remote.boot_id == 0
+			|| !cluster_sf_peer_capability_word_sample(
+				node, CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS,
+				&peer_word, &peer_gen)
+			|| peer_gen == 0)
+			return false;
+		remote.control_connection_generation = (uint64)peer_gen;
+		remote.capability_word = peer_word;
+		remote.capability_generation = (uint64)peer_gen;
+		remote.transition_epoch = round->transition_epoch;
+		remote.record_generation = round->prepare_generation;
+		table.expected[node] = remote;
+	}
+	/* The coordinator's own tuple, for the pending-send self binding. */
+	if (!semantic_activation_ack_self_tuple(
+			cluster_node_id, local_capability_word, round->transition_epoch,
+			round->prepare_generation, &self))
+		return false;
+	if (!semantic_activation_ack_table_publish(&table))
+		return false;
+
+	(void) request;
+	(void) pending;
+	/* The PREPARED REQUEST is sent per-member through the origin mechanism
+	 * (mirror of the R4 send_origin_requests loop, round-parameterized —
+	 * the bit22 cutover round does not use the R4 four-member send path). */
+	{
+		SemanticActivationAckRequestOrigin *origin
+			= &semantic_activation_ack_local_request_origin;
+
+		memset(origin, 0, sizeof(*origin));
+		origin->unsent_members_lo = table.expected_members_lo;
+		origin->unsent_members_lo
+			&= ~(UINT64_C(1) << cluster_node_id);
+		origin->active = true;
+	}
+	return semantic_activation_ack_lmon_send_bit22_prepared_requests();
+}
+
+/*
+ * semantic_activation_ack_lmon_send_bit22_prepared_requests -- RF-ROOT P7
+ * (增量 47 step ④c): per-member PREPARED REQUEST send for the bit22 cutover
+ * round — mirrors the R4 send_origin_requests loop with round-parameterized
+ * validation (member set from the ACK table, target carries bit22; no
+ * four-member hardcoding).  Returns true once every member has been sent;
+ * a failed send invalidates the origin (retried by the driver).
+ */
+static bool
+semantic_activation_ack_lmon_send_bit22_prepared_requests(void)
+{
+	SemanticActivationAckRequestOrigin *origin
+		= &semantic_activation_ack_local_request_origin;
+	ClusterSemanticActivationAckTableV1 image;
+	uint8 payload[CLUSTER_SEMANTIC_ACTIVATION_ACK_WIRE_BYTES];
+
+	if (!origin->active)
+		return false;
+	if (!semantic_activation_ack_table_snapshot(&image)
+		|| image.stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED
+		|| image.round_nonce == 0
+		|| image.transition_epoch == 0
+		|| image.record_generation == 0
+		|| (image.target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| image.expected_members_lo == 0
+		|| image.expected_members_hi != 0
+		|| image.capability_sample_digest == 0
+		|| (image.flags
+			& CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID) == 0) {
+		semantic_activation_ack_lmon_invalidate_active();
+		return false;
+	}
+
+	for (;;) {
+		SemanticActivationAckPendingSend *pending = &origin->current;
+		ClusterICSendResult send_result;
+		uint64 member_bit;
+		int32 node;
+
+		if (pending->pending_members_lo == 0
+			&& pending->pending_members_hi == 0) {
+			for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+				member_bit = UINT64_C(1) << node;
+				if ((origin->unsent_members_lo & member_bit) != 0)
+					break;
+			}
+			if (node == CLUSTER_MAX_NODES)
+				return true;
+			memset(pending, 0, sizeof(*pending));
+			pending->message.kind
+				= CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;
+			pending->message.stage = image.stage;
+			pending->message.result
+				= CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST;
+			pending->message.coordinator_node = image.coordinator_node;
+			pending->message.member_node = (uint32)node;
+			pending->message.transition_epoch = image.transition_epoch;
+			pending->message.record_generation = image.record_generation;
+			pending->message.round_nonce = image.round_nonce;
+			pending->message.source_feature_bitmap
+				= image.source_feature_bitmap;
+			pending->message.target_feature_bitmap
+				= image.target_feature_bitmap;
+			pending->message.rollback_feature_bitmap
+				= image.rollback_feature_bitmap;
+			pending->message.admitted_members_lo
+				= image.expected_members_lo;
+			pending->message.admitted_members_hi
+				= image.expected_members_hi;
+			pending->message.capability_sample_digest
+				= image.capability_sample_digest;
+			pending->pending_members_lo = member_bit;
+			origin->unsent_members_lo &= ~member_bit;
+		}
+
+		node = (int32)pending->message.member_node;
+		if (node < 0 || node >= CLUSTER_MAX_NODES
+			|| pending->invalidated) {
+			semantic_activation_ack_lmon_invalidate_active();
+			return false;
+		}
+		member_bit = UINT64_C(1) << node;
+		if (pending->pending_members_hi != 0
+			|| pending->pending_members_lo != member_bit
+			|| pending->message.kind
+			   != CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST
+			|| pending->message.stage != image.stage
+			|| pending->message.result
+			   != CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST
+			|| pending->message.coordinator_node != image.coordinator_node
+			|| pending->message.transition_epoch != image.transition_epoch
+			|| pending->message.record_generation != image.record_generation
+			|| pending->message.round_nonce != image.round_nonce
+			|| pending->message.source_feature_bitmap
+			   != image.source_feature_bitmap
+			|| pending->message.target_feature_bitmap
+			   != image.target_feature_bitmap
+			|| pending->message.rollback_feature_bitmap
+			   != image.rollback_feature_bitmap
+			|| pending->message.admitted_members_lo
+			   != image.expected_members_lo
+			|| pending->message.admitted_members_hi
+			   != image.expected_members_hi
+			|| pending->message.capability_sample_digest
+			   != image.capability_sample_digest
+			|| !cluster_semantic_activation_ack_wire_encode(
+				&pending->message, payload)) {
+			semantic_activation_ack_lmon_invalidate_active();
+			return false;
+		}
+
+		send_result = cluster_ic_send_envelope(
+			PGRAC_IC_MSG_SEMANTIC_ACTIVATION_ACK_V1, node,
+			payload, sizeof(payload));
+		{
+			SemanticActivationAckSendResult disposition
+				= semantic_activation_ack_pending_send_note_result(
+					pending, node, send_result);
+
+			if (disposition == SEMANTIC_ACTIVATION_ACK_SEND_RETAINED)
+				return true;
+			if (disposition == SEMANTIC_ACTIVATION_ACK_SEND_INVALIDATED) {
+				cluster_ic_tier1_close_peer(
+					node, "semantic activation PREPARED request send failed");
+				semantic_activation_ack_lmon_invalidate_active();
+				return false;
+			}
+			if (disposition != SEMANTIC_ACTIVATION_ACK_SEND_ADMITTED) {
+				semantic_activation_ack_lmon_invalidate_active();
+				return false;
+			}
+			/* ADMITTED: continue to the next member. */
+		}
+	}
 }
 
 /*

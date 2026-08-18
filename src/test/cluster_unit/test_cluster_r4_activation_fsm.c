@@ -260,6 +260,37 @@ cluster_control_root_activate_prepared(
 	return ut_activate_result;
 }
 
+/* RF-ROOT P7 (增量 47 step ④c): create_prepared / round_sha256 stubs — this
+ * binary does not link cluster_control_root.o. */
+static ClusterControlRootResult ut_create_result
+	= CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+static int ut_create_calls = 0;
+
+ClusterControlRootResult
+cluster_control_root_create_prepared(
+	const ClusterControlRootMigrationImage *image pg_attribute_unused(),
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
+	ClusterControlRootFileToken *out_token)
+{
+	ut_create_calls++;
+	if (out_token != NULL) {
+		memset(out_token, 0, sizeof(*out_token));
+		if (ut_create_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY)
+			out_token->file_txn_seq = 1;
+	}
+	return ut_create_result;
+}
+
+bool
+cluster_control_root_round_sha256(
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
+	uint8 out_sha[PG_SHA256_DIGEST_LENGTH])
+{
+	if (out_sha != NULL)
+		memset(out_sha, 0x11, PG_SHA256_DIGEST_LENGTH);
+	return true;
+}
+
 bool
 cluster_qvotec_in_quorum(void)
 {
@@ -700,6 +731,8 @@ test_gate_reset(void)
 	ut_r4fsm_census_ok = true;
 	ut_activate_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
 	ut_activate_calls = 0;
+	ut_create_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+	ut_create_calls = 0;
 	test_peer_capability_matches = false;
 	test_peer_capability_match_calls = 0;
 	test_peer_capability_match_peer = -1;
@@ -4606,6 +4639,8 @@ UT_TEST(test_130_bit22_latch_apply_refused_while_census_red)
 	ut_r4fsm_census_ok = true;
 	ut_activate_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
 	ut_activate_calls = 0;
+	ut_create_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+	ut_create_calls = 0;
 	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 1));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
 	test_gate_reset();
@@ -4953,10 +4988,84 @@ UT_TEST(test_141_member_prepared_r4_round_keeps_four_member_shape)
 	test_gate_reset();
 }
 
+/* RF-ROOT P7 (增量 47 step ④c): the round driver begin. */
+static ClusterControlRootMigrationRoundV1
+ut_cutover_round(void)
+{
+	ClusterControlRootMigrationRoundV1 round;
+
+	memset(&round, 0, sizeof(round));
+	round.prepare_generation = 5;
+	round.transition_epoch = 7;
+	round.source_feature_bitmap = 0;
+	round.target_feature_bitmap
+		= PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	round.admitted_bitmap_low = UINT64_C(0x03);
+	round.capability_sample_digest = UINT64_C(0xabcd);
+	return round;
+}
+
+UT_TEST(test_142_cutover_begin_stages_seam_and_publishes_prepared)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
+
+	ut_open_applied_env_setup_coordinator();
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT(cluster_r4_bit22_cutover_begin(&image, &round));
+	UT_ASSERT_EQ(ut_create_calls, 1);
+	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 1);
+	UT_ASSERT_EQ(SemanticActivationBit22Seam->transition_epoch, 7);
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	UT_ASSERT_EQ(SemanticActivationAckTable->round_nonce, 1);
+	UT_ASSERT_EQ(SemanticActivationAckTable->record_generation, 5);
+	UT_ASSERT_EQ(SemanticActivationAckTable->expected_members_lo,
+				 UINT64_C(0x03));
+	UT_ASSERT((SemanticActivationAckTable->target_feature_bitmap
+			   & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0);
+	UT_ASSERT(SemanticActivationAckTable->expected[0].boot_id != 0);
+	UT_ASSERT(SemanticActivationAckTable->expected[1].boot_id != 0);
+	UT_ASSERT(SemanticActivationAckTable->expected[1].capability_word
+			  == CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS);
+	/* The PREPARED REQUEST went out through the origin mechanism: every
+	 * member bit is sent (unsent empty) and the wire reached the peer. */
+	UT_ASSERT_EQ(semantic_activation_ack_local_request_origin.unsent_members_lo,
+				 UINT64_C(0));
+	UT_ASSERT_EQ(test_send_calls[1], 1);
+	test_gate_reset();
+}
+
+UT_TEST(test_143_cutover_begin_rejects_non_coordinator)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
+
+	ut_open_applied_env_setup_coordinator();
+	cluster_node_id = 1; /* not the coordinator (0) */
+	UT_ASSERT(!cluster_r4_bit22_cutover_begin(&image, &round));
+	UT_ASSERT_EQ(ut_create_calls, 0);
+	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
+	test_gate_reset();
+}
+
+UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
+
+	ut_open_applied_env_setup_coordinator();
+	ut_create_result = CLUSTER_CONTROL_ROOT_IO_ERROR;
+	UT_ASSERT(!cluster_r4_bit22_cutover_begin(&image, &round));
+	UT_ASSERT_EQ(ut_create_calls, 1);
+	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(190);
+	UT_PLAN(193);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -5147,6 +5256,9 @@ main(void)
 	UT_RUN(test_139_coordinator_open_applied_advance_rejects_mismatched_seam);
 	UT_RUN(test_140_member_prepared_bit22_round_parameterized);
 	UT_RUN(test_141_member_prepared_r4_round_keeps_four_member_shape);
+	UT_RUN(test_142_cutover_begin_stages_seam_and_publishes_prepared);
+	UT_RUN(test_143_cutover_begin_rejects_non_coordinator);
+	UT_RUN(test_144_cutover_begin_fail_closed_on_create_failure);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

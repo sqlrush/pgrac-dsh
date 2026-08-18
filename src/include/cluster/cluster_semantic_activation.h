@@ -281,6 +281,11 @@ extern bool cluster_r4_bit22_cutover_seam_store(
 	const ClusterControlRootFileToken *file_token,
 	const uint8 round_sha[PG_SHA256_DIGEST_LENGTH],
 	const ClusterControlRootMigrationRoundV1 *round);
+/* 增量 47 step ④c: the round driver entry — coordinator backend, with the
+ * constructed migration image + round. */
+extern bool cluster_r4_bit22_cutover_begin(
+	const ClusterControlRootMigrationImage *image,
+	const ClusterControlRootMigrationRoundV1 *round);
 extern void
 cluster_semantic_activation_register(const ClusterSemanticActivationDescriptor *descriptor);
 extern bool cluster_semantic_activation_record_encode(const ClusterSemanticActivationRecord *record,
