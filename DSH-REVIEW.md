@@ -767,3 +767,18 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   fail-closed 门结构一致。**提交时需论证**：死节点崩溃后 root 的 tail
   bound 与旧 registry 读源的语义等价性（root 只按 checkpoint 刷新，crash
   后的 tail 滞后是否影响 adopt 决策）——对齐 increment 22 的 G1b 段落。
+
+---
+
+## 复审补记 24（2026-08-18 11:20，G1b 锁序发现复审：背书回退）
+
+- 会话在 G1b 迁移中实测发现锁序冲突：recovery-episode 窗口内 hw-remaster
+  worker 的 canonical STRONG 读 CF(S) 被幸存者自身 episode CF(X) 持锁挡住
+  （0xF1 同资源，16 次 LOCK_UNAVAILABLE=17 → t243 ok-2 bail）。证据充分。
+- 处置正确：hw_remaster 回退 registry 源（+10 行注释记录原因），G1a 保留，
+  G1b 挂起等锁序设计。**DSH 背书**。
+- 新设计项（G1b 重开时先答）：按 site 上下文分阶段迁移——checkpointer/
+  coordinator 上下文可满足 CF(S)；episode 内 worker 上下文需调度
+  （CF(S) vs episode CF(X) 窗口错峰）或保留 registry 读并显式降级登记。
+  这属于 STOP-05 §5.4 锁序纪律面，勿强行迁移。
+- **顺序提醒重申**：本单提交后切路线 1（补记 21），P6 冻结前置。
