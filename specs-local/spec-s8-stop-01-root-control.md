@@ -3501,3 +3501,54 @@ t/270 开发文件保留在工作区未提交，不推送。
 **验收**：t243 33/33 + 聚焦单测绿 + census strict GREEN（0 violation）+
 latch 置位后 plan/worker/orchestrator/hw_remaster 全走 root 分支（日志
 bit22=1）+ regress 13/13。
+
+---
+
+## 增量 41：任务 3 收尾（实验 X 定案）+ 批 4 hw_remaster 双路径 + census
+## 归零 GREEN（2026-08-18，补记 55 后实测定案 + 实施批）
+
+### §A 任务 3 crash 腿：实验 X 定案（增量 40 §A 发现 5 补记）
+
+补记 55 核准的 v2（node0 liveness tick 60s + node1 crash-rejoin + sleep 8 +
+online_join=on）实测失败：**53R60 "crash-rejoin detected (online_join=off)"
+→ 30s 53R61**——dead-rejoin（peer 已判 DEAD 后的 rejoin）在
+online_join=on 下也不收敛（HINT 明示 "admission self-heal is spec-5.22
+follow-up"，未实现）。**对照实验 X**（去掉 stats 60s，其余不变）：同样
+53R60/53R61——**dead-rejoin 与 stats 无关，crash-rejoin 本身在当前
+2-node 语义下不可用**（唯一绿路径 = t243 L4 的 <3s 快重启 fast-rejoin，
+要求 peer 无 bump，而 peer 的 registry stale 构造（stats 60s）恰在轮 2
+实证会改变 node0 的 bump 行为）。
+
+**任务 3 定案**：crash 腿 TAP 在当前集群语义下不可构造（5 轮实测 + 对照
+实验），测试文件已删除（不推送半成品）。惰性可见性由既有层关闭：
+control_root 单测（NULL+STRONG→23 守卫 + 两步读，补记 46 核准）+ t243
+plan "0 unknown" 绿跑证据（补记 49 DSH 独立核验）。crash 腿重开条件 =
+online_join（spec-5.22）落地或 3-node 编队；届时按本增量 §A 的实测
+发现选构造。
+
+### §B 批 4：hw_remaster 双路径（增量 39 §B S4 落地）+ census strict GREEN
+
+- cluster_hw_remaster.c:504/528：registry watermark 读包进
+  `cluster_r4_bit22_cutover_active()` gate idiom。pre-bit22 分支 = 冻结
+  §17.8 行为逐字不变（registry 无 CF 依赖；root STRONG 读在 crash-rejoin
+  episode 窗口 LOCK_UNAVAILABLE 的历史注释保留）。post-bit22 分支 =
+  两步读 root（增量 39 §A）+ 增量 37 ABSENT 二分：never-minted（判别器
+  = registry 发布记录缺失）降级走 registry 完成路径；minted-lost
+  （registry 有发布但 root 读失败）→ BLOCKED_STRUCTURAL 终止
+  （episode-once，不留 hw_gate——增量 37 硬性约束）；root 无 validated
+  tail → BLOCKED fail-closed。post-bit22 分支在 latch 置位前动态不可达。
+- census 双处：hw_remaster KNOWN_DEFERRED → GATE_BOUND（脚本 + C 表）；
+  KNOWN_DEFERRED 空 → **strict GREEN（exit 0）= post-bit22 exactly-zero
+  静态证明（gate 建模）成立**；latch apply 运行时自检放行（r4fsm
+  test_130 的 RED 拒绝路径保留为回归守卫）。脚本空数组 set -u 修复
+  （${var[@]+...} 守卫）。
+- 测试同步：wal_state_rmw test_g4 翻转 RED→GREEN（改名
+  test_g4_census_gate_green_all_sites_gate_bound，注释注明"未来 ungated
+  站点回归即红"）；r4fsm 179/179、wal_state 21/21 不变。
+- 证据：t243 33/33（75s，node1 崩后 node0 hw_remaster "rebuilt ... done"
+  实测仍走 registry 成功）+ cluster_regress 13/13 + 聚焦单测绿 +
+  census strict/deferred-ok 双 GREEN。
+
+**P7 状态**：批 1-4 完成 + 任务 3 定案（受集群语义限制）+ census GREEN。
+剩余：任务 4 bit22 首开轮（coordinator R4 驱动 + OPEN_APPLIED latch 置位
++ 混合窗口证明，增量 40 §B）——post-bit22 分支全部就位，唯一缺口是驱动。

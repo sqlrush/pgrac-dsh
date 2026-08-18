@@ -84,20 +84,22 @@ TELEMETRY_OK=(
 # GATE-BOUND correctness sites (增量 39 §B / 补记 43-44): registry reads
 # restored behind the bit22 gate idiom — legal pre-bit22 (§17.8), statically
 # unreachable post-bit22 (monotonic latch).  Not counted; anchor-checked.
+# 批 4 (2026-08-18): cluster_hw_remaster.c joined — its registry watermark
+# read is now inside the gate idiom (pre-bit22 frozen behavior; post-bit22
+# root-only with the 增量 37 ABSENT binary).  KNOWN_DEFERRED is now empty:
+# the census strict proof (post-bit22 exactly-zero, gate-modeled) holds.
 GATE_BOUND=(
 	'src/backend/cluster/cluster_recovery_plan.c'
 	'src/backend/cluster/cluster_recovery_worker.c'
 	'src/backend/cluster/cluster_thread_recovery_orchestrator.c'
+	'src/backend/cluster/cluster_hw_remaster.c'
 )
 
 # KNOWN-DEFERRED correctness sites: ungated registry reads that stay
-# §17.8-correct until the bit22 cutover round closes them in the same commit
-# (hw_remaster.c: validated_min <- registry highest_lsn; its root branch
-# enters with the cutover round, 增量 39 §B S4).  strict counts them; the
-# runtime latch apply (cluster_r4_bit22_cutover_latch_apply) refuses while
-# they are listed — same table, lockstep-checked below.
+# §17.8-correct until the bit22 cutover round closes them in the same commit.
+# 批 4: empty — every correctness site is GATE-BOUND; the runtime latch
+# apply self-check (cluster_r4_bit22_cutover_latch_apply) is GREEN.
 KNOWN_DEFERRED=(
-	'src/backend/cluster/cluster_hw_remaster.c'
 )
 
 violations=0
@@ -179,8 +181,11 @@ if [ -f "$CENSUS_TABLE" ]; then
 	table_sites=$(sed -n '/cluster_wal_state_census_deferred_sites\[\]/,/^};/p' "$CENSUS_TABLE" \
 		| grep -oE '"[a-z_./]+\.c"' | tr -d '"' || true)
 	# The script's KNOWN_DEFERRED entries carry src/... paths; the runtime
-	# table uses basenames — compare normalized basenames.
-	script_sites=$(printf '%s\n' "${KNOWN_DEFERRED[@]}" | sed 's#^.*/##' | grep -v '^$' || true)
+	# table uses basenames — compare normalized basenames.  (The array is
+	# empty in the post-batch-4 GREEN state; the ${var[@]+...} guard keeps
+	# set -u happy.)
+	script_sites=$(printf '%s\n' ${KNOWN_DEFERRED[@]+"${KNOWN_DEFERRED[@]}"} \
+		| sed 's#^.*/##' | grep -v '^$' || true)
 	table_diff=$(comm -3 <(printf '%s\n' $table_sites | sort) \
 		<(printf '%s\n' "$script_sites" | sort))
 	if [ -n "$table_diff" ]; then

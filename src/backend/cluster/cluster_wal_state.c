@@ -818,20 +818,18 @@ cluster_wal_state_refresh_fail_count(void)
  * removed from BOTH this table and the script's DEFERRED list in the same
  * commit (the script cross-checks the two lists stay in lockstep).
  *
- * 批 3 / 增量 39 §C / 补记 43-44 (2026-08-18): the census is redefined as
- * the POST-bit22 static proof (gate modeling).  The recovery_plan.c /
- * recovery_worker.c / cluster_thread_recovery_orchestrator.c registry reads
- * are GATE-BOUND — legal pre-bit22 (frozen §17.8) and statically
- * unreachable post-bit22 because they sit behind the recognized
- * cluster_r4_bit22_cutover_active() gate idiom — so they leave this table.
- * ONLY cluster_hw_remaster.c remains: its registry read is NOT gated (it
- * stays §17.8-correct until the bit22 cutover round adds the root branch,
- * 增量 39 §B S4), so the runtime self-check at the latch apply
- * (cluster_r4_bit22_cutover_latch_apply) refuses to flip while it is
- * listed: the cutover round must close it in the same commit.
+ * 批 3-4 / 增量 39-40 / 补记 43-44 (2026-08-18): the census is the POST-bit22
+ * static proof (gate modeling).  recovery_plan.c / recovery_worker.c /
+ * cluster_thread_recovery_orchestrator.c / cluster_hw_remaster.c registry
+ * reads are GATE-BOUND — legal pre-bit22 (frozen §17.8) and statically
+ * unreachable post-bit22 behind the recognized
+ * cluster_r4_bit22_cutover_active() gate idiom — so the table is EMPTY:
+ * the runtime latch apply self-check is GREEN and the static strict census
+ * holds (post-bit22 exactly-zero, gate-modeled).  The table stays as the
+ * lockstep anchor for any future ungated site (a regression re-lists it
+ * here + in the script and turns the latch apply self-check RED).
  */
 static const char *const cluster_wal_state_census_deferred_sites[] = {
-	"cluster_hw_remaster.c",
 	NULL
 };
 

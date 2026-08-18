@@ -857,16 +857,15 @@ UT_TEST(test_a1_w3_publish_stopped_cf_failure_preserves_active)
 	UT_ASSERT_EQ((int)ondisk->state, (int)CLUSTER_WAL_SLOT_STATE_ACTIVE);
 }
 
-UT_TEST(test_g4_census_gate_red_while_deferred_sites_linked)
+UT_TEST(test_g4_census_gate_green_all_sites_gate_bound)
 {
-	/* RF-ROOT P7 G4 (补记 28 + 批 3 / 增量 39 §C): the runtime census
-	 * table must be RED while the KNOWN-DEFERRED site (hw_remaster) is
-	 * still linked, so the bit22 latch apply
-	 * (cluster_r4_bit22_cutover_latch_apply) refuses to flip — the census
-	 * GREEN is the POST-bit22 proof, bound inside the cutover round.  When
-	 * the cutover round closes hw_remaster, this table entry is removed
-	 * AND this test flips to asserting GREEN in the same commit. */
-	UT_ASSERT(!cluster_wal_state_correctness_census_ok());
+	/* RF-ROOT P7 G4 (补记 28 + 批 3-4 / 增量 39-40): 批 4 关闭了最后一个
+	 * KNOWN-DEFERRED 站点（hw_remaster 的 registry 读进入 bit22 gate
+	 * idiom）→ 运行时 census 表为空 → census GREEN：post-bit22 exactly-zero
+	 * 静态证明（gate 建模）成立，bit22 latch apply 的自检放行。若未来引入
+	 * 未 gated 的 correctness 站点（脚本/本表 lockstep 漂移或直接漏表），
+	 * 本断言立即红。 */
+	UT_ASSERT(cluster_wal_state_correctness_census_ok());
 }
 
 int
@@ -886,7 +885,7 @@ main(int argc pg_attribute_unused(), char **argv pg_attribute_unused())
 	UT_RUN(test_a1_w3_publish_stopped_uses_verified_cf_rmw);
 	UT_RUN(test_a1_w3_publish_stopped_is_idempotent);
 	UT_RUN(test_a1_w3_publish_stopped_cf_failure_preserves_active);
-	UT_RUN(test_g4_census_gate_red_while_deferred_sites_linked);
+	UT_RUN(test_g4_census_gate_green_all_sites_gate_bound);
 
 	UT_DONE();
 	return ut_failed_count != 0 ? 1 : 0;
