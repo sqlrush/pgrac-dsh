@@ -3419,3 +3419,85 @@ if (cluster_r4_bit22_cutover_active()) {
   recovery_worker / control_root）+ census 脚本行为符合本批语义。
 - 全程不变量：latch=false 时行为逐字等价迁移前（registry 权威）；
   root 分支静态存在、动态不可达；ABSENT 二分只在 post-bit22 分支内。
+
+---
+
+## 增量 40：任务 3 测试设计实测 + 任务 4 bit22 首开轮设计要点
+## （2026-08-18，crash 腿构造受阻的三个产品语义实测发现 + 首开轮文档先行）
+
+### §A 任务 3（crash 腿）构造探索：三个实测发现（t/270 开发轮，未提交）
+
+目标（补记 44 §D 选项 2）：独立 TAP——2-node shared-root，断言 survivor plan
+产 candidate + worker 启动，让 NULL-identity 惰性（0 candidates / 127 unknown）
+可见。t243 冻结不动。三轮实测（每轮完整跑批 + 日志取证）：
+
+**发现 1——crash-rejoin epoch 竞态**：node1 stop('immediate') 后立即 start，
+node1 的 qvotec 学的 epoch（bump 前）=1；node0 判死流程随后 fail-stop epoch
+bump（cssd SUSPECTED 2s + DEAD 3s + "PCM-X runtime fail-closed" 触发）→ node1
+的 join 帧 epoch 1 < current 2 被拒（"dropped envelope: stale epoch"）→ join 30s
+不收敛 → 53R61。t243 L4 恰好赢竞态（node1 在 node0 判死前完成 heartbeat
+恢复 → 无 bump）。**修复面属 P6 rejoin 语义**（epoch 重学或 bump 排序），不是
+本任务范围；t243 L4 的窗口（<3s 快重启）是当前唯一稳定路径。
+
+**发现 2——phase3 barrier 死等**：peer 崩（DEAD）时本节点 clean stop 后重启，
+phase-3 等 live formation 永不满足 → 600s 超时 FATAL（"exceeded timeout
+(1128.193 s > 600 s)"）。2-node 共享盘语义：**单节点无法在 peer DEAD 时重启**
+（qvotec/formation 要求 live peer 或 online_join）。因此"peer 崩 → 本节点重启
+看 stale slot"构造不可行。
+
+**发现 3——clean-leave 后 peer 仍判 DEAD + phase3 witness 窗口**：node0 clean
+stop（departure 提交）后 node1 的 cssd 心跳自然断 → 3s 判 DEAD（"NO reconfig
+in spec-2.5"）→ node0 重启的 phase-3 检查 live formation：node1 的 formation
+里 node0 仍 DEAD，且 phase3 的 witness 检查窗口极短（"live formation did not
+become ready **before recovery**"——clean shutdown 后 recovery 立即开始，
+deadline 秒级）→ node1 的 rejoin 处理（evict + admission）来不及 → 快速 FATAL。
+**不对称**：t243 L5/L6 的 node1（clean stop 后重启）成功——survivor 侧
+（node0）的 rejoin 处理与 joiner 侧（node1）不同步调。修复面属 P6 rejoin 语义。
+
+**发现 4（次生）——stats interval 与 formation 耦合存疑**：node1 的
+cluster_stats interval 60s（让 slot2 stale 的构造）下 node0 重启两次均
+phase3 失败；但 stats 状态（cluster_stats_state）无 formation 消费者
+（grep 实证：cssd 用独立 tick）——疑似与发现 3 同根（clean-leave 判死），
+非 stats 因果。待 DSH 裁决是否需对照实验。
+
+**结论**：crash 腿的"peer stale + 本节点重启"构造在当前 2-node 集群语义下
+不可行（发现 2/3），快重启竞态不可控（发现 1）。**惰性可见性已由既有层
+关闭**：control_root 单测（NULL+STRONG→23 守卫 + 两步读真实 fixture，
+补记 46 核准）+ t243 绿跑 plan "0 unknown"（补记 49 DSH 独立核验）。
+crash 腿降级为**待 DSH 裁决构造方案**（选项：online_join=on 配置下的
+crash-rejoin 腿 / 3-node 编队 / 接受单测+绿跑证据作为任务 3 闭合）。
+t/270 开发文件保留在工作区未提交，不推送。
+
+### §B 任务 4：bit22 首开轮设计要点（增量 39 §E 展开，文档先行）
+
+**轮内同批提交内容**（§17.7-3 "same migration round"，一处 commit 全含）：
+
+1. **coordinator R4 驱动**（补记 29 遗留 utility mailbox cutover + 设计点 ③）：
+   create/activate proof seam（recovery_duty.c:44-120）现无生产调用方（grep
+   实证）——驱动 = 协调者 utility 路径：提交 R4 round（create_prepared）→
+   全成员 SAMPLE→BARRIER→PREPARED ACK 收集（semantic_activation FSM 既有
+   机制）→ activate_prepared（root header ACTIVATION_ACTIVE）→ **latch 置位
+   广播**。
+2. **latch 置位点**：每节点在 OPEN_APPLIED stage（semantic_activation.h:45）
+   应用时调 `cluster_r4_bit22_cutover_latch_apply(transition_epoch,
+   prepare_generation)`——本轮内 census 自检（KNOWN-DEFERRED 非空则拒绝，
+   批 3 已实现）保证 hw_remaster 同轮关闭后才能置位。
+3. **hw_remaster root 分支入场**（S4，增量 39 §B 未做部分）：registry 读包
+   进 gate idiom + root 分支（两步读 + 增量 37 二分语义：never-minted 降级
+   完成 / minted-lost fail-stop，判别器 = registry 发布记录，不持 gate）→
+   census GATE-BOUND 清单双处移除 → strict GREEN（post-bit22 证明成立）。
+4. **设计点 ① 混合 latch 窗口证明**（补记 44）：node A 置位（root-only）与
+   node B 未置位（registry）的窗口内两节点推导不同源。证明义务：
+   CLOSED-ACK（PREPARED-stage all-member ACK）后 root 界与 registry 界一致
+   （G1a CHECKPOINT_ADVANCE / G1a-2 FPW_STICKY 使 root 的 checkpoint/tail 界
+   是 wal-state 发布历史的函数 + W6 条款 3 的 CLOSED 绑定保证所有成员在
+   同一 round 边界）⇒ 混合操作安全。**混合态腿受 §A 发现 2/3 限制**（节点
+   重启/切换需 peer 在线），TAP 混合腿可行性待 DSH 裁决。
+5. **顺序约束**：本轮内 hw_remaster 关闭 → census GREEN → latch apply（否则
+   apply 被批 3 的运行时门拒绝）→ activate 完成后各成员 OPEN_APPLIED →
+   reader 切换生效。create→activate 之间 census 必须已 GREEN（批 3 语义：
+   GREEN 是 post-bit22 证明，随本轮提交成立，不是 pre-bit22 前置）。
+
+**验收**：t243 33/33 + 聚焦单测绿 + census strict GREEN（0 violation）+
+latch 置位后 plan/worker/orchestrator/hw_remaster 全走 root 分支（日志
+bit22=1）+ regress 13/13。
