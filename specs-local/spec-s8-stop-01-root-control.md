@@ -2315,3 +2315,34 @@ head gate 的 non-OPEN 分支按 lifecycle 拆分：RECOVERY_COMPLETE 保持
    两处 → orchestrator），每个配聚焦单测/TAP；registry 仅 telemetry。
 4. G4：census 脚本（白名单 == 0）。
 5. G3+G5：R4 生产接线 + bit22 ACK 门（最大块，先落设计再实现）。
+
+---
+
+## 增量 22 补记：G1 前置发现（CHECKPOINT_ADVANCE 发布缺失）与 G6 落地
+
+### G1 前置（G1a，2026-08-18 实证）
+
+- `CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE`（0x38 =
+  CHECKPOINT|TAIL|RECOVERY_PROGRESS，spec §17.2 reason 表冻结）在
+  cluster_control_root.c 有 reason 掩码与 CAS 分支（:1491/:1661），但
+  **全后端无生产调用者**。
+- 生产路径（recovery_duty 的 lifecycle CAS：clean-close/reopen/repair）只
+  **保留** snapshot 的 checkpoint/tail 字段，不写新值 → root 的
+  checkpoint_lower_lsn / validated_tail_lsn_exclusive 仅来自迁移映像。
+- 因此 G1b（六 reader 迁到 canonical root）若直接落地，reader 的
+  merge-start/validated_min 会退化为迁移时值（更早 = 安全但重放面大），
+  且违背"root 是 canonical checkpoint 权威"的 STOP-01 前提。
+- **G1a = 把 per-checkpoint 的 root 发布接上**：checkpointer 的 checkpoint
+  路径（CreateCheckPoint 持 CF(X) 的既有面）在 checkpoint durable 后发布
+  CHECKPOINT_ADVANCE（0x38：checkpoint_lower_lsn + validated tail +
+  recovery progress，owner lineage 不动）——执行者/锁序沿用
+  THREAD_CLEAN_CLOSE 先例（checkpointer 的 CF(S) 合法窗口），冻结形状
+  patch_shape_valid 已就绪。G1a 落地 + t243 复绿后，G1b 逐 site 迁移。
+
+### G6 落地（本增量）
+
+- cluster_debug.c:2873-2876 注释修正：materialized_remote_instances 派生自
+  node-local merged authority（非 registry；registry 仅 telemetry）✓。
+- 在线路径"不写 merge_recovered_lsn"断言：随 G2/G3 的 SOURCE_CLOSED
+  包装器接线（transition 模式零 pwrite）一并落地（t/248 或 orchestrator
+  单测），本增量登记。

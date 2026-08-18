@@ -639,3 +639,54 @@ t243 33/33 + "reopened by owner" 日志 + recovery_duty 单测绿 + regress
 
 P6 重新冻结条件实质满足：t243 双绿无 bail + regress 13/13 + 单测闭包 +
 A/B/C 落地。**放行 P7**；上述两个小尾巴在 P7 推进中顺手清理并提交。
+
+---
+
+## 复审补记 20（2026-08-18 10:30，增量 21 P0 复审 + 仓库暴露核查）
+
+> 本补记暂不 push（见 §3 仓库问题，等待用户裁决）。
+
+### 1. 增量 21 P0 分析：五条全部成立（DSH 独立取证）
+
+1. 补写路径实锤：recovery_duty.c:398 起"clean-departed + OPEN(old)" → 补
+   THREAD_CLEAN_CLOSE(OPEN→CLOSED) → 再 THREAD_OPEN(CLOSED→OPEN(new))——
+   绕开冻结的 RECOVERY_COMPLETE→OWNER_REJOIN 主线（STOP-02 §17.4:1055 原文
+   "requires old lifecycle RECOVERY_COMPLETE"）。
+2. 发布者合同违反：recovery_duty.c:533 冻结注释 "Only the checkpointer's
+   clean-shutdown path reaches this (after ShutdownXLOG…)"——coordinator 事后
+   补写不在合同内。
+3. 证据不足实锤：ClusterLeaveIntentMarker（cluster_clean_leave.h:110 起）
+   无 shutdown_driven 持久字段；operator 路径显式置 0
+   （cluster_clean_leave.c:1497-1498）→ clean_departed 无法证明
+   shutdown checkpoint + STOPPED 发生过。
+4. pgrac-talk：DEVIATION RFROOT-P04-A2-T243-SECOND-REJOIN-OPEN-ROOT-20260817
+   仍无 DECISION，且明文 "permit OPEN(old)->OPEN(new) contrary to §17.4"
+   禁止（~/pgrac/talk_20260816-0052.md:337 一带）。
+5. 未推送：origin 落后 2 个提交（407969544b、fe150bad60）。
+
+结论：**t243 行为门过，但 P6 的 Spec/authority 冻结门未过——撤回补记 19 的
+"放行 P7"裁定，改为"P7 审计可做，但 P6 冻结仍挂起"**。
+
+### 2. 修复方向（与 Reader 结论一致，DSH 背书）
+
+- 首选：修 owner/checkpointer 在 authority 失效前成功落 CLOSED（serving-stale
+  拒绝时重试/保序），让重启走冻结 CLOSED→OPEN。
+- 次选：落 CLOSED 失败 → 按 fail-stop 走 RECOVERY_COMPLETE → OWNER_REJOIN。
+- 不采纳：coordinator 仅凭 clean_departed 补造 CLOSED（除非 DEVIATION 获
+  USER-RESULT + 持久 shutdown-driven 证明 + operator 负向测试齐备）。
+- 增量 21 代码与单测：挂起，等上述裁决。
+
+### 3. 仓库暴露问题（紧急，用户裁决后 DSH 才恢复 push）
+
+- 事实：origin=github.com/sqlrush/pgrac-dsh 匿名可访问（HTTP 200，公共）；
+  当前公共历史包含 specs-local/ 全部本地增量 + memory/ + 全部复审文档。
+- specs-local/README.md 原文："本目录已加入 .git/info/exclude，绝不 push
+  公开仓"——书面规则与既成事实冲突。
+- 背景：DSH 的历次 push 依据 user 2026-08-17 口头授权（"code+design docs
+  可以推公共仓库，推翻 design docs 永不公开红线"）。现按 Reader 建议
+  **暂停一切 push**。
+- 待用户裁决三选一：
+  A. 保持公共（授权继续）→ DSH 把 specs-local README 的"绝不 push"改写为
+     实际政策并继续；
+  B. 转私有仓 → GitHub 设置里改 private，历史不再匿名可见；
+  C. 清理泄露 → 重写历史/删仓重建（成本最高，需要用户拍板范围）。
