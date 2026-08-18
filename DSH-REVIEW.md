@@ -1782,3 +1782,32 @@ shmem init、单测断言），无遗漏。✅
 - 步骤 ②：coordinator OPEN_APPLIED 推进（PREPARED→OPEN_APPLIED 转换）
 - 步骤 ③：backend activate 接线（mailbox 第二段）
 - 单测：r4fsm OPEN_APPLIED 段覆盖（增量 45 列出的测试场景）
+
+---
+
+## 复审补记 60（2026-08-18 22:30，step ① 封板 + 增量 46 裁决）
+
+### step ①（e0b4face97）：批准封板 ✅
+
+成员 OPEN_APPLIED 段已提交。r4fsm 179→184（test_131-135 五条全覆盖：
+member apply/idempotent/non-bit22 reject/coordinator-skip/census-RED），
+t243 33/33 + regress 13/13。与补记 59 核准的未提交 diff 一致。
+
+### 增量 46（activate 执行者修正）：批准 ✅
+
+发现 AD-023 §4 冻结的是 CF(S) 而非 CF(X)，activate_prepared 取 CF(X)
+无执行者冻结。协调者 LMON 执行 CF 操作有补记 17-19 先例（THREAD_OPEN CAS）。
+**裁决**：采纳 coordinator-LMON 直接执行，替代增量 43 的 backend 两段握手。
+理由：
+- CF(X) 无冻结执行者 → LMON 执行合法 ✅
+- 补记 17-19 先例（协调者 LMON CF 操作）✅
+- 简化实现（删掉 mailbox 第二段握手）✅
+- cutover 罕见操作，有界 tick 延迟可接受 ✅
+
+### P7 状态
+
+- ✅ 批 1-4：全部封板
+- ✅ 步骤 ①：成员 OPEN_APPLIED 段（已提交）
+- ⬜ 步骤 ②：coordinator OPEN_APPLIED 推进（activate seam + REQUEST 发布 + 协调者 latch）
+- ⬜ 步骤 ③：backend activate 接线 → 改为 coordinator-LMON 直接执行（增量 46）
+- ⬜ 步骤 ④：mailbox 驱动入口 + 跑批
