@@ -168,6 +168,15 @@ cluster_reconfig_self_join_admitted(void)
 	return false;
 }
 
+/* Link-only stub (RF-ROOT P6 increment 21): recovery_duty.o's missed
+ * clean-close repair reads the durable clean-departed evidence; this
+ * fixture never exercises the repair path. */
+bool
+cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
+{
+	return false;
+}
+
 bool
 cluster_lms_is_recovery_ready(void)
 {

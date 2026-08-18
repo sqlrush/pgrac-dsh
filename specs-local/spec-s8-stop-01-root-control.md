@@ -2229,3 +2229,34 @@ CLOSED 无并发执行者（phase-3 postmaster 已拆除、startup 死锁方案�
   与（变体轮）"clean-closed"→"clean-reopened" 对；
 - recovery_duty 18/18（新增 repair 用例：OPEN(old)+clean-departed →
   close→open 两段发布、reason 断言）。
+
+---
+
+## 增量 21 补记：DSH 复审补记 18 的 CLOSED 分支拆分（2026-08-18，照办 + 验证记录）
+
+### DSH 指令
+
+head gate 的 non-OPEN 分支按 lifecycle 拆分：RECOVERY_COMPLETE 保持
+`owner >= admitted` 拒绝；CLOSED 分支不用 `owner >= admitted` 拒
+（fresh boot 化身更新是 THREAD_OPEN 主线语义），放行后由 CAS 单调性兜底。
+
+### 验证结论（照办已实施，附证据）
+
+1. **实际 09:39 失败形态 = OPEN(old) 变体**（非 CLOSED 路由不可达）：该
+   run 无 "clean-closed by owner" 日志 + "serving authority did not
+   re-confirm" 警告 → clean-close 被拒 → root 停 OPEN(旧化身) → 重启后
+   OPEN 分支 owner!=admitted 永拒。已由增量 21（两段冻结 CAS 修复）解决，
+   修复后 t243 33/33 ×4 连绿。
+2. **CLOSED 路由在 09:39 run 前已工作**（t243-inc20c：33/33 + 三条
+   "clean-reopened by node (THREAD_OPEN)" 日志，lineage 3/4/5）——fresh
+   boot（I2>I1）本就能过原 head gate（`I1 >= I2` 为假不拒绝）；补记 18
+   中 "I1>=I2 为假 → gate 拒绝" 的因果方向与代码不符。
+3. **拆分语义等价**：control_root.c:1743-1752 的 CAS 单调性要求
+   `desired.owner > current.owner`（严格）+ `lineage+1`——同化身
+   （admitted==owner，fast-restart 窗口）与陈旧化身（admitted<owner）在
+   CAS 层同样 fail-closed；head gate 仅剩 lineage==MAX 拒绝（快失败）。
+   行为面：CLOSED+owner>=admitted 从 head gate 拒绝变为 CAS 拒绝（多一轮
+   CF(S)+文件 I/O，判定不变）；收敛性由 qvotec prior-incarnation 4s
+   age-out + join 重试（53R61 30s+ 余量）保证。
+4. 按 DSH 指令实施拆分（RECOVERY_COMPLETE 分支原样保留；CLOSED 分支只留
+   lineage==MAX 拒绝），t243 复跑确认无回归。

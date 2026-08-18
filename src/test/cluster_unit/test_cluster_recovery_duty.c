@@ -96,6 +96,20 @@ cluster_control_root_compare_and_publish(
 			&observed_token, patch, reason);
 	if (!ut_root_publish_context_authorized)
 		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
+	/* Mirror the real CAS monotonicity (control_root.c compare_and_publish,
+	 * OWNER_REJOIN / THREAD_OPEN): desired owner must strictly exceed the
+	 * current owner and lineage must advance by exactly one.  The head gate
+	 * no longer pre-rejects the CLOSED branch (DSH review note 18 split), so
+	 * a stale / same-incarnation reopen must fail HERE like the real CAS. */
+	if (ut_root_publish_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& (reason == CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN
+			|| reason == CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN)
+		&& (ut_root_snapshot.identity.root_lineage_seq == UINT64_MAX
+			|| patch->desired.identity.root_lineage_seq
+				   != ut_root_snapshot.identity.root_lineage_seq + 1
+			|| patch->desired.identity.origin_owner_incarnation
+				   <= ut_root_snapshot.identity.origin_owner_incarnation))
+		return CLUSTER_CONTROL_ROOT_CAS_CONFLICT;
 	if (ut_root_publish_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
 		*out_snapshot = ut_root_snapshot;
 		out_snapshot->lifecycle = patch->desired.lifecycle;
@@ -443,13 +457,20 @@ UT_TEST(test_owner_rejoin_closed_lifecycle_routes_to_thread_open)
 	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq,
 				 ut_root_identity.root_lineage_seq + 1);
 
-	/* Stale incarnation on a CLOSED root still fails closed (head gate:
-	 * admitted <= owner incarnation never passes). */
-	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	/* Stale / same-incarnation reopen on a CLOSED root still fails closed:
+	 * the head gate no longer pre-rejects the CLOSED branch (DSH review
+	 * note 18 split), so the CAS monotonicity rejects it (desired owner
+	 * must strictly exceed the current owner) — the verdict is identical,
+	 * one CAS attempt later. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(70));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
 	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(70)));
-	UT_ASSERT_EQ(ut_owner_read_calls, 0);
-	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+	UT_ASSERT_EQ(ut_owner_read_calls, 1);
+	UT_ASSERT_EQ(ut_root_publish_calls, 1); /* CAS_CONFLICT at the publish */
+	setup_owner_rejoin(UINT64_C(77), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 1); /* same-incarnation CAS_CONFLICT */
 
 	/* Bootstrap / retired roots are not in the reopen allowlist. */
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));

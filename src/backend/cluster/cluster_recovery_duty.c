@@ -351,10 +351,22 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		 * STALE process (owner > admitted) is rejected outright. */
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& identity.origin_owner_incarnation > admitted_incarnation)
+		/* DSH review note 18: split the non-OPEN reject by lifecycle.  The
+		 * RECOVERY_COMPLETE branch keeps the frozen OWNER_REJOIN stale-owner
+		 * reject (owner >= admitted).  The CLOSED branch must NOT reject on
+		 * owner >= admitted: the frozen THREAD_OPEN mainline's monotonicity
+		 * is enforced by the CAS itself (control_root.c compare_and_publish
+		 * requires desired.owner > current.owner + lineage+1), so a
+		 * fast-restart window whose observed slot still carries the prior
+		 * incarnation (admitted == root owner) fails closed AT THE CAS and
+		 * converges once the qvotec prior-incarnation slot ages out — the
+		 * head gate only needs the exhausted-lineage reject. */
 		|| (snapshot.lifecycle
-				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+				== CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE
 			&& (identity.root_lineage_seq == UINT64_MAX
-				|| identity.origin_owner_incarnation >= admitted_incarnation)))
+				|| identity.origin_owner_incarnation >= admitted_incarnation))
+		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED
+			&& identity.root_lineage_seq == UINT64_MAX))
 		return false;
 	cluster_wal_thread_claim_fill(
 		&immutable_claim, identity.origin_thread_id, identity.origin_node_id,
