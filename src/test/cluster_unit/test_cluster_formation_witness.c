@@ -7,6 +7,8 @@
 #include <stdlib.h>
 
 #include "cluster/cluster_recovery_duty.h"
+#include "cluster/cluster_semantic_activation.h" /* ACK stage enum (G3 stub) */
+#include "storage/latch.h" /* 路线 1 retry stubs (MyLatch/WaitLatch) */
 
 #undef printf
 #undef fprintf
@@ -97,6 +99,35 @@ cluster_control_root_lookup_owner_by_node_runtime(
 	return CLUSTER_CONTROL_ROOT_ABSENT;
 }
 
+/* RF-ROOT P7 G3/G4: the create/activate coordinator proofs and the runtime
+ * census gate live in the same product object; this unit exercises only the
+ * formation-witness entry points, so keep the proofs fail-closed. */
+bool
+cluster_semantic_activation_ack_complete_matches(
+	uint64 transition_epoch pg_attribute_unused(),
+	uint64 record_generation pg_attribute_unused(),
+	uint64 expected_members_lo pg_attribute_unused(),
+	uint64 expected_members_hi pg_attribute_unused(),
+	uint64 source_feature_bitmap pg_attribute_unused(),
+	uint64 target_feature_bitmap pg_attribute_unused(),
+	uint64 capability_sample_digest pg_attribute_unused(),
+	ClusterSemanticActivationAckStage minimum_stage pg_attribute_unused())
+{
+	return false;
+}
+
+bool
+cluster_control_root_feature_bitmap_is_known(uint64 active_feature_bitmap pg_attribute_unused())
+{
+	return false;
+}
+
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return false;
+}
+
 ClusterRecoveryOwnerImportResult
 cluster_recovery_owner_import_read_v1(
 	int32 node_id, const ClusterWalThreadClaim *immutable_claim,
@@ -173,6 +204,57 @@ cluster_reconfig_self_join_admitted(void)
  * fixture never exercises the repair path. */
 bool
 cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
+{
+	return false;
+}
+
+/* Link-only stubs (RF-ROOT P7 路线 1): recovery_duty.o's bounded
+ * THREAD_CLEAN_CLOSE retry (cluster_control_root_thread_clean_close_publish_retry)
+ * waits on MyLatch with a clock; this fixture never exercises the retry
+ * path, so the clock stands still and every wait times out instantly. */
+static Latch ut_retry_latch;
+Latch *MyLatch = &ut_retry_latch;
+static TimestampTz ut_retry_now_us = 1700000000000000LL;
+
+TimestampTz
+GetCurrentTimestamp(void)
+{
+	return ut_retry_now_us;
+}
+
+TimestampTz
+TimestampTzPlusMilliseconds(TimestampTz t, int64 ms)
+{
+	return t + (TimestampTz) ms * 1000;
+}
+
+int
+WaitLatch(Latch *latch, int wakeEvents, long timeout, uint32 wait_event_info)
+{
+	(void) latch;
+	(void) wakeEvents;
+	(void) timeout;
+	(void) wait_event_info;
+	return WL_TIMEOUT;
+}
+
+void
+ResetLatch(Latch *latch)
+{
+	(void) latch;
+}
+
+volatile sig_atomic_t InterruptPending = 0;
+
+void
+ProcessInterrupts(void)
+{
+}
+
+/* 路线 1: the retry rebinds the leaver's serving authority on the success
+ * path; this fixture never reaches it. */
+bool
+cluster_authority_serving_rebind_leaver(void)
 {
 	return false;
 }
