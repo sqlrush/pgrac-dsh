@@ -1343,3 +1343,45 @@ state（ALIVE 偏置防撕裂读：活 peer 的流可能 mid-write torn → 误�
   control_root）+ 绿跑 node0 日志应恢复出现 registry 分类行（ALIVE/candidate），
   不再是 127 unknown（latch=false 下 S1 走 registry）——**这是修复 NULL-identity
   惰性的第一个正面对照证据，跑批后贴日志行。**
+
+---
+
+## 复审补记 46（2026-08-18 19:05，批 1 第二轮：§D-3 强制单测落地核准；问题 ② 结案；问题 ① 仍开）
+
+### 本轮新增（+141：test_control_root +70 / test_r4_activation_fsm +74 — 批 1 总量 429/-55）
+
+**核准 ✅——正是补记 44 §D-3 点名的惰性杀手测试，且测试纪律满分：**
+
+- test_control_root 26→29：
+  ① `strong_read_null_identity_stays_invalid_argument`——把 E1 惰性类钉死
+  （STRONG+NULL 恒 23，输出清零）；
+  ② `discovered_read_binds_identity_and_mints_token`——两步读绑定 identity、
+  STRONG 铸 token（seq 1）、BOOTSTRAP 不铸；
+  ③ `discovered_read_absent_thread_fails_closed`——tid 2 ABSENT fail-closed。
+- test_r4_activation_fsm 174→178：latch 四态全覆盖——无 shmem fail-closed /
+  默认 inactive + apply 翻转记 round / 二次 apply 拒绝且 round 不覆盖（单调）/
+  零 identity 拒绝。
+- AGENTS.md 逐项过：无新 Assert（latch 全运行时分支）；mock ShmemInitStruct
+  的 latch 名路由在 default 之前（防别名）；布局断言 +MAXALIGN(24) 与产品
+  sizeof 一致（u32+u32+u64+u64）；test_gate_reset 隔离到位；plan 计数同步。
+
+### 补记 45 两个必修项状态
+
+- **问题 ②（S2 slot.state）——结案：我的担心不成立。** 核对 34eb81cc71^
+  原形：迁移前 revalidate 本来就是 `read_slot OK → validate_stream`，**无
+  state 检查**；当前恢复逐字等价，"逐字等价迁移前"不变量成立。ALIVE 偏置
+  检查在 worker_main 路径（属 S3，问题 ①）。
+- **问题 ①（S3 惰性投影设施门控）——仍开，本 diff 未触碰。** pin_projection
+  恒 false → projection_current 恒 false → worker UNREADABLE / orchestrator
+  BLOCKED 的链仍在。批 1 commit 前必须：给 S3 consumer 加 bit22 门（pre-bit22
+  = registry 直读恢复），或在 commit message 显式声明 S3 归批 2 并列出
+  "projection 设施批 2 前保持惰性"为验收已知项。不允许含混。
+
+### 批 1 commit 验收清单（提醒）
+
+- 单测：control_root 29/29 + r4_activation_fsm 178/178 + plan / recovery_worker
+  聚焦套全绿（跑批证据贴 commit message）；
+- t243 33/33 + regress 13/13；
+- **绿跑 node0 日志 plan 行必须恢复 registry 分类**（ALIVE/candidate 出现，
+  不再是 127 unknown）——latch=false 下 S1 走 registry 的正面证据；
+- 问题 ① 的处置声明。
