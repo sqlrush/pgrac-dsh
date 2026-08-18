@@ -149,6 +149,17 @@
       为 episode worker（CF(S) 不可行）+ registry 独有数据。census strict
       转 GREEN 条件 = DEFERRED 空 + C 表与脚本 NODE_LOCAL_AUTHORITY 一致。
       **待 DSH 复审设计后再实施**。
+- [ ] **【补记 30 + 用户裁决 C 已落地】**（2026-08-18）：DSH 复审增量 25
+      技术分析通过但 NODE_LOCAL_AUTHORITY 与冻结 §17.9 exactly-zero 冲突
+      → 用户三选一裁决 = **C（维持迁移 canonical 读原义）**。增量 26
+      （d7a0151977）定稿 C 路线：无 CF 快照读（READ_SNAPSHOT，原子发布
+      + CRC 双副本兜底，复用 BOOTSTRAP_VALIDATE 先例）+ 逐 site 迁移映射
+      （orchestrator/hw_remaster → checkpoint_lower_lsn/validated_tail；
+      worker/plan classify → lifecycle/published_at UNKNOWN fail-closed；
+      plan max_highest_scn 观测处置）。**待 DSH 复审增量 26**（两个待背书
+      项：validate_stream target-page 锚语义、plan verdict truth table）。
+      实施顺序：READ_SNAPSHOT → orchestrator+hw_remaster → worker+plan →
+      census 归零 → bit22 可开。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
