@@ -2879,3 +2879,57 @@ C. **保持 BLOCKED**：root 无写位置期间 revalidate 返回 UNREADABLE →
   覆盖，root 读路径由 t243 merge 场景覆盖。
 - census：worker.c:192 关闭，:247（worker_main）仍 deferred（行号
   位移至 :309）——按文件登记不变，census 违规数保持 4。
+
+---
+
+## 增量 30：episode bgworker 三站设计 —— pre-IR pinned projection（补记 31 项 2，2026-08-18，设计稿）
+
+### 形状（STOP-02 §15 / 补记 31）
+
+零资源锁 → canonical STRONG read → pin root identity + token + 所需
+snapshot 字段 → 进入 episode/CF(X) → bgworker 只消费本 episode 的
+immutable projection（IR 内仅比较 pin 的 token，禁止自行 CF(S)）→
+episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
+
+### 构造者与载体（2026-08-18 取证）
+
+- 三站 episode 入口：
+  - worker:247（recovery worker_main）：由 plan 候选 → workers_launch
+    （startup 进程，pre-IR！worker 是 BgWorkerStart_PostmasterStart）
+  - orchestrator:572（replay_one）：由 thread_recovery_lmon_tick 消费
+    GRD eligibility 后 launch（LMON tick，serving 期）；
+  - hw_remaster:487：由 grd_recovery_lmon_tick 的 P7 段 launch（LMON
+    tick）。
+- CF(X) 持有：非 episode 常驻——wal_state 写路径按需获取（:214）；
+  补记 24 的 LOCK_UNAVAILABLE 是 worker 内 STRONG read 与瞬时 registry
+  写/checkpointer 发布的竞争（16× 实测）。
+- **投影构造点 = episode 入口的 LMON/startup 上下文**（P0 accept 前 /
+  workers_launch 处），STRONG read 一次，pin 每 dead_tid 的
+  {identity, token, validated_tail_lsn_exclusive, checkpoint_lower_lsn,
+  checkpoint_tli, tail_tli, lifecycle, root_publish_seq} 到现有 shmem
+  载体（cluster_thread_recovery_replay_slot 扩展或新
+  cluster_grd_recovery_projection 小区域）。
+
+### 三站消费映射
+
+| 站 | 现读 registry 字段 | projection 字段 |
+|---|---|---|
+| worker:247（classify + validate_stream）| state/last_updated/node_id + highest_lsn + tli | lifecycle/published_at（classify root 版，同站点 1）+ validated_tail/tail_tli（validate_stream_from_root，同 :192）|
+| orchestrator:572（窗口推导）| checkpoint_redo_lsn（lower）+ highest_lsn（validated_min）| checkpoint_lower_lsn + validated_tail_lsn_exclusive（G1a 刷新；validated 界 ≥ 写界？否——validated 是 checkpoint 验证界 ≤ 写位置；作 validated_min = 更严（decode 必须到 checkpoint 验证界），fail-closed 方向安全）|
+| hw_remaster:487（validated_min）| highest_lsn | validated_tail_lsn_exclusive（同上）|
+
+### 实施步骤（逐站提交等复审）
+
+1. projection shmem 载体 + 构造函数（LMON/startup 处 STRONG read +
+   pin）；单测（pin 完整性 + token 比较）；
+2. worker:247 迁移（消费 projection）；
+3. orchestrator:572 迁移；
+4. hw_remaster:487 迁移；
+5. census 逐站双处移除 → GREEN → bit22 可开。
+
+### 待背书项
+
+- 投影构造点选 P0 accept / workers_launch 是否真是"episode 前"（reconfig
+  事件消费与 GRD 状态转换的精确时序）——需 DSH 确认或实测；
+- validated_tail 作 validated_min 的 fail-closed 方向（同增量 26 表
+  已论证：VALIDATED 界强于 written 界，replay validated_end 兜底）。
