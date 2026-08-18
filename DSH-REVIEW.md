@@ -1530,3 +1530,52 @@ pre-bit22 行为不变，post-bit22 分支 pin 现在真正可用。
 - ✅ 批 2（11d6ac246a）：pin 修复 + 调用者门控
 - ⬜ 批 3：census 重定义（GATE-BOUND 语义翻转）+ activate proof 门移除
 - ⬜ 任务 4：bit22 首开轮（coordinator 驱动 + latch 置位 + all-member CLOSED-ACK）
+
+---
+
+## 复审补记 52（2026-08-18 20:10，批 3 未提交代码中级评审：方向全对；两个必须处置项）
+
+### 批 3 变更（4 文件 +119/-82）
+
+**方向完全符合增量 39 §C + 补记 44 设计点 ②** ✅
+
+1. **census 脚本重写**：header 从 "pre-bit22 前置门" 改为 "post-bit22 静态证明（gate 建模）"；
+   DEFERRED 拆分为 GATE_BOUND（plan/worker/orchestrator—legal pre-bit22，静态不可达
+   post-bit22）+ KNOWN_DEFERRED（hw_remaster 仅—ungated，cutover 轮内关闭）；
+   GATE_BOUND 锚点漂移检查（每个 gate-bound 文件必须含 `cluster_r4_bit22_cutover_active`，
+   重构破坏即红）；严格模式 = GREEN = 全部站点 telemetry/gate-bound/closed。✅
+2. **duty.c activate proof**：运行时 census 门移除（`cluster_wal_state_correctness_census_ok`
+   调用删除），注释完整记录裁决（pre-bit22 归零要求迫使反转 cutover 顺序）。
+   coordinator/ACK/feature bitmap 检查保留。✅
+3. **latch apply**：census 自检移入——`cluster_r4_bit22_cutover_latch_apply` 在 CAS 前
+   调用 `cluster_wal_state_correctness_census_ok()`，RED 时拒绝翻转（fail-closed）。
+   注释明确："census GREEN 是 post-bit22 证明，绑定在 cutover 轮内"。✅
+4. **C 表**：plan/worker/orchestrator 移除（已升为 GATE-BOUND），仅余 hw_remaster。
+   锁步：脚本 KNOWN_DEFERRED = C 表 deferred_sites = [hw_remaster]。✅
+
+### ❌ 必须处置 ①：latch 单测会红
+
+`cluster_wal_state_correctness_census_ok()` 实现是 `return deferred_sites[0] == NULL`。
+C 表现在 `= {"cluster_hw_remaster.c", NULL}` → census RED → latch apply 恒返 false。
+batch 1 提交的 test_127/128 调用 `cluster_r4_bit22_cutover_latch_apply(7,3)` 期望 TRUE——
+**批 3 落地后这两个测试必然失败**。
+
+处置：更新 test_127/128 预期为 FALSE（latch 被 census 阻止），新增一条测试验证
+census RED 是拒绝原因（`cluster_wal_state_correctness_census_ok()` → false），
+并加注释说明 hw_remaster 关闭后 latch 才能翻转。test_cluster_r4_activation_fsm.c
+diff 随批 3 同 commit。
+
+### ⚠️ 必须处置 ②：census 脚本锚点漂移检查的路径前缀
+
+GATE_BOUND 锚点检查用 `grep -q "$GATE_ANCHOR" "$g"`，`$g` 是 `src/backend/cluster/cluster_recovery_plan.c`
+等相对路径。脚本 `cd "$ROOT"` 后执行——路径正确。但需确认：三个文件在批 1/2 中确实引入了
+`cluster_r4_bit22_cutover_active()` 调用（实测都有——plan.c 在 generate 函数，worker.c
+在 revalidate 和 worker_main，orchestrator 在 replay_one）。目视已确认，跑批时脚本 strict
+模式应输出 GREEN。✅（已核，建议跑批时实际验证脚本输出）
+
+### 批 3 验收
+
+- 单测：r4_activation_fsm 178→182（含上述 test 更新）+ control_root/plan/worker 聚焦套
+- t243 33/33 + regress 13/13
+- census 脚本 strict 模式 GREEN（`check-wal-state-correctness-census.sh` 输出 "clean"）
+- commit message 记录 latch 单测更新
