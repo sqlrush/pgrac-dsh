@@ -1649,3 +1649,35 @@ v2：node1 崩溃 → node1 自然 crash-rejoin 运行 plan（生产场景）
 
 v2 比 v1 更接近生产场景：利用 crash-rejoin 天然路径而非人工重启。GUC 操纵
 仅在测试内且恢复。设计正确，无问题。
+
+---
+
+## 复审补记 56（2026-08-18 21:30，增量 40 复审：§A 四个发现属实 + 惰性已闭合；§B 任务 4 设计要点核准）
+
+### §A 270 TAP 四个发现：全部属实，非测试设计缺陷
+
+- **发现 1（crash-rejoin epoch 竞态）**：node1 快重启时 epoch 在 bump 前学得
+  旧值 → join 被拒。t243 L4 <3s 快重启是唯一稳定路径。属 P6 rejoin 语义。
+- **发现 2（phase3 死等）**：peer DEAD 时本节点无法重启（qvotec 要求 live
+  peer）。2-node 共享盘固有语义。✓
+- **发现 3（clean-leave 判死 + 短 witness 窗口）**：survivor/joiner 不对称。
+  属 P6 rejoin 语义。✓
+- **发现 4（stats-formation 耦合）**：与发现 3 同根，非 stats 因果。✓
+
+**裁定**：惰性可见性已被既有两层闭合——control_root 单测（NULL+STRONG→23
+守卫 + 两步读真实 fixture，补记 46 核准）+ t243 绿跑 "0 unknown"（补记 49
+DSH 独立核验）。270 TAP 开发文件保留在工作区不提交，三个构造选项（online_join、
+3-node、接受既有证据）留待后续裁决。**任务 3 闭合**——惰性回归已由单测 + t243
+证据钉死，无需 crash 腿重复证明。
+
+### §B 任务 4 设计要点：全部核准 ✅
+
+- coordinator R4 驱动（utility mailbox cutover）✓
+- latch 置位点（OPEN_APPLIED，批 3 census 自检保证 hw_remaster 先关闭）✓
+- hw_remaster S4 入场（gate idiom + 两步读 + 增量 37 二分语义）✓
+- 混合 latch 窗口证明（CLOSED-ACK 后 root 界 = registry 界）✓
+- 顺序约束（hw_remaster 关闭 → census GREEN → latch apply → OPEN_APPLIED）✓
+
+### 任务 4 开工授权
+
+按 §B 设计要点 + 增量 39 §E 落地。单次提交含全部 5 项。
