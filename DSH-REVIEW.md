@@ -1709,3 +1709,45 @@ DSH 独立核验）。270 TAP 开发文件保留在工作区不提交，三个�
 - t243 33/33 + regress 13/13
 - census strict GREEN（0 violation）
 - bash 警告消音
+
+---
+
+## 复审补记 58（2026-08-18 22:05，batch 4 封板 + 增量 42-44 复审 + 增量 44 裁决）
+
+### batch 4（5eba0e5585）：批准封板 ✅
+
+hw_remaster S4 双路径 + census GREEN。与补记 57 核准的未提交 diff 逐字一致。
+t243 33/33（75s）+ regress 13/13 + census strict GREEN。P7 四批全部完成。
+
+### 增量 42（任务 4 详细设计）：核准 ✅
+
+ACK 编排复用（SAMPLE→BARRIER→PREPARED）+ OPEN_APPLIED 新增段（协调者推进 +
+成员 latch apply 幂等 + utility mailbox 驱动）。扩展点精准（OPEN_APPLIED stage
+常量存在 h:45 但无推进路径，最小扩展）。设计正确。
+
+### 增量 43（activate 锁序修正）：核准 ✅
+
+发现 LMON tick 内 `activate_prepared` 持 CF(X) 做盘 I/O 违反 STOP-05 §5.4。
+修正：coordinator utility backend（backend 有 PGPROC、无 LMON tick 锁上下文）
+在 mailbox 两段握手中执行 activate——锁序合法。正确。
+
+### 增量 44（R4 四成员硬编码冲突）：裁决 — 选项 A ✅
+
+**发现属实**：`semantic_activation_ack_lmon_progress_member_commit_applied`
+硬编码 exact four-member formation（成员 1-3、coordinator=0、members=0x0f、
+target=R4_SYNC_CR_V1）。2-node t243 无法通过。
+
+**裁决**：选 **A**（bit22 轮走独立 stage 序列，复用 ACK 表/wire/编排队形，
+成员集与 feature bitmap 由 round 参数驱动，不经过 COMMIT_APPLIED 的四成员
+硬编码段）。理由：
+- R4 冻结校验不动（风险隔离）✅
+- bit22 轮语义不同于 R4 CR sync（root 激活 vs cr 同步），COMMIT_APPLIED 非必需 ✅
+- 2-node t243 可验证 bit22 开门（测试强度）✅
+- B 风险高（动 R4 冻结面），C 留测试缺口——均不可取
+
+### P7 状态
+
+- ✅ 批 1-4：全部封板
+- ✅ 任务 3：闭合（惰性单测 + t243 证据）
+- ✅ 增量 40-44：设计文档全部落地
+- ⬜ 任务 4 实施：按增量 44 裁决 A + 增量 42/43 设计，实施步骤 ①-④
