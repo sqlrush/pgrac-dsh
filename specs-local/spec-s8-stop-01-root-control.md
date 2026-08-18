@@ -4154,3 +4154,48 @@ multi-node harness 建设 = 独立工作项（P9 后）。
   （已有）——TAP 集成同受发现 3 限制。
 - **RU 补强为 P9 的实际新增测试**（unit 层）：RU-07 双路径 fail-closed
   断言 + RU-10/11/12 retirement 三连。
+
+---
+
+## 增量 54：RU 补强审计结论（2026-08-18，P9 §9.1 对照定稿）
+
+### RU-01..09 对照（已有覆盖，逐条确认）
+
+- RU-01（node-local anchor 冒充）：control_root identity 校验（
+  IDENTITY_MISMATCH=12 路径）+ classify 拒绝 ✓；
+- RU-02（local dead_generation 跨节点）：fence/grd generation 绑定 ✓；
+- RU-03（IR owner node id 单独授）：recovery_duty key 校验 ✓；
+- RU-04（provider reply 单独授 I/O）：external_fence unproven 拒 ✓；
+- RU-05（mismatch 后 page write）：stale check 在 mutation 前（
+  control_root token 绑定 + worker target_page 锚）✓；
+- RU-06（KeepLogSeg 忽略 recovery interval）：wal_retention
+  guard/floor 测试 ✓；
+- **RU-07（watermark 允许 skip）：已确认覆盖**——classify_root_slot
+  ABSENT→EMPTY（test_root_absent_is_empty）、其他失败→UNKNOWN；plan.c
+  switch 中 EMPTY/UNKNOWN 均不进 candidate（0 candidate fail-closed）；
+  双路径迁移（批 1-4）的 registry/root fail-closed 即本合同；
+- RU-08（invalid artifact 当 progress）：claim/artifact CRC 校验 ✓；
+- RU-09（post-read 允许 whole retire）：wal_retention pin/guard ✓。
+
+### RU-10/11/12（retirement 三连）实施点定位（下一批）
+
+- retire 门 = cluster_wal_retention.c 的 guard/action 校验
+  （RETIRE_RECYCLE_OR_REMOVE 分支 :1120/:2400 一带）+ deny 枚举
+  （PINNED/SERIAL_STALE 等）；
+- RU-10（PAGE 全 SIDE 缺）：guard 的 source/proof 校验分支——补
+  test_cluster_wal_retention 用例（E1 checkpoint 界 vs side proof 缺 →
+  deny）；
+- RU-11（inherited stable-base STOP）：stable-base 判定——补用例
+  （STOP 中 retire → deny + WAL pinned）；
+- RU-12（recycler 等待 recoverer）：recycler 与 recoverer 的并发门——
+  guard 互斥/禁止边——补用例（recycler 在 recoverer 活跃时立即 deny）。
+- 实施时读 wal_retention.c 的 guard 状态机（recovery_guard/active 门）精确
+  定位断言点。
+
+### P9 状态
+
+- RL-01 ✅（t/271）；RL-05/06/07/08/09/10/11/12 = unit 面 + honest 标注
+  （2-node 限制，增量 51/53）；
+- RU-01..09 ✅ 已有覆盖；RU-10/11/12 = 新增 unit（下一批）；
+- §8.1 观测性（counter G2 分级）：counter 面（hw_remaster/worker 计数器）
+  已有——分级审计待 RU 后。
