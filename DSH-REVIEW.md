@@ -1854,3 +1854,43 @@ t243 33/33 + regress 13/13。与补记 59 核准的未提交 diff 一致。
 - r4fsm 协调者推进测试（增量 46 列场景）
 - t243 33/33 + regress 13/13
 - 上述排序修正
+
+---
+
+## 复审补记 62（2026-08-18 22:50，外部审计 8 findings 全部属实：DSH 独立复验 + 撤销 RF-ROOT complete 结论）
+
+### 外部审计 8 条逐条复验（DSH 亲自取证，全部 CONFIRMED）
+
+1. **[P0] bit22 首开不可达**：operator 不填 PCRM magic/version/bytes/
+   coordinator_incarnation（encode_round 必拒）；build_migration_image 不填
+   root_lineage_seq（validate 要求 ==1）却设 VALID flags；**SAMPLE-ACK 循环
+   前置**——create_authority 要求 SAMPLE stage COMPLETE，cutover_begin 却跳过
+   SAMPLE 直接发 PREPARED 且发生在 create 成功后。三点全部命中。
+2. **[P0] latch 不跨重启**：shmem init 新段置 0，无 durable ACTIVE root 恢复
+   路径。§17.8 "Target OPEN root-only no fallback" 被重启违反。
+3. **[P0] coordinator observed-then-latch 排序**：即补记 61 MUST-FIX，未修。
+4. **[P0] release 丢 WALR resid**：wal_retention.c:819 resid 编码在 Assert 内
+   （AGENTS.md 明令禁止的类），release build 全零 resid 进 GES。
+5. **[P0/门] P4 external fence 恒 false**（STOP04 §11.7 冻结无 provider）：
+   fail-closed 但 STOP-ROOT-IO-FENCE 未闭合，P4/P9 不能标完成。
+6. **[P1] latch 幂等重放缺口**：CAS 赢→observed 发布前崩溃 → 重试 CAS 恒
+   false 且 finish 不发布 observed → 轮永久卡死。现有 replay 单测避开此窗口。
+7. **[P1] RL-01..12**：TAP 仅 RL-01（+RL-02 提及），RL-03..12 无腿。
+8. **[P1] 单测构建失败**：DSH 亲自构建 r4_activation_fsm，链接缺
+   cluster_control_root_build_migration_image + superuser，与审计逐字一致。
+
+### DSH 审查链漏判自认
+
+#1 循环前置（未追 operator→proof 前置链）、#2 跨重启持久（§17.8 直接推论
+未查）、#4 Assert 副作用（AGENTS.md 在案却漏现成案例）、#6 崩溃窗口（幂等
+照单全收）、#8 未在最终树跑单测构建。
+
+### 裁定
+
+- **撤销 RF-ROOT complete 标记**；P7 任务 4（bit22 首开轮）判 RED，回退到
+  实施中状态。
+- 修复顺序：① #4（release 锁身份，最小改动）→ ② #3（排序两行交换）→
+  ③ #1（首开可达：round 字段全填 + SAMPLE 段或 create proof 前置改造 +
+  lineage 等字段）→ ④ #2（latch 跨重启恢复路径）→ ⑤ #6（latch 幂等窗口）
+  → ⑥ #8（Makefile 链接依赖）→ ⑦ #7 + #5（P9/P4 诚实标 BLOCKED，不标完成）。
+- 每修复项：specs-local 增量先行 + 单测 + t243/regress 复跑，DSH 逐项复审。
