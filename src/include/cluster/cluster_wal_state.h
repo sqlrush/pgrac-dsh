@@ -183,6 +183,14 @@ typedef enum ClusterWalStateUpdateResult {
 	CLUSTER_WAL_STATE_UPDATE_FOREIGN,
 	CLUSTER_WAL_STATE_UPDATE_WRONG_STATE,
 	CLUSTER_WAL_STATE_UPDATE_POSTREAD_MISMATCH,
+	/* STOP-01 §17.7 W6 (RF A1, frozen append): RELEASE_UNCERTAIN = a
+	 * coordinated CF release could not be confirmed (fail-closed: the
+	 * caller must not re-acquire or re-publish on the same token);
+	 * SOURCE_CLOSED = the W6 merge source is closed (transition-capable
+	 * binary; the cold / online wrappers return it without any pwrite —
+	 * W6 is permanently retired, not mirrored). */
+	CLUSTER_WAL_STATE_UPDATE_RELEASE_UNCERTAIN,
+	CLUSTER_WAL_STATE_UPDATE_SOURCE_CLOSED,
 } ClusterWalStateUpdateResult;
 
 typedef enum ClusterWalStateCfMode {

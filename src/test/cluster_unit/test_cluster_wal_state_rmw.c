@@ -257,6 +257,23 @@ cluster_cf_unlock(LOCKMODE mode)
 	stub_cf_held = false;
 }
 
+/* STOP-01 §17.7 (RF A1 W1-W5): the coordinated CF release must be
+ * CONFIRMED; an unconfirmed release is RELEASE_UNCERTAIN (fail-closed).
+ * Default confirmed so the existing tests keep their exact event order. */
+static bool stub_cf_release_confirmed = true;
+
+ClusterCfReleaseResult
+cluster_cf_unlock_confirmed(LOCKMODE mode)
+{
+	UT_ASSERT_EQ(mode, ExclusiveLock);
+	stub_cf_unlock_count++;
+	record_event(RMW_EVENT_CF_UNLOCK);
+	if (!stub_cf_release_confirmed)
+		return CLUSTER_CF_RELEASE_UNCONFIRMED;
+	stub_cf_held = false;
+	return CLUSTER_CF_RELEASE_CONFIRMED;
+}
+
 /* ---- virtual registry ---- */
 static unsigned char virtual_file[CLUSTER_WAL_STATE_FILE_SIZE];
 static off_t virtual_file_size = CLUSTER_WAL_STATE_FILE_SIZE;
@@ -418,6 +435,7 @@ fixture_reset(void)
 	stub_cf_held = false;
 	stub_cf_lock_count = 0;
 	stub_cf_unlock_count = 0;
+	stub_cf_release_confirmed = true;
 	virtual_file_size = CLUSTER_WAL_STATE_FILE_SIZE;
 	event_count = 0;
 	open_count = 0;
@@ -541,6 +559,39 @@ UT_TEST(test_a1_acquire_fresh_rmw_exact_order_and_distinct_postread)
 	UT_ASSERT_EQ(ondisk->merge_recovered_lsn, before.merge_recovered_lsn);
 	UT_ASSERT_EQ(ondisk->_reserved[17], before._reserved[17]);
 	UT_ASSERT_EQ(ondisk->_pad_508[0], before._pad_508[0]);
+}
+
+UT_TEST(test_a1_release_uncertain_fails_closed)
+{
+	ClusterWalStateUpdate update = telemetry_update();
+
+	/* STOP-01 §17.7 frozen append (RF A1): RELEASE_UNCERTAIN + SOURCE_CLOSED
+	 * follow the CURRENT last value POSTREAD_MISMATCH (=10) — the spec's
+	 * literal 9/10 was against the f076 baseline; WRONG_STATE/POSTREAD_
+	 * MISMATCH (a later approved stage) occupy 9/10 in this tree and the
+	 * ABI is never renumbered. */
+	UT_ASSERT_EQ((int)CLUSTER_WAL_STATE_UPDATE_RELEASE_UNCERTAIN, 11);
+	UT_ASSERT_EQ((int)CLUSTER_WAL_STATE_UPDATE_SOURCE_CLOSED, 12);
+
+	/* An unconfirmed coordinated CF(X) release must surface as
+	 * RELEASE_UNCERTAIN (fail-closed: the caller must not re-acquire or
+	 * re-publish on the same token), even though the slot write itself
+	 * succeeded and was post-read-verified. */
+	fixture_reset();
+	stub_cf_release_confirmed = false;
+	UT_ASSERT_EQ((int)cluster_wal_state_update_own(
+					 &update, CLUSTER_WAL_STATE_CF_ACQUIRE_X, NULL),
+				 (int)CLUSTER_WAL_STATE_UPDATE_RELEASE_UNCERTAIN);
+	UT_ASSERT_EQ(stub_cf_unlock_count, 1);
+	/* The slot deliberately stays held (never a double grant). */
+	UT_ASSERT(stub_cf_held);
+	fixture_reset();
+
+	/* Confirmed release keeps the exact existing success semantics. */
+	UT_ASSERT_EQ((int)cluster_wal_state_update_own(
+					 &update, CLUSTER_WAL_STATE_CF_ACQUIRE_X, NULL),
+				 (int)CLUSTER_WAL_STATE_UPDATE_OK);
+	UT_ASSERT(!stub_cf_held);
 }
 
 UT_TEST(test_a1_short_write_and_fsync_fail_without_compensation)
@@ -809,10 +860,11 @@ UT_TEST(test_a1_w3_publish_stopped_cf_failure_preserves_active)
 int
 main(int argc pg_attribute_unused(), char **argv pg_attribute_unused())
 {
-	UT_PLAN(11);
+	UT_PLAN(12);
 
 	UT_RUN(test_a1_verified_cf_gate_rejects_before_io);
 	UT_RUN(test_a1_acquire_fresh_rmw_exact_order_and_distinct_postread);
+	UT_RUN(test_a1_release_uncertain_fails_closed);
 	UT_RUN(test_a1_short_write_and_fsync_fail_without_compensation);
 	UT_RUN(test_a1_postread_mismatch_fails_without_compensation);
 	UT_RUN(test_a1_borrow_verified_cf_does_not_reenter_or_unlock);

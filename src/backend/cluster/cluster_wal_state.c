@@ -324,8 +324,16 @@ out:
 		(void)close(fd);
 		errno = save_errno;
 	}
-	if (acquired_here)
-		cluster_cf_unlock(ExclusiveLock);
+	if (acquired_here) {
+		/* STOP-01 §17.7 (RF A1 W1-W5, frozen): the coordinated CF(X)
+		 * release must be CONFIRMED.  An unconfirmed release is
+		 * RELEASE_UNCERTAIN — fail-closed (the caller must not re-acquire
+		 * or re-publish on the same token; the slot deliberately stays
+		 * held and the next acquire drains it — never a double grant). */
+		if (cluster_cf_unlock_confirmed(ExclusiveLock)
+			== CLUSTER_CF_RELEASE_UNCONFIRMED)
+			return CLUSTER_WAL_STATE_UPDATE_RELEASE_UNCERTAIN;
+	}
 	return result;
 }
 
