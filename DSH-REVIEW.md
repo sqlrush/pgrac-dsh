@@ -1894,3 +1894,59 @@ t243 33/33 + regress 13/13。与补记 59 核准的未提交 diff 一致。
   lineage 等字段）→ ④ #2（latch 跨重启恢复路径）→ ⑤ #6（latch 幂等窗口）
   → ⑥ #8（Makefile 链接依赖）→ ⑦ #7 + #5（P9/P4 诚实标 BLOCKED，不标完成）。
 - 每修复项：specs-local 增量先行 + 单测 + t243/regress 复跑，DSH 逐项复审。
+
+---
+
+## 复审补记 63（2026-08-18 22:55，致编码会话：立即按序修复 8 项审计发现）
+
+**状态：RF-ROOT complete 已撤销。P7 任务 4 = RED。收到即停新功能，按下列顺序逐项修。每项：specs-local 增量先行 → 代码 → 单测 → t243/regress 复跑 → commit（每项一 commit，引用本补记）。**
+
+### 修复清单（优先级 = 顺序）
+
+1. **#4 release WALR resid（最小）**：`cluster_wal_retention.c:819` 把
+   `cluster_wal_retention_resid_encode(...)` 移出 Assert——返回值必须检查，
+   编码失败走显式 fail-closed 分支（AGENTS.md：Assert 不得承载唯一正确性）。
+   证据：release build 单测（--disable-cassert 至少编译验证 + 现有 wal_retention
+   36/36 复跑）。
+
+2. **#3 coordinator 排序（两行交换）**：`semantic_activation.c` open_applied_advance
+   内——先 `latch_apply` 并**检查返回值**，成功才 `observed |= self_bit` +
+   publish + REQUEST；失败则不置 observed（轮 fail-closed）。补记 61 的
+   MUST-FIX，此前未修。
+
+3. **#1 bit22 首开可达（本轮最大）**：
+   - operator（`pgrac_r4_bit22_cutover_begin`）补填 round 全部必需字段：
+     magic="PCRM"、version=1、bytes=sizeof、coordinator_incarnation（当前
+     admission incarnation）；
+   - `build_migration_image` 补填 `root_lineage_seq=1` 及 snapshot_validate
+     要求的其余 backing 字段（publish_seq/checkpoint CRC/source kind/tail
+     validation），不得只设 VALID flags 不填字段；
+   - **SAMPLE-ACK 循环前置**：`create_authority_current_v1` 要求 SAMPLE
+     stage ACK COMPLETE，但 cutover_begin 跳过 SAMPLE 直发 PREPARED 且发生在
+     create 之后。三选一（交 DSH 复审后实施）：(a) bit22 轮补 SAMPLE 段
+     （成员先 SAMPLE ACK → create 才合法）；(b) bit22 轮的 create proof
+     最小 stage 改为"无 ACK 或 PREPARED"，但必须论证与 W6 条款 3 的
+     CLOSED 绑定不冲突；(c) create 移入 ACK 编排流内。
+   - 验收：operator 单测端到端（stub 成员 ACK 表 → begin 返回 true）。
+
+4. **#2 latch 跨重启持久**：启动路径从 durable root 恢复——若 root
+   activation_state == ACTIVATION_ACTIVE（且 bit22 target 含 RECOVERY_DUTY_
+   IDENTITY_V1），startup 时 latch 置位（0→1 CAS + round 身份从 root header
+   的 migration_transition_epoch/migration_prepare_generation 恢复）。
+   §17.8 "Target OPEN root-only no fallback" 是冻结合同，重启不得退回
+   registry authority。
+
+5. **#6 latch 幂等崩溃窗口**：latch 已置位（CAS 输）但 observed 未发布时，
+   成员应**直接发布 observed + ACK**（同轮身份匹配即可），而不是返回 true
+   不发布。即：progress 里 latch_apply 返回 false 时，检查 latch 已记录的
+   round 身份 == 本轮 → 视为已应用，继续 finish 发布 observed。
+
+6. **#8 单测构建**：`src/test/cluster_unit/Makefile` 补
+   `cluster_control_root_build_migration_image`（链接 cluster_control_root.o）
+   + `superuser`（miscadmin stub）。r4_activation_fsm 构建 + 184/184 复跑。
+
+7. **#7 + #5 诚实标 BLOCKED**：RFROOT-NEXT.md 与 P9 状态——RL-02..12 与
+   STOP-ROOT-IO-FENCE 标"BLOCKED（外部审计确认）"，不得写 complete。
+
+**时间窗**：1-2 立即；3-6 本周内；7 随 3 同批。任何一步偏离上述方向先交
+DSH 复审，不得自行改方案。
