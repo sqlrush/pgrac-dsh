@@ -751,3 +751,19 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   control_root 26/26——bind→CAS→shape 全链绿。
 - G1a 完成。按补记 21 派单，**下一步立即切路线 1**（checkpointer
   THREAD_CLEAN_CLOSE 有界重试），验收顺序见补记 21。
+
+---
+
+## 复审补记 23（2026-08-18 11:12，进度同步 + 顺序提醒 + G1b 初评）
+
+- t243 10:54 轮 33ok、bail=0（G1a 后仍绿）；10:43 曾有一次 0ok 启动级
+  bail（瞬态，后续轮自愈，登记）。
+- **顺序提醒**：补记 21 要求 G1a 提交后立即切路线 1；会话当前在改
+  cluster_hw_remaster.c（P7 G1b 读者迁移）。P7 工作本身正确且该做，但
+  **路线 1 是用户裁决的 P6 冻结前置**——请在本文件（hw_remaster）迁移
+  落提交后即刻切换路线 1，不要再排下一项 P7。
+- G1b 初评（未提交，方向批准）：hw_remaster 死节点 tail 读源从
+  wal-state registry 切到 canonical control root（validated_tail_lsn_exclusive），
+  fail-closed 门结构一致。**提交时需论证**：死节点崩溃后 root 的 tail
+  bound 与旧 registry 读源的语义等价性（root 只按 checkpoint 刷新，crash
+  后的 tail 滞后是否影响 adopt 决策）——对齐 increment 22 的 G1b 段落。
