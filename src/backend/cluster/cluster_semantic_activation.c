@@ -428,6 +428,9 @@ static bool semantic_activation_ack_lmon_progress_member_open_applied(
 static bool semantic_activation_ack_lmon_finish_member_open_applied(
 	const ClusterSemanticActivationAckTableV1 *before,
 	bool latch_applied);
+static bool semantic_activation_ack_member_prepared_image_current_bit22(
+	const ClusterSemanticActivationAckTableV1 *image,
+	SemanticActivationAckTuple *out_self);
 static bool semantic_activation_ack_lmon_open_applied_advance(
 	const ClusterSemanticActivationAckTableV1 *before,
 	uint64 current_members_lo, uint64 current_members_hi,
@@ -3559,6 +3562,14 @@ semantic_activation_ack_member_prepared_image_current(
 	const ClusterSemanticActivationAckTableV1 *image,
 	SemanticActivationAckTuple *out_self)
 {
+	/* RF-ROOT P7 (增量 47): the bit22 cutover round uses the
+	 * round-parameterized check (member set from the ACK table, target
+	 * carries bit22) instead of the R4 four-member hardcoded shape. */
+	if (image != NULL && (image->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+		return semantic_activation_ack_member_prepared_image_current_bit22(
+			image, out_self);
+
 	SemanticActivationAdmissionSnapshot snapshot;
 	SemanticActivationAckTuple self;
 	uint64 current_members_lo;
@@ -3724,6 +3735,19 @@ semantic_activation_ack_lmon_finish_member_prepared(
 	semantic_activation_ack_local_pending_send = pending;
 	semantic_activation_ack_lmon_send_pending();
 	return true;
+}
+
+/*
+ * RF-ROOT P7 (增量 47): the bit22 cutover round's member-side stage
+ * callbacks.  PREPARED has no member action (the activation is the
+ * coordinator's; members only ACK the CLOSED-ACK binding), so the callback
+ * is a no-op OK — in contrast to R4's cr-sync prepare_target.
+ */
+static ClusterSemanticActivationResult
+bit22_stage_ok(uint64 record_generation)
+{
+	(void) record_generation;
+	return CLUSTER_SEMANTIC_ACTIVATION_OK;
 }
 
 static const ClusterSemanticActivationDescriptor r4_descriptor = {
@@ -4085,6 +4109,69 @@ semantic_activation_ack_lmon_progress_member_commit_applied(
 		&after, result);
 }
 
+/*
+ * RF-ROOT P7 (增量 47): round-parameterized PREPARED image check for the
+ * bit22 cutover round — mirrors member_open_applied_image_current with
+ * stage PREPARED (member set from the ACK table; no four-member hardcoding).
+ */
+static bool
+semantic_activation_ack_member_prepared_image_current_bit22(
+	const ClusterSemanticActivationAckTableV1 *image,
+	SemanticActivationAckTuple *out_self)
+{
+	SemanticActivationAckTuple self;
+	uint64 current_members_lo;
+	uint64 current_members_hi;
+	uint64 current_epoch;
+	uint32 local_capability_word;
+	int32 current_coordinator_node;
+
+	if (image == NULL || out_self == NULL
+		|| cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES
+		|| image->stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED
+		|| image->coordinator_node == (uint32)cluster_node_id
+		|| image->round_nonce == 0
+		|| image->transition_epoch == 0
+		|| image->record_generation == 0
+		|| (image->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| (image->flags
+			& ~(CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				| CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE)) != 0
+		|| (image->flags
+			& CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID) == 0
+		|| image->expected_members_lo == 0
+		|| image->expected_members_hi != 0
+		|| (image->observed_members_lo
+			& ~image->expected_members_lo) != 0
+		|| image->observed_members_hi != 0
+		|| semantic_activation_ack_local_pending_send.pending_members_lo != 0
+		|| semantic_activation_ack_local_pending_send.pending_members_hi != 0
+		|| semantic_activation_ack_local_pending_send.invalidated)
+		return false;
+	if (!semantic_activation_ack_current_authority(
+			cluster_node_id, &current_members_lo, &current_members_hi,
+			&current_epoch, &current_coordinator_node)
+		|| current_members_lo != image->expected_members_lo
+		|| current_members_hi != image->expected_members_hi
+		|| current_epoch != image->transition_epoch
+		|| current_coordinator_node != (int32)image->coordinator_node)
+		return false;
+	local_capability_word = cluster_ic_local_capability_word();
+	if (!semantic_activation_ack_expected_image_current(
+			image, current_members_lo, current_members_hi, current_epoch,
+			current_coordinator_node, cluster_node_id,
+			local_capability_word)
+		|| !semantic_activation_ack_self_tuple(
+			cluster_node_id, local_capability_word, current_epoch,
+			image->record_generation, &self)
+		|| !semantic_activation_ack_matches(
+			&image->expected[cluster_node_id], &self))
+		return false;
+	*out_self = self;
+	return true;
+}
+
 static bool
 semantic_activation_ack_lmon_progress_member_barrier(void)
 {
@@ -4129,7 +4216,13 @@ semantic_activation_ack_lmon_progress_member_barrier(void)
 		self_bit = UINT64_C(1) << cluster_node_id;
 		if ((before.observed_members_lo & self_bit) != 0)
 			return true;
-		result = r4_descriptor.prepare_target(before.record_generation);
+		/* RF-ROOT P7 (增量 47): the bit22 cutover round has no member
+		 * PREPARED action — no-op OK; R4 keeps its cr-sync callback. */
+		if ((before.target_feature_bitmap
+			 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+			result = bit22_stage_ok(before.record_generation);
+		else
+			result = r4_descriptor.prepare_target(before.record_generation);
 		return semantic_activation_ack_lmon_finish_member_prepared(
 			&before, result);
 	}
@@ -4440,8 +4533,13 @@ semantic_activation_ack_lmon_begin_barrier_round(
 				cluster_node_id, local_capability_word))
 			return false;
 		if ((before.observed_members_lo & self_bit) == 0) {
-			result = r4_descriptor.prepare_target(
-				before.record_generation);
+			/* RF-ROOT P7 (增量 47): bit22 round -> no-op member PREPARED. */
+			if ((before.target_feature_bitmap
+				 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+				result = bit22_stage_ok(before.record_generation);
+			else
+				result = r4_descriptor.prepare_target(
+					before.record_generation);
 			return semantic_activation_ack_lmon_finish_member_prepared(
 				&before, result);
 		}

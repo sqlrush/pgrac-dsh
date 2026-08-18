@@ -4919,10 +4919,44 @@ UT_TEST(test_139_coordinator_open_applied_advance_rejects_mismatched_seam)
 	test_gate_reset();
 }
 
+/* RF-ROOT P7 (增量 47): member-side PREPARED for the bit22 cutover round —
+ * round-parameterized image check + no-op callback. */
+UT_TEST(test_140_member_prepared_bit22_round_parameterized)
+{
+	SemanticActivationAckTuple self;
+
+	ut_open_applied_env_setup(); /* member cluster_node_id = 1 */
+	ut_open_applied_table_setup();
+	SemanticActivationAckTable->stage
+		= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
+	UT_ASSERT(semantic_activation_ack_member_prepared_image_current_bit22(
+		SemanticActivationAckTable, &self));
+	UT_ASSERT_EQ(self.node_id, 1);
+	UT_ASSERT_EQ(bit22_stage_ok(5), CLUSTER_SEMANTIC_ACTIVATION_OK);
+	test_gate_reset();
+}
+
+UT_TEST(test_141_member_prepared_r4_round_keeps_four_member_shape)
+{
+	SemanticActivationAckTuple self;
+
+	ut_open_applied_env_setup();
+	ut_open_applied_table_setup();
+	SemanticActivationAckTable->stage
+		= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
+	SemanticActivationAckTable->target_feature_bitmap
+		= CLUSTER_SEMANTIC_FEATURE_R4_SYNC_CR_V1; /* R4 round: no bit22 */
+	/* The R4 four-member shape (expected 0x0f, coordinator 0) is violated by
+	 * the 2-node table — the frozen R4 check must still reject it. */
+	UT_ASSERT(!semantic_activation_ack_member_prepared_image_current(
+		SemanticActivationAckTable, &self));
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(188);
+	UT_PLAN(190);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -5111,6 +5145,8 @@ main(void)
 	UT_RUN(test_137_coordinator_open_applied_advance_waits_for_seam);
 	UT_RUN(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failure);
 	UT_RUN(test_139_coordinator_open_applied_advance_rejects_mismatched_seam);
+	UT_RUN(test_140_member_prepared_bit22_round_parameterized);
+	UT_RUN(test_141_member_prepared_r4_round_keeps_four_member_shape);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }
