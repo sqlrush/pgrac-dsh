@@ -4083,3 +4083,40 @@ P8：recoverer crash 后同 episode 无 replacement 接管（BLOCKED 或 episode
 2. RL-01/05/07/09 TAP 腿（2-node 可行集）；
 3. RL-02/03/04/06/08/10/11/12：honest SKIP-with-reason 或 unit 覆盖；
 4. §8.1 观测性（counter G2 分级）。
+
+---
+
+## 增量 52：RL-05 评估 + RL-07/09 设计（2026-08-18，P9 逐腿推进）
+
+### RL-05（stale-owner-I/O）评估：honest 工具缺口
+
+2-node 的 stale-owner 写拒需要"node1 被取代后仍活且写"——取代前提 =
+node1 崩（死，不能写）或隔离（IC 断——**ClusterPair 无隔离注入工具**）。
+t269 明示 fence firing 场景 "NOT reachable single-node ... land in a
+multi-node fence harness"——**multi-node fence harness 不存在**。
+处置：单元面（test_cluster_write_fence 的拒绝路径）+ **honest 标注**；
+multi-node harness 建设 = 独立工作项（P9 后）。
+
+### RL-07（control-root-mismatch）TAP 设计（可行）
+
+1. pair 启动（2 节点）；
+2. node0 停（clean，node1 活着——重启无 phase3 问题）；
+3. **篡改 root 文件**（备份原字节，flip 一字节——header/body CRC 破）；
+4. node0 重启 → **断言 fail-closed**（STRONG 读 CRC 失败 → 节点拒绝/
+   降级——日志 "control root" 错误）；
+5. **还原字节** → node0 重启成功 → pair 恢复；
+6. 破坏性操作全程有备份/还原（测试自愈）。
+
+### RL-09（source-loss）TAP 设计（可行，同模式）
+
+1. node1 停（clean）；
+2. 删 thread_2 的部分 WAL（备份移走）；
+3. node1 重启 → 断言 BLOCKED（恢复/remaster 不 blind apply）；
+4. 还原 → 恢复。
+
+### RU 补强清单（下一批）
+
+- RU-07 断言：plan/worker 双路径 fail-closed（UNKNOWN 不产 candidate）——
+  补 plan 单测（root 读失败 → 0 candidate）；
+- RU-10/11/12（retirement 三连）：wal_retention 单测补（PAGE 全 SIDE 缺
+  拒 / stable-base STOP 拒 / recycler 等待拒）。
