@@ -1479,3 +1479,31 @@ worker.c:484 的 `cluster_thread_recovery_pin_projection` 仍对每个 candidate
 批 1 完成：NULL-identity bug 修复 + S1-S3 bit22 门控双路径 + latch 设施 + 单测 + census 锁步。
 P7 剩余：批 2（S3 pin 修好 + consumer post-bit22 分支，latch 永不置位 ⇒ 动态不可达，
 不影响批 1 绿跑）+ 批 3（census 重定义 + activate proof 门移除）+ 任务 4（bit22 首开轮）。
+
+---
+
+## 复审补记 50（2026-08-18 20:00，批 2 未提交代码核准：pin 修复 + 调用者门控，三处全对）
+
+### 批 2 变更（3 文件 +45/-30）
+
+1. **plan.c pin_projection**：STRONG+NULL → `cluster_control_root_read_canonical_discovered`
+   （§A 两步读）。pin 现在真正工作——ABSENT/任何读失败→false→projection_current 拒绝→
+   fail-closed。注释明确"post-bit22-only：调用者以 latch 门控"。✅
+2. **worker.c workers_launch**：pin 调用加 `if (cluster_r4_bit22_cutover_active())` 门。
+   pre-bit22 不 pin（worker_main 走 registry），post-bit22 pin 且 pin 现在能成功。✅
+3. **thread_recovery_worker.c launch_one**：同模式——pin 加 latch 门 + 新增
+   `cluster_semantic_activation.h` include。✅
+
+### 锁序检查
+
+pin 两步读：BOOTSTRAP（无 CF）→ STRONG（CF(S)）。调用点：
+- workers_launch：startup pre-IR，AD-023 §4 允许 CF(S) ✅
+- launch_one：LMON tick pre-IR，原设计（增量 30/31）已允许 STRONG 在此点 ✅
+CF(S) 在零资源锁点获取，不构成新锁嵌套 ✅
+
+### 批 2 状态
+
+- 代码面：三处修改，最小、精准、注释完整
+- pre-bit22 行为不变（pin 不调用，consumer 走 registry）
+- post-bit22 分支：pin 现在功能正常，latch 置位后 projection 可用
+- 验收：单测 + t243 33/33 + regress 13/13（跑批后 commit）
