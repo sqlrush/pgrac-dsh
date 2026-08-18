@@ -2552,3 +2552,58 @@ canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X
 - 单测：recovery_duty 25/25、r4_activation_fsm 174/174（g3 用例内扩展，未新增函数）、wal_state_rmw 13/13、
   control_root 26/26；t243 33/33。
 - 静态：census strict 仍 RED（5 violation，按设计）+ lockstep 校验绿。
+
+---
+
+## 增量 25：G1b step 4 设计 —— deferred 站点降级登记（node-local authority 同型）（2026-08-18，设计稿，待 DSH 复审）
+
+### 背景与循环依赖
+
+- 补记 29 定序：关闭 5 个 deferred site → census 转 GREEN → 才是 bit22 可开
+  时刻。但增量 23 step 5 原说 B5/B6/hw_remaster "待 R4 时代 CF(S)/episode
+  CF(X) 窗口调度"——若调度是 bit22 前置，则调度设计 → bit22 → 调度 成环。
+  本增量解环：**按冻结语义降级为 node-local authority（merged.authority
+  同型，增量 23 step 5 已预留该路径），而非等待调度**。
+
+### 逐 site 上下文实证（2026-08-18 复核）
+
+| Site | 执行上下文 | CF(S) | 数据依赖 | 判定 |
+|---|---|---|---|---|
+| recovery_plan.c:203 | **startup**（xlogrecovery.c:1251 调 plan_generate） | 可行 | state/last_updated/node_id（verdict 分类）+ highest_lsn + highest_scn | B4：verdict 语义映射非恒等；**max_highest_scn 无外部消费者**（观测字段，plan.c 内自写自读） |
+| recovery_worker.c:192（revalidate） | **startup**（merge project_readonly ← engage ← xlogrecovery.c:2436 链） | 可行 | highest_lsn（构造 target page 写位置）+ tli | **root 无写位置字段**（validated_tail 是 VALIDATED 界 ≠ written watermark）→ 迁移会改变验证语义 |
+| recovery_worker.c:247（worker_main） | episode bgworker | 不可行 | 同 :192 + classify | hw_remaster 同型（LOCK_UNAVAILABLE 实证） |
+| orchestrator.c:572（replay_one） | thread-recovery bgworker（worker.c:209 调用） | 不可行 | checkpoint_redo_lsn（lower）+ highest_lsn（validated_min） | 同上 |
+| hw_remaster.c:487 | hw-remaster bgworker | 不可行（实测 16×） | highest_lsn（validated_min） | 同上 |
+
+### 设计（降级登记 = 语义重新分类，非放行正确性读）
+
+1. **类别定义**：新增 census 白名单类别 `NODE_LOCAL_AUTHORITY`——该读的
+   权威面是 **node-local 重建/验证决策**（merged.authority 同型：
+   cluster_merged_instance_is_materialized 即 node-local 标记驱动 reader
+   gate），**不授予 cluster-wide 权威**；每次读失败仍 fail-closed
+   （BLOCKED/UNREADABLE → 冻结，不静默降级）。因此不属于 "cluster-wide
+   correctness reader"，bit22 打开后允许存在。
+2. **判定**：5 个站点全部落入该类别（B4 plan 的 SCN 维度裁为观测——
+   max_highest_scn 无消费者；verdict 分类保留 registry state+last_updated
+   语义，不映射 root lifecycle——映射非恒等，强行迁移反而引入新语义风险）。
+   worker.c:192/orchestrator:572/hw_remaster:487 数据依赖含 registry 独有
+   字段（写位置/checkpoint_redo/highest），root 无等价字段，迁移即语义变更。
+3. **census 落地**：脚本 DEFERRED 数组改为登记类别（每行标注 node-local
+   authority + 理由注释）；strict 模式对 NODE_LOCAL_AUTHORITY 站点**不计数**
+   （显式登记，非隐藏）；C 表 lockstep 同步（cluster_wal_state.c 表同样
+   拆分：deferred 空 + node_local_authority 5 项）。**GREEN 条件 =
+   DEFERRED 空 且 NODE_LOCAL_AUTHORITY 表与脚本一致**（漂移仍 VIOLATION）。
+4. **运行时门**：cluster_wal_state_correctness_census_ok 语义不变（bit22
+   打开时 DEFERRED 必须空；node-local 站点存在不阻塞）。activate proof
+   不变。新增测试：census_ok 在 DEFERRED 空 + node-local 表非空时 = GREEN。
+5. **后续**：R4 时代若 CF(S)/episode CF(X) 调度落地，可把站点逐个迁回
+   canonical root（届时从 NODE_LOCAL_AUTHORITY 表移除 = 更严，安全方向）。
+
+### 验收
+
+- 单测：wal_state_rmw census 测试扩展（GREEN 判定 + 表 lockstep）；
+  recovery_duty/activate 不变（运行时门语义不变）。
+- 静态：census strict 转 **GREEN**（5 站点显式降级登记，DEFERRED 空）；
+  deferred-ok 模式输出 node-local 登记清单。
+- t243 33/33；regress 13/13。
+- 待 DSH 复审通过后实施（此设计稿不实施）。
