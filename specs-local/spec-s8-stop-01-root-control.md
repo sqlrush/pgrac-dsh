@@ -3025,3 +3025,31 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
   窗口干扰 write-fence 状态有关，或为偶发——**需 DSH 判断**。
 - 待办：不自行迭代 ④；把 16:08 运行日志（已被清理）的关键行 + 本增量
   证据链交 DSH，由 DSH 指导 write-fence 交互验证或方案调整。
+
+---
+
+## 增量 34：P5 遗留修复 —— anchor 发布 fenced 预检跳过（补记 39，2026-08-18）
+
+### 归因结论（复现验证）
+
+- 已提交树（无 ④，有 G1a/G1a-2/①②③）：t243 **33/33 绿**——write-fence
+  PANIC 不复现；
+- ④ 的 grd pin 前移改变 fence 刷新时序 → 照出 P5 遗留 bug：anchor 发布
+  入口（cluster_recovery_anchor.c:418）注释意图 = "fenced 时跳过发布"
+  （cluster_write_fence.c:10 同意图），实现却是
+  `cluster_write_fence_reject_if_fenced`（CritSectionCount>0 → PANIC）。
+
+### 修复（最小，符合冻结意图）
+
+- `cluster_recovery_anchor_publish_checkpoint` 入口：reject_if_fenced 替换
+  为 `if (!cluster_write_fence_allowed()) { LOG 跳过; return; }`——
+  不发布 anchor 对 fenced 节点是安全方向（发布才是危险）；PANIC 语义
+  保留给"不可回滚的半完成临界写"，而这里是在写之前检查，跳过无损。
+- 保留 `checkpoint_publisher_is_current` 的 stale-member PANIC（那是
+  sysid 校验，非 fence 语义）。
+- 观测：跳过时 LOG（fenced 节点的 anchor 不发布，restart 走 crash-rejoin）。
+
+### 验收
+
+- t243 33/33 + regress 13/13 + 全量单测无回归；
+- ④ 恢复后（pin 前移）不再 PANIC（fence 刷新时序变化被预检吸收）。
