@@ -1033,3 +1033,23 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   census 的 GREEN 仅存在于 stash 内，提交树仍是 3 violations
   （worker:247/orchestrator:572/hw_remaster:487）。
 - 提醒：t243 的 TEMP note 在 stash 里，pop 后仍须最终删除（补记 36）。
+
+---
+
+## 复审补记 38（2026-08-18 16:15，增量 32 回滚复审：批准 + 决策依赖提醒）
+
+- 回滚正确（33→2 回归证据链完整：L4 node1 崩溃 → node0 grd P0 pin
+  tid2 root ABSENT → hw_remaster BLOCKED → hw_gate held → episode 卡死
+  → CHECKPOINT 拿不到 CF）。fail-closed 生效，回滚是唯一正确动作 ✓。
+- 诊断方向成立：投影可见性未就绪 ≠ 代码逻辑 bug。但"root 文件在 L4
+  为何缺失"两假设（cast 断言后消失 / shared_data_dir 指向无 root 目录）
+  必须查实后再定方案——**不要跳到"t243 适配"**。
+- **决策依赖提醒**：t243 的 root 供给已有冻结裁决（talk
+  RFROOT-P04-A2-T243-CANONICAL-ROOT-ABSENT-20260816，DECISION=
+  RETURN_MAINLINE：t243 setup-only 经既有生产 ROOT producer 建立
+  canonical ROOT，禁 ROOT bypass）。若查实是 t243 fixture 可见性缺口，
+  修复也必须落在这条裁决内（setup-only + 生产 producer），不得
+  workload/judge 改动。若查实是产品面（真实 crash 场景 root 可能缺失），
+  则需冻结语义的 root-absence 处置（BLOCKED 是现行为，可登记）。
+- 现状：census 回到 3 violations（hw_remaster 为最后 1 个 deferred，
+  ②③ 已提交关闭）。站点 ④ 等根因查实。
