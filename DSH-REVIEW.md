@@ -937,3 +937,25 @@ CF(S)）→ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read�
 
 census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
 13/13 + 聚焦单测绿；5 站逐站提交，等 DSH 逐站复审。
+
+---
+
+## 复审补记 32（2026-08-18 15:05，增量 27 site-1 三案评审：批准 A，附三条件）
+
+- 三案分析质量高：B/C 都再碰 §17.9 exactly-zero（同补记 30 型偏离），
+  A 是唯一字面合规路径——**DSH 批准 A**（活性判定降为 lifecycle +
+  保守 checkpoint 界，阈值 max(checkpoint_timeout×2, 60s)，ALIVE 偏向）。
+- 误判方向分析正确：crashed→ALIVE 误判 = NOT_COLD 拒 merge → 4.6/4.7
+  其它路径（安全）；alive→CRASHED 误判 = merge 尝试 → SKIPPED → FATAL
+  （危险）→ 阈值保守放大、宁 ALIVE 是对的 fail-closed 方向。
+- **三条件（实施时落地）**：
+  1. verdict truth-table 聚焦单测（ALIVE/CRASHED/EMPTY 全象限 +
+     阈值边界 age 恰在阈值±ε）——会话已提议，采纳；
+  2. liveness 延迟代价显式登记：crashed→CRASHED_CANDIDATE 判定延迟从
+     ~10s 变 checkpoint 粒度（checkpoint_timeout=300s 时阈值 600s；
+     timeout=1h 时阈值 2h）——需在增量 27 正文写明"安全但慢"的取舍 +
+     4.6/4.7 兜底路径在该延迟下的可用性论证（别只写"非丢失"三字）；
+  3. 阈值 clamp 下限 60s 保持，上限无需 clamp 但文档须给 timeout 大值
+     场景的端到端可接受性（fallback 路径存在且不依赖本判定）。
+- site-1 范围确认：本轮 = plan.c:203 的 verdict CLEAN/EMPTY 维迁移 +
+  活性维按 A 落地；worker.c:192 写位置锚问题另站处理（增量 26 表）。
