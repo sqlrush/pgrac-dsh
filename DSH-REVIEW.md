@@ -782,3 +782,26 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   （CF(S) vs episode CF(X) 窗口错峰）或保留 registry 读并显式降级登记。
   这属于 STOP-05 §5.4 锁序纪律面，勿强行迁移。
 - **顺序提醒重申**：本单提交后切路线 1（补记 21），P6 冻结前置。
+
+---
+
+## 复审补记 25（2026-08-18 11:40，🎯 P6 正式冻结终裁）
+
+### 终裁证据链（全部 DSH 独立核证）
+
+| 门 | 证据 |
+|---|---|
+| t243 行为门 | 11:28 轮 33/33 无 bail；**11:36 最终提交树独立复跑 33/33，77s PASS，exit=0** |
+| owner 落 CLOSED（路线 1） | "clean-closed by owner" ×3 / 轮 |
+| 增量 21 补写已死 | "missed clean-close repaired" ×0（代码已删，含 LOG/单测） |
+| Spec 冻结门 | STOP-02 §17.4：OWNER_REJOIN 严格 RECOVERY_COMPLETE-only（增量 13 已摘）；STOP-01 THREAD_OPEN/THREAD_CLEAN_CLOSE 主线（B 裁决）；发布者合同恢复（路线 1） |
+| 单测闭包 | recovery_duty 22/22、clean_leave 11/11、control_root 26/26；232 二进制仅 3 失败 = 8 个 pre-existing（77/92 + R4×6），与 P6 无关 |
+| cluster_regress | All 13 tests passed（exit=0，DSH 独立复跑） |
+| TEMP | P6 时代残留清零（cluster_lock_acquire 注释已改）；26 文件为更早 stage 遗留，登记不阻塞 |
+| 推送 | origin/rf-root-dev == HEAD（4f93ce5ee1 之后全部在公共仓） |
+
+### 裁定
+
+**P6 冻结成立。** 行为门 + Spec/authority 冻结门 + 回归门三关全过。
+遗留（8 个 pre-existing 断言、G1b 锁序设计、P7 G2-G6）不属 P6 范围，
+转入 P7 计划继续。
