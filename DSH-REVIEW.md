@@ -974,3 +974,16 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
 - 通过。剩余 4 站：worker.c:192（startup）/ worker.c:247 +
   orchestrator.c:572 + hw_remaster.c:487（bgworker，等 episode-pinned
   projection 设计落地后逐站关）。
+
+---
+
+## 复审补记 34（2026-08-18 15:32，site-2 提交复审：通过 + P2 补测要求）
+
+- 34eb81cc71（worker.c:192 revalidate 迁 canonical root）：锚点/门禁/t243
+  证据（33/33 79s）+ census 4→3 + lockstep 绿，全部核过 ✓。
+- P2（不阻塞，下站提交前顺手补）：validate_stream_from_root 的两个新
+  fail-closed 分支没有专属单测——validated_tail==0 → UNREADABLE、
+  claim 无效 → SUSPECT。锚点数学复用旧测试成立，但这两个新分支是
+  迁移引入的行为面，加 2 例断言即可。
+- 剩余 3 站：worker.c:247/309、orchestrator.c:572、hw_remaster.c:487
+  （episode-bgworker 站，等 episode-pinned projection 设计）。
