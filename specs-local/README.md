@@ -5,6 +5,10 @@
 > 对 spec 进行优化与内容补全；`~/pgrac` 与 `~/linkdb` 原件只读，绝不修改。
 > 本目录已加入 `.git/info/exclude`，绝不 push 公开仓。若需同步回私有设计库，
 > 由 user 走其 Writer/talk 流程显式授权后另行同步。
+> 公开政策（user 2026-08-18 裁决 A）：本目录随 rf-root-dev/main 推送至
+> github.com/sqlrush/pgrac-dsh（公共仓库）；代码与设计文档公开均获 user
+> 显式授权（2026-08-17 口头、2026-08-18 书面复核）。原始 spec（~/pgrac）
+> 仍只读、不公开于本仓。
 
 ## 当前副本清单与增量状态
 
