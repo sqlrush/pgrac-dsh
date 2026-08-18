@@ -469,20 +469,24 @@ cluster_recovery_workers_launch(void)
 		return;
 
 	/*
-	 * RF-ROOT P7 G1b step 4 ② (increment 30/31): pin the canonical-root
-	 * projection for every plan candidate BEFORE spawning.  This runs in
-	 * the startup process at pre-IR (zero resource locks — the launch
-	 * follows the plan pass and precedes any episode freeze); the workers
-	 * then consume ONLY the pinned fields and never re-acquire CF(S)
-	 * (补记 31 item 2).  A pin failure keeps that thread fail-closed: the
-	 * worker's projection_current will refuse it (UNREADABLE verdict).
+	 * RF-ROOT P7 (增量 39 §B): pin the canonical-root projection for every
+	 * plan candidate BEFORE spawning — post-bit22 only (pre-bit22 the
+	 * worker_main consumes the registry directly under the gate idiom, so a
+	 * projection is never needed).  This runs in the startup process at
+	 * pre-IR (zero resource locks — the launch follows the plan pass and
+	 * precedes any episode freeze); the workers then consume ONLY the
+	 * pinned fields and never re-acquire CF(S) (补记 31 item 2).  A pin
+	 * failure keeps that thread fail-closed: the worker's projection_current
+	 * will refuse it (UNREADABLE verdict).
 	 */
 	for (tid = XLP_THREAD_ID_FIRST_REAL; tid <= CLUSTER_WAL_THREAD_MAX; tid++) {
 		if ((plan.candidate_bitmap[(tid - 1) / 64]
 			 & (UINT64_C(1) << ((tid - 1) % 64))) == 0)
 			continue;
-		(void) cluster_thread_recovery_pin_projection(
-			tid, (uint64) pool->generation);
+		if (cluster_r4_bit22_cutover_active()) {
+			(void) cluster_thread_recovery_pin_projection(
+				tid, (uint64) pool->generation);
+		}
 	}
 
 	for (slot = 0; slot < n_workers; slot++) {

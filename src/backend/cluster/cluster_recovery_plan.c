@@ -345,15 +345,21 @@ cluster_thread_recovery_replay_slot(uint16 dead_tid)
 }
 
 /*
- * cluster_thread_recovery_pin_projection -- RF-ROOT P7 G1b step 4 (increment
- * 30/31): pin the canonical-root projection for one dead thread BEFORE the
- * episode freeze.  Must be called from a zero-resource-lock point (LMON tick
- * before grd P1 freeze / startup pre-IR); the caller holds no CF.  STRONG
- * read once, then stamp the slot under the given episode_epoch — the worker
- * consumes only this immutable projection and never re-acquires CF(S) inside
- * the episode (补记 31 item 2, STOP-02 §1.3 projection discipline).  Returns
- * false when the root read fails (the episode then fails closed on this
- * thread) or the slot is absent.
+ * cluster_thread_recovery_pin_projection -- RF-ROOT P7 (增量 39 §B): pin the
+ * canonical-root projection for one dead thread BEFORE the episode freeze.
+ * Post-bit22-only: the callers gate on cluster_r4_bit22_cutover_active
+ * (pre-bit22 consumers read the registry directly, 补记 47 minor item).  Must
+ * be called from a zero-resource-lock point (LMON tick before grd P1 freeze /
+ * startup pre-IR); the caller holds no CF.  The 增量 39 §A two-step read
+ * (BOOTSTRAP discover + STRONG bound) replaces the inert STRONG+NULL call —
+ * the token is minted by the STRONG step, and ABSENT / any read failure
+ * fails closed (returns false; the consumer's projection_current then
+ * refuses the thread — 增量 37's never-minted/minted-lost semantics live in
+ * the post-bit22 branch).  Then stamp the slot under the given episode_epoch;
+ * the worker consumes only this immutable projection and never re-acquires
+ * CF(S) inside the episode (补记 31 item 2, STOP-02 §1.3 projection
+ * discipline).  Returns false when the root read fails (the episode then
+ * fails closed on this thread) or the slot is absent.
  */
 bool
 cluster_thread_recovery_pin_projection(uint16 dead_tid, uint64 episode_epoch)
@@ -366,8 +372,8 @@ cluster_thread_recovery_pin_projection(uint16 dead_tid, uint64 episode_epoch)
 	slot = cluster_thread_recovery_replay_slot(dead_tid);
 	if (slot == NULL)
 		return false;
-	root_result = cluster_control_root_read_canonical(
-		dead_tid, NULL, CLUSTER_CONTROL_ROOT_READ_STRONG, &snapshot, &token);
+	root_result = cluster_control_root_read_canonical_discovered(
+		dead_tid, &snapshot, &token);
 	if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		&& root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
 		return false;
