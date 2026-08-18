@@ -1020,3 +1020,16 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   硬违规。G1b 迁移验证完成后随 TEMP 清理批一并移除。
 - 提醒：若只是确认 root 文件存在，用 t243 现有日志 grep（node 日志已
   打 "cluster control root: ..."）即可，不必改测试文件。
+
+---
+
+## 复审补记 37（2026-08-18 16:10，⚠️ 会话 stash 了 ④ 全部工作区）
+
+- 会话执行 stash：④（hw_remaster 迁移 + census 双处 + wal_state/grd/
+  plan 配套 + t243 TEMP note）全部存入 `stash@{0}`（WIP on fec2c177ad），
+  工作树回到干净态。
+- 状态安全（stash 完整保留），但**动机未明**：继续 ④ 请
+  `git stash pop`；若因方案问题搁置，请在 spec 增量注明。搁置期间
+  census 的 GREEN 仅存在于 stash 内，提交树仍是 3 violations
+  （worker:247/orchestrator:572/hw_remaster:487）。
+- 提醒：t243 的 TEMP note 在 stash 里，pop 后仍须最终删除（补记 36）。
