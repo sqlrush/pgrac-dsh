@@ -3809,3 +3809,45 @@ progress_member_open_applied 校验（**不做** COMMIT_APPLIED 段的四成员
 成员 progress → 断言 latch 置位（active + round 身份字段）+ observed 更新
 + COMPLETE flag（全成员时）；重放（observed 已含 self）幂等；target 无
 bit22 拒绝；非协调者拒绝；census RED（stub）拒绝。
+
+---
+
+## 增量 46：activate 执行者修正 —— 协调者 LMON 直接执行（2026-08-18，
+## 步骤 ② 实施评估；替代增量 43 的 backend 两段握手，等 DSH 裁决）
+
+### 修正动因
+
+增量 43 因"LMON tick 内持 CF(X) 做盘 I/O 违反锁序"设计了 backend 两段
+握手（mailbox COMPLETE → backend activate → 结果回写 → LMON 继续）。步骤
+② 实施评估发现两点：
+
+1. **CF(X) 无冻结执行者**：AD-023 §4 冻结的是 **CF(S)** 锁执行者
+   （StartupProcess）；activate_prepared 取的是 **CF(X)**（control_root.c
+   acquire_clusterwide_cf(ExclusiveLock)），recovery_duty.c 注释
+   "cutover owner's separately bound authority"——无执行者冻结。
+2. **协调者 LMON 执行 CF 操作有核准先例**：补记 17-19 核准"协调者 LMON
+   （有 PGPROC）在 commit re-vet 执行 THREAD_OPEN CAS"（CF 操作）——
+   同一执行者模式。
+
+### 修正后设计（步骤 ②）
+
+协调者 LMON tick（bit22 轮 PREPARED 全成员 COMPLETE 检测后）：
+
+1. **activate**：`cluster_control_root_activate_prepared(expected_token,
+   round_sha, round, &out_token)` 直接在 LMON tick 执行（CF(X) + root
+   文件 I/O，同 checkpointer 的 CF(X)+盘 I/O 先例；LMON tick 自身无持锁
+   → 无新增锁嵌套；CF 竞争窗口（checkpoint）仅造成有界 tick 延迟，
+   cutover 为罕见操作，可接受）。
+2. 成功（root ACTIVE）→ 发布 OPEN_APPLIED REQUEST（round 身份绑定，
+   复用 :2564 模式的 origin requests）→ **协调者自己置 observed + apply
+   自己的 latch**（协调者同为 reader，`latch_apply(transition_epoch,
+   record_generation)`）→ 成员 ACK（步骤 ① 已实现）→ 全收 →
+   COMPLETE → 轮完成。
+3. activate 失败 → 轮失败 fail-closed（root 保持 PREPARED，可重试；
+   activate 幂等：PREPARED token + round sha 绑定）。
+
+**验收增量**：r4fsm 协调者推进测试（PREPARED COMPLETE + bit22 target →
+activate seam → OPEN_APPLIED 发布 + 协调者 observed/latch + 全收
+COMPLETE；activate 失败 → 轮失败）；t243 不回归。实施 = 步骤 ② 骨架
+（activate 调用 seam 化，先不接真实 round 构造——驱动（步骤 ④）落地时
+接通）。
