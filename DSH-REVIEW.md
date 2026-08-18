@@ -1223,3 +1223,64 @@ expected-ABSENT 不得持 gate**
 2. **修 NULL-identity bug**：pin/plan 读要么传 expected_identity，要么用合法模式；BOOTSTRAP 仅限验证语义。
 3. **测试强度缺口**：注册 t243 补一条 candidate>0 断言（或独立 crash 腿），否则迁移惰性永不可见。
 4. bit22 轮（G3/G5）设计：all-member CLOSED-ACK 绑定 reader 切换 + W6 事实，同轮完成。
+
+---
+
+## 复审补记 44（2026-08-18 18:25，增量 39 落地设计复审：批准 + §D 裁定 + 三个实施批设计点）
+
+### 逐节核验（六条合同）
+
+1. **spec/AD 合规** ✅
+   - §A 两步修法（BOOTSTRAP-discover + STRONG-bound）有 committed 先例实证：
+     wal_retention.c:1358-1373（own tid 传 &duty STRONG；他 tid BOOTSTRAP 发现
+     → control_root_read_ready → discovered_identity → STRONG 绑定）——DSH
+     逐行核对。STOP-02 §1.3 投影纪律保持（每周期 fresh read，无跨重启缓存，
+     discover→STRONG 失配即 IDENTITY_MISMATCH fail-closed）。
+   - §B 恢复 pre-bit22 registry 权威源 = §17.8 冻结语义逐字兑现；S4 不动 ✓。
+   - §C 对补记 28 "census 运行时门"硬性要求的处置是**显式且有论证的**：
+     该门建立在反转模型上——它会在 hw_remaster 的 §17.8-合法 registry 读
+     存在时永远阻止 bit22 开门，自证其错。gate 建模（静态证明对象 = "无
+     ungated correctness 调用点"）是 §17.9 post-bit22 语义的正解。
+2. **authority 边界** ✅：post-bit22 root 读在 startup 上下文（S1/S2，
+   AD-023 §4 StartupProcess）或 pre-IR 零锁 pin（S3，consumer 不取 CF(S)）；
+   pre-bit22 全 registry，无 CF 依赖（原 LOCK_UNAVAILABLE 危险在 pre-bit22
+   分支消失）。
+3. **锁序** ✅：gate idiom 是无锁 atomic 读；两步是顺序非嵌套（BOOTSTRAP
+   无 CF → STRONG CF(S)）。
+4. **fail-closed** ✅：latch 默认 false/单调一次性/不确定→false（回 §17.8
+   行为）；§A 不得单独落地是硬约束（防 root 在 bit22 前成活路径）——此条
+   是本设计的关键结构保障，写得明确。
+5. **测试同步**：§D 裁定见下；每批验收（t243 33/33 + regress 13/13 + 聚焦
+   单测 + census 行为）合格。
+6. **工程卫生** ✅：文档先行；逐批 commit + 批批复审；全部引用行号/commit
+   DSH 独立验证通过（含 29efc553b0/34eb81cc71/a9be5590d0/bb7fda782e 四个
+   迁移 commit 与 plan.h:116 registry classifier 原形）。
+
+### §D 裁定（测试强度缺口）
+
+- **选项 1（t243 补 candidate 断言）：禁止**——撞红线 "t243 断言不可改"，
+  除非用户显式裁决授权。增量正确地把它路由到用户裁决。
+- **选项 2（独立 crash 腿新 TAP）：采纳**——2-node shared-root kill -9 一腿，
+  断言 survivor plan 产 candidate + worker 启动；不动 t243。
+- **选项 3（聚焦单测）：必做**——真实 root fixture 驱动 pin/plan 分支，
+  latch=false 时 root 分支动态不可达，NULL-identity 型失败立即红。
+
+### 批准与实施批设计点（不阻塞批 1，批内/任务 4 增量必须兑现）
+
+- **批准批 1（S1+S2）开始实施**：startup 上下文双路径 + §A 修法内嵌，
+  latch=false 时行为逐字等价迁移前。
+- **设计点 ①（混合 latch 窗口）**：latch 是节点本地 shmem，node A 置位
+  （root-only）与 node B 未置位（registry）的窗口内，两节点从不同源推导
+  恢复判定。任务 4 cutover 轮设计必须给出证明：CLOSED-ACK 后 root 界与
+  registry 界一致（G1a/G1a-2 使 root 是 wal-state 的函数）⇒ 混合操作安全，
+  并最好带一条 t243 可见的混合态腿。
+- **设计点 ②（census 脚本批 3）**：strict RED = "存在 ungated 且非白名单的
+  correctness 调用点"；idiom 锚 = `cluster_r4_bit22_cutover_active()`；
+  GATE-BOUND 清单与 C 表 lockstep。C 表（wal_state.c:821）若保留作运行时
+  自检，应在 latch 置位点断言全部 correctness 调用点已 gate-bound——不得
+  无替代静默删除。
+- **设计点 ③（§E 驱动缺口）**：create/activate proof seam 无生产调用方，
+  首开轮增量必须含 coordinator R4 驱动 + latch 置位点（补记 29 遗留
+  utility mailbox cutover）。
+- 批 2 注意：S3 pre-bit22 consumer 恢复 registry 直接读时，registry 读失败
+  的既有 fail-closed（UNREADABLE/BLOCKED）必须原样保留。
