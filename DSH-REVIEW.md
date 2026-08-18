@@ -1175,3 +1175,51 @@ expected-ABSENT 不得持 gate**
   迁移 → census 双处归零 → bit22 首开。
 - 仍欠：cluster_regress 13/13 复跑（t243 已由 17:17 绿跑覆盖）。
 - t243 内 2 行 TEMP note 仍待删（push 前）。
+
+---
+
+## 复审补记 43（2026-08-18 17:40，cutover 语义反转裁决：会话分析全部属实 + DSH 两条增补证据 + 补记 42 自我纠正）
+
+### 会话分析核验（逐条，DSH 独立取证）
+
+1. ✅ 死锁链 7 步成立（t243:146-149 stop 在 cast:178 前；④ pin ABSENT → BLOCKED → hw_gate 永持 → CF 卡死）。会话引 :144/:176 行号±2，实质正确。
+2. ✅ BASE_BACKUP 已排除（补记 42 已核：backup 仅 new_pair seed :263；start_pair :459-620 零调用）。
+3. ✅ **冻结 §17.8（specs-local:979）逐字**："Source R4 OPEN: repaired wal-state remains selected; root absent/PREPARED/ACTIVE is not authority." + "Target OPEN: root-only, no fallback." —— 这是裁决核心。
+4. ✅ **plan.c:335 pin helper STRONG+NULL → 恒返 INVALID_ARGUMENT=23**（control_root.c:815 `(strong && expected_identity==NULL)` 前置检查；header 枚举 ABSENT=3 / INVALID_ARGUMENT=23）。16:41 "result 3" 只能来自 BOOTSTRAP 临时变体——两返回码混记属实。
+
+### DSH 增补证据（会话未点到的同源两条）
+
+- **E1：已提交树五个"已迁移"站点功能惰性。** plan.c:220 同传 NULL+STRONG → 每 tid 必返 23 → classify=UNKNOWN。17:17 绿跑（33/33）node0 日志实测：
+  "recovery plan (not acted upon): ... 0 alive, 127 unknown" —— node1 重启后 ALIVE 的 tid2 也 UNKNOWN，
+  即 127 个读全部命中 23。plan 恒 0 candidates → worker/orchestrator 永不启动 → 迁移在 committed tree
+  上是死代码。t243 绿 = plan "not acted upon"（观测性）+ 无 candidate 触发，**green 不证明迁移正确 =
+  测试强度缺口**，注册待补。
+- **E2：增量 35 的"127 unknown = 文件缺失佐证"是二次混记。** STRONG+NULL 的参数检查先于任何文件访问，
+  127-unknown 与 root 文件存在性无关——它是 NULL-identity bug 签名。文件缺失为真，但该日志行证明不了它。
+
+### 结构性裁决：cutover 语义被做反
+
+- 冻结三处自洽：§17.8（bit22 前 wal-state 仍选定、root 非 authority）/ §17.7-4（"after bit22 ... statically
+  unreachable"→ bit22 前可达在用）/ §17.9（census 证明 **post-bit22** exactly-zero）。
+- 执行反了：reader 先迁 root-only（bit22 前）→ census 归零 → 才开 bit22。census 脚本头 "must pass GREEN
+  before bit22 opens" 把 post-bit22 证明操作成 pre-bit22 前置门，迫使 reader 在 bit22 前 root-only，违反
+  §17.8。hw_remaster 现 committed 状态（registry 读）反而是 §17.8-correct，census 把它列 KNOWN-DEFERRED
+  是框架颠倒。
+- 采纳会话三建议：不打 validated_min=0 补丁；不动 t243 cast；reader 切换收进 bit22 轮（G3/G5 all-member
+  CLOSED-ACK 同轮绑定）。"剥洋葱"定性成立：同一 pin/CF/remaster 链第三层断点（①episode 内 CF(S) 不可行
+  ②write-fence PANIC ③返回码混记+cutover 反转），停止局部补丁，做设计层重排。
+
+### 补记 42 自我纠正（三处漏判）
+
+1. 未发现 STRONG+NULL 恒返 23（所有 G1b step-4 迁移读均无效）；
+2. 未识别 pre-bit22 root-only 违反 §17.8/§17.9/§17.7-4；
+3. 把 17:17 绿跑当干净验证，未看见 127-unknown 惰性签名（plan 0 candidates）。
+
+### 下一步（交会话执行，DSH 已背书方向）
+
+1. **specs-local 增量 37**：cutover 语义重排 —— reader 双路径按 bit22 门控（bit22 前 wal-state，bit22 后
+   root-only、ABSENT fail-closed）；§17.9 census 重定义为 post-bit22 静态证明（gate 建模），不是 pre-bit22
+   归零前置；KNOWN-DEFERRED 列表翻转语义（bit22 前合法，cutover 轮内关闭）。
+2. **修 NULL-identity bug**：pin/plan 读要么传 expected_identity，要么用合法模式；BOOTSTRAP 仅限验证语义。
+3. **测试强度缺口**：注册 t243 补一条 candidate>0 断言（或独立 crash 腿），否则迁移惰性永不可见。
+4. bit22 轮（G3/G5）设计：all-member CLOSED-ACK 绑定 reader 切换 + W6 事实，同轮完成。
