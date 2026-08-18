@@ -2607,3 +2607,56 @@ canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X
   deferred-ok 模式输出 node-local 登记清单。
 - t243 33/33；regress 13/13。
 - 待 DSH 复审通过后实施（此设计稿不实施）。
+
+---
+
+## 增量 26：G1b step 4 设计定稿（C 路线：迁移 canonical 读原义，用户裁决 2026-08-18）
+
+### 裁决
+
+用户三选一裁决 = **C：维持迁移到 canonical 读原义**（不用增量 25 的
+NODE_LOCAL_AUTHORITY 分类，也不等 CF(S) 调度成环）。§17.9 exactly-zero
+字面合规：5 个 deferred site 必须真正改读 canonical root，registry 读
+归零。
+
+### 机制可行性（2026-08-18 取证）
+
+- root 发布 = write_durable_image（temp + fsync + durable_rename +
+  fsync_parent）+ readback 校验 → **原子替换**，读方永远看到完整旧版
+  或完整新版，绝无 torn 中间态；
+- read_one_image → decode_image 全量校验（header/body/record CRC +
+  UUID/sysid/保留位）→ 无 CF 读的完整性由 CRC + 双副本
+  （read_canonical_pair: COPY_DIVERGENT / DEGRADED 判定）兜底；
+- 已有 `CLUSTER_CONTROL_ROOT_READ_BOOTSTRAP_VALIDATE` 无 CF 读先例
+  （read_canonical 的 strong=false 分支不 acquire CF）——bgworker 可复用
+  该机制（新枚举 `CLUSTER_CONTROL_ROOT_READ_SNAPSHOT`，语义=无 CF 快照读，
+  不产 token）。
+
+### 逐 site 迁移映射（C 路线）
+
+| Site | 现读字段 | root 等价 | 语义差处置 |
+|---|---|---|---|
+| orchestrator.c:572（replay_one）| checkpoint_redo_lsn（lower）+ highest_lsn（validated_min）| checkpoint_lower_lsn + validated_tail_lsn_exclusive（G1a 刷新）| validated 界 ≥ 写界？否——validated_tail 是 checkpoint 推进的 VALIDATED 界，可能落后于 registry 写位置。用 validated_tail 作 validated_min = **更严**（decode 必须到 checkpoint 验证界），fail-closed 方向安全（补记 4 已背书"VALIDATED 语义强于 written"）。tli → checkpoint_tli/tail_tli |
+| hw_remaster.c:487 | highest_lsn（validated_min）| validated_tail_lsn_exclusive | 同上；G1b 注释已写迁移目标即此字段 |
+| recovery_worker.c:192（revalidate）/247（worker_main）| highest_lsn（写位置，构造 target page）+ tli | **root 无"写位置"字段**（tail_last_record_lsn 是 checkpoint 时最后记录，不是实时写位置）| 语义差异最大。选项：(a) validate_stream 改用 validated_tail_lsn_exclusive 作 target page 锚（验证 checkpoint 界，重放窗口由 replay 侧 validated_end 兜底）；(b) plan/worker 的 classify 用 root lifecycle+published_at_usec 映射（state+last_updated → lifecycle+published_at，非恒等但 fail-closed：UNKNOWN 归类） |
+| recovery_plan.c:203 | state/last_updated/node_id（classify）+ highest_lsn + **highest_scn** | lifecycle + published_at_usec + origin_node_id；**root 无 SCN 值字段**（仅 bit21 conservative_commit_scn 下界）| (a) verdict 分类映射 root（非恒等，UNKNOWN fail-closed）；(b) max_highest_scn 无外部消费者（观测字段，已取证 plan.c 内自写自读）→ 迁移后该观测降级为 conservative_commit_scn 或移除该统计（登记，不阻塞） |
+
+### 实施步骤（每步提交 + 等复审）
+
+1. **READ_SNAPSHOT 无 CF 读**：cluster_control_root.h 新枚举 +
+   read_canonical 分支（strong=false 语义同 BOOTSTRAP_VALIDATE）+ 单测
+   （atomic-publish 下读到完整镜像、COPY_DIVERGENT 拒）。
+2. **orchestrator + hw_remaster 迁移**（窗口推导侧）：lower/validated_min
+   改读 root snapshot；t243 L4 online 腿复验。
+3. **worker revalidate/main + plan**（classify 侧）：映射 + 单测（verdict
+   映射 truth table）；max_highest_scn 观测处置。
+4. **census 归零**：5 站点代码迁移完成后，从脚本 DEFERRED + C 表移除 →
+   strict 转 GREEN → bit22 可开时刻到达。
+
+### 待办（本设计稿不实施，等 DSH 复审）
+
+- validate_stream 的 target page 锚语义（写位置→validated 界）需 DSH
+  背书：验证范围收窄是否引入漏检（写位置之后的 torn 段本就在
+  validated_end 容忍区，语义等价论证）。
+- plan verdict 的 root 映射 truth table 需 DSH 背书（UNKNOWN fail-closed
+  方向确认）。
