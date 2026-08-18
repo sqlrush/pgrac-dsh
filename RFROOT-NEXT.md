@@ -1,18 +1,25 @@
-# RF-ROOT P7-P9 交接文档（2026-08-18 07:00，DSH 撰写，供新编码会话启动）
+# RF-ROOT P7-P9 交接文档（2026-08-18 17:50 v2，DSH 撰写，供新编码会话启动）
 
 ## 0. 一句话状态
 
-**P6 已完成并核验**（t243 33/33 ×4，单测闭包，公共仓库已推送）；但 DSH 交接
-核验发现两处 P6 收尾欠账：cluster_regress 崩溃回归（clean_leave 视图 SIGABRT）
-与 TEMP 残留（26 文件未清完）——见 §8，作为本会话前两个任务。
-本会话的目标：**RF-ROOT 剩余合同 P7/P8/P9 全通过 + 全量回归**。
+P6 冻结 ✅；**P7 已完成 95%**：W6 退休 ✅、G1a/G1a-2 ✅、G3/G4/G5 机制 ✅、
+6 个 reader 中 5 个已提交。**但 2026-08-18 17:40 补记 43 裁决：G1b step-4 的
+执行方向违反冻结 cutover 语义（§17.8/§17.9/§17.7-4），五个已迁移站点功能
+惰性（STRONG+NULL→23→127 unknown），P7 收尾路线重排**——见 §4b。
+本会话的目标：**按补记 43 重排后的方向完成 P7 收尾 + P8/P9**。
+
+⚠️ **本文件 v1（07:00）与补记 43 冲突处以补记 43 为准。** v1 的 §4 迁移目标、
+§8 待办里的"迁移 → census 归零 → 开 bit22"顺序**已作废**。
 
 ## 1. 启动必读（按顺序）
 
-1. 本文件（RFROOT-NEXT.md）
-2. `~/pgrac-dsh/DSH-REVIEW.md`（审查通道，含复审补记 1-8；改完代码必须重读）
-3. `~/pgrac-dsh/P6-RESUME.md`（v5：P6 修复链与证据，含 t243 run-43→60 三层修复）
-4. `~/pgrac-dsh/RFROOT-PLAN.md`（P6-P9 合同原文 + 回正清单 + L4/L5 根因史）
+1. 本文件（RFROOT-NEXT.md v2）
+2. `~/pgrac-dsh/DSH-REVIEW.md`（审查通道，**最新 = 复审补记 43**；改完代码必须重读）
+3. `~/pgrac-dsh/specs-local/spec-s8-stop-01-root-control.md` 尾部增量 36/37/38
+   （36=勘误 BASE_BACKUP 撤销；37=④ ABSENT 二分【落地路径已被 38 废止】；
+   38=补记 43 裁决落地 + 新方向）
+4. `~/pgrac-dsh/P6-RESUME.md`（v5：P6 修复链与证据）
+5. `~/pgrac-dsh/RFROOT-PLAN.md`（P6-P9 合同原文）
 
 ## 2. 环境与跑法
 
@@ -52,6 +59,40 @@
   + PAGE/SIDE proof；wal-state 仅作 telemetry。
 - 静态 census：post-bit22 的 wal-state correctness reader/writer == 0。
 - bit22 只在 PREPARED/ACTIVE 全成员 ACK 后打开。
+
+## 4b. ⚠️ P7 收尾路线重排（补记 43 裁决，2026-08-18 17:40，覆盖 §4 执行顺序）
+
+**裁定**：冻结三处合起来——§17.8（Source R4 OPEN: wal-state remains selected;
+root is not authority）+ §17.7-4（after bit22 ... statically unreachable →
+bit22 前在用）+ §17.9（census 证明 **post-bit22** 状态）——意味着 **reader 在
+bit22 前必须保持 wal-state 权威源**。"先迁 reader root-only → census 归零 →
+才开 bit22" 的顺序把冻结语义做反了。
+
+**配套事实（补记 43 E1/E2，绿跑日志实测）**：已提交树的五个 G1b step-4 站点
+功能惰性——`STRONG + expected_identity=NULL` 恒返 INVALID_ARGUMENT=23，
+17:17 绿跑 plan 实测 "0 alive, 127 unknown"（连 ALIVE 的 tid2 都 UNKNOWN），
+plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bug 签名，
+与 root 文件存在性无关。t243 绿 = plan "not acted upon" + 无 candidate 触发，
+**green 不证明迁移正确 = 测试强度缺口**。
+
+**新执行顺序（补记 43 背书）**：
+
+1. **修 NULL-identity bug**：pin/plan 读要么传 expected_identity，要么用合法
+   模式（BOOTSTRAP 仅限验证语义）。
+2. **reader 双路径按 bit22 门控**：bit22 前走 wal-state（registry）权威源；
+   bit22 后 root-only + ABSENT fail-closed（增量 37 的 never-minted 降级 /
+   minted-lost fail-stop 语义在 bit22 后分支内继续有效）。
+3. **reader 切换收进 G3/G5 的 all-member CLOSED-ACK 同一轮**（W6 事实 + reader
+   切换同轮绑定，§17.7-3 的 "same migration round"）。
+4. **census 重定义**：§17.9 的静态 census = 对 **post-bit22** 状态的证明
+   （gate 建模），不是 pre-bit22 归零前置门；脚本 KNOWN-DEFERRED 语义翻转
+   （deferred 站点 bit22 前合法，cutover 轮内关闭）。
+5. **测试强度缺口**：补 t243 candidate>0 断言（或独立 crash 腿）。
+6. hw_remaster 现 committed 的 registry 读**保持不动**——§17.8-correct 的
+   bit22 前行为；site-4 "迁移" 不再是 bit22 前置任务。
+
+**增量 37 处置**（增量 38 已落档）：语义二分/判别器/不持 gate 保留；
+"site-4 迁移 → census 归零 → bit22 首开" 的落地路径废止。
 
 ## 5. P8 合同（RF-ROOT §5）
 
@@ -183,7 +224,13 @@
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
-- [ ] P7 W6 退休 + 三 consumer 迁移 + census 0
+- [ ] **【P7 收尾 —— 按 §4b 重排执行】**：
+      ① 修 NULL-identity bug（STRONG+NULL→23，五站点惰性）；
+      ② reader 双路径 bit22 门控设计（specs-local 增量 39，文档先行）；
+      ③ 测试强度：t243 candidate>0 断言或独立 crash 腿；
+      ④ G3/G5 bit22 首开轮（all-member CLOSED-ACK 绑定 W6 事实 + reader
+      切换）；⑤ census 重定义为 post-bit22 静态证明后接入门。
+      ⚠️ 原"P7 W6 退休 + 三 consumer 迁移 + census 0"表述已作废（补记 43）。
 - [ ] P8 rebuild-first 编排
 - [ ] P9 fault legs + observability
 - [ ] 全量回归（cluster_tap 272 + cluster_unit 232 + cluster_regress 13）

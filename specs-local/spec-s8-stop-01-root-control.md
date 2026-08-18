@@ -3206,3 +3206,54 @@ t243 的正常流程；生产首次 root mint 前同理）——不能把 ABSENT
 - 增量 37 复审通过；
 - site-4 迁移后 t243 33/33 + regress 13/13 + 聚焦单测绿；
 - census GREEN（0 violation，判别器读的 census 边界经 DSH 确认）。
+
+---
+
+## 增量 38：增量 37 勘误与处置（2026-08-18，补记 43 裁决落地）
+
+### 裁定来源
+
+- 复审补记 43（2026-08-18 17:40）：会话的 cutover 语义分析全部属实 +
+  DSH 增补证据 E1/E2；补记 42 Q1 裁定被补记 43 明确纠正（三处漏判）。
+
+### 增量 37 的状态：文档滞留，落地前停止
+
+增量 37（76e94dc8db）按补记 42 Q1 写成：④ ABSENT 二分（never-minted
+vs minted-lost）+ registry 判别器 + 不持 gate。其中：
+
+- **保留且仍有效**：① never-minted vs minted-lost 二分语义本身；
+  ② 判别器原则（pin ABSENT 必须对照 registry 发布记录解释，不能单独
+  判 BLOCKED）；③ "fail-closed 不得以永持 hw_gate 实现" 硬性约束；
+  ④ 不做 t243 改动。
+- **已被补记 43 推翻、禁止按此落地**："site-4 按二分语义迁移 → census
+  双处归零 → bit22 首开" 这一落地路径本身。补记 43 裁决：冻结 §17.8
+  （Source R4 OPEN: wal-state remains selected; root is not authority）
+  + §17.7-4（after bit22 ... statically unreachable → bit22 前在用）+
+  §17.9（census 证明 **post-bit22** 状态）三处合起来，**reader 在
+  bit22 前必须保持 wal-state 权威源**；"先迁 reader root-only → census
+  归零 → 才开 bit22" 的顺序把冻结语义做反了。
+- **配套发现（补记 43 E1）**：已提交树的五个 G1b step-4 站点功能惰性
+  （STRONG+NULL → 恒返 INVALID_ARGUMENT=23 → 17:17 绿跑 plan 实测
+  "0 alive, 127 unknown"，连 ALIVE 的 tid2 都 UNKNOWN；plan 恒 0
+  candidates → worker 永不启动）。127-unknown 是 NULL-identity bug
+  签名，与 root 文件存在性无关（E2：增量 35 的"STRONG 读全失败=文件
+  缺失"佐证不成立）。
+
+### 新落地方向（补记 43 背书，替代增量 37 的落地路径）
+
+1. **reader 双路径按 bit22 门控**：bit22 前走 wal-state（registry）权威
+   源；bit22 后 root-only + ABSENT fail-closed。增量 37 的二分语义
+   （never-minted 降级 / minted-lost fail-stop）在 **bit22 后分支**
+   内继续有效。
+2. **reader 切换收进 G3/G5 的 all-member CLOSED-ACK 同一轮**（W6 事实 +
+   reader 切换同轮绑定，§17.7-3 的 "same migration round"）。
+3. **census 重定义**：§17.9 的静态 census 是对 **post-bit22** 状态的
+   证明（gate 建模），不是 pre-bit22 归零前置门。脚本 KNOWN-DEFERRED
+   语义翻转：deferred 站点 bit22 前合法（wal-state 是权威源），cutover
+   轮内关闭。
+4. **修 NULL-identity bug**：pin/plan 读要么传 expected_identity，要么
+   用合法模式；BOOTSTRAP 仅限验证语义。
+5. **测试强度缺口**：注册 t243 补 candidate>0 断言（或独立 crash 腿），
+   否则迁移惰性永不可见。
+6. hw_remaster 现 committed 的 registry 读保持不动——它是 §17.8-correct
+   的 bit22 前行为；不再把 site-4 "迁移" 当 bit22 前置任务。
