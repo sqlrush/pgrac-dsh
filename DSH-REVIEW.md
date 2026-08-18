@@ -1811,3 +1811,46 @@ t243 33/33 + regress 13/13。与补记 59 核准的未提交 diff 一致。
 - ⬜ 步骤 ②：coordinator OPEN_APPLIED 推进（activate seam + REQUEST 发布 + 协调者 latch）
 - ⬜ 步骤 ③：backend activate 接线 → 改为 coordinator-LMON 直接执行（增量 46）
 - ⬜ 步骤 ④：mailbox 驱动入口 + 跑批
+
+---
+🔴 [DSH-WATCH 08-19 00:14] 疑似卡住：连续 2 个扫描周期（约 30 分钟）HEAD/工作区/t243 均无任何变化。
+   last: HEAD=49927b3589 uncommitted=0 t243=33ok@23:34
+   DSH 建议：若确在等待（长跑批/思考），忽略本条；若在绕圈，请回到 P6-RESUME.md 最短路或读本条之前 DSH 的复审补记。
+
+---
+🔴 [DSH-WATCH 08-19 00:59] 疑似卡住：连续 2 个扫描周期（约 30 分钟）HEAD/工作区/t243 均无任何变化。
+   last: HEAD=49927b3589 uncommitted=1 t243=33ok@23:34
+   DSH 建议：若确在等待（长跑批/思考），忽略本条；若在绕圈，请回到 P6-RESUME.md 最短路或读本条之前 DSH 的复审补记。
+
+---
+
+## 复审补记 61（2026-08-18 22:40，步骤 ② 未提交代码中级评审：结构核准 + 一处排序必改）
+
+### 步骤 ② coordinator OPEN_APPLIED 推进（semantic_activation.c +40/-2）
+
+**核准** ✅：
+- 分支点：install_commit 在 PREPARED 全成员 CLOSED-ACK 后检测 bit22 target →
+  open_applied_advance（增量 44 裁决 A：独立 stage 序列，不走 R4 COMMIT_APPLIED）
+- seam shmem（独立区，不进冻结 ACK 表/gate 结构）：driver（步骤 ④）存
+  file_token + round_sha + round 拷贝；LMON 消费时校验 valid + transition_epoch
+  与 ACK 表绑定
+- activate：`activate_prepared` 直接在 LMON tick 执行（增量 46 裁决）
+- 成功后：snapshot 重校验（memcmp 无漂移 + self tuple 匹配）→ stage 转
+  OPEN_APPLIED → publish → REQUEST 广播
+- activate 失败 → 轮保持 PREPARED，可重试（fail-closed）
+
+### ⚠️ 必改：协调者 latch 应用排序
+
+当前顺序：`publish(observed |= self_bit)` **先** → `(void) latch_apply(...)` **后**，
+且 latch 返回值被丢弃。若 latch apply 失败（census RED 回归 / round 身份错）：
+协调者已置 observed，轮仍可 COMPLETE，但协调者自身 latch 未置位——与增量 46
+"协调者同为 reader，其 latch 现翻转"的意图不符，失败被静默吞掉。
+
+**修正**：latch apply 先于 publish；apply 返回 false → 不置 observed、不 publish
+（轮失败 fail-closed，成员侧同样不会 COMPLETE）。两行交换 + 返回检查。
+
+### 步骤 ② 验收
+
+- r4fsm 协调者推进测试（增量 46 列场景）
+- t243 33/33 + regress 13/13
+- 上述排序修正
