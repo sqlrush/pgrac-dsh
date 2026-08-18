@@ -27,11 +27,10 @@
 #    proceed silently):
 #      - cluster_hw_remaster.c  validated_min <- registry highest_lsn
 #        (episode-worker CF(S) infeasible, hw_remaster evidenced)
-#      - cluster_thread_recovery_orchestrator.c window derivation
-#        (thread-recovery worker context, same CF(S) constraint)
-#    CLOSED (2026-08-18, increments 28-31 / 补记 32-35): recovery_plan.c +
-#    recovery_worker.c migrated to the canonical control root; their
-#    registry reads are gone.
+#    CLOSED (2026-08-18, increments 28-35): recovery_plan.c +
+#    recovery_worker.c + cluster_thread_recovery_orchestrator.c migrated to
+#    the canonical control root / pre-IR pinned projection; their registry
+#    reads are gone.
 #
 # IDENTIFICATION
 #    scripts/ci/check-wal-state-correctness-census.sh
@@ -75,12 +74,12 @@ TELEMETRY_OK=(
 # Known-deferred correctness sites (see header).  Listed explicitly so the
 # cutover audit can track them; they must move to the canonical root (or be
 # formally retired) before bit22 opens.
-# G1b step 4 (2026-08-18, increments 28-31): cluster_recovery_plan.c and
-# cluster_recovery_worker.c (both sites: revalidate + worker_main) migrated
-# to the canonical control root and removed — their registry reads are gone.
+# G1b step 4 (2026-08-18, increments 28-31): recovery_plan.c +
+# recovery_worker.c + cluster_thread_recovery_orchestrator.c migrated to the
+# canonical control root / pre-IR pinned projection and removed — their
+# registry reads are gone.
 DEFERRED=(
 	'src/backend/cluster/cluster_hw_remaster.c'
-	'src/backend/cluster/cluster_thread_recovery_orchestrator.c'
 )
 
 violations=0

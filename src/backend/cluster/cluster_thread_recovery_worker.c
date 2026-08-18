@@ -62,6 +62,7 @@
 #include "cluster/cluster_guc.h"			   /* cluster_online_thread_recovery (scope)    */
 #include "cluster/cluster_ir.h"				   /* spec-5.7 D8 — IR(X) recovery-owner gate    */
 #include "cluster/cluster_recovery_duty.h"
+#include "cluster/cluster_recovery_plan.h"	   /* RF-ROOT P7 G1b: pinned projection API      */
 #include "cluster/cluster_thread_recovery.h"   /* slot helpers + replay_one + gates          */
 #include "cluster/storage/cluster_shared_fs.h" /* shared backend (scope)                    */
 
@@ -438,6 +439,18 @@ thread_recovery_launch_one(
 		ereport(FATAL,
 				(errmsg("could not stamp online thread-recovery slot for dead thread %u",
 						(unsigned)dead_tid)));
+	/*
+	 * RF-ROOT P7 G1b step 4 ③ (increment 30/31): pin the canonical-root
+	 * projection BEFORE the worker spawns.  This LMON tick runs before the
+	 * GRD episode freeze (cluster_lmon.c ordering: reconfig -> semantic ->
+	 * thread_recovery -> grd) at zero resource locks; the worker (replay_one)
+	 * then consumes ONLY the pinned fields and never re-acquires CF(S)
+	 * inside the episode (补记 31 item 2).  The launch attempt stamp is the
+	 * projection's episode identity.  A pin failure leaves the projection
+	 * absent -> the worker fails closed (window derivation BLOCKED).
+	 */
+	(void) cluster_thread_recovery_pin_projection(
+		dead_tid, eligibility->attempt_stamp);
 	if (register_one_worker(eligibility, &owned->handle)) {
 		owned->attempt_stamp = eligibility->attempt_stamp;
 		owned->terminate_sent = false;

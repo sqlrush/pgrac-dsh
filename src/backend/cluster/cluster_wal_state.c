@@ -820,7 +820,6 @@ cluster_wal_state_refresh_fail_count(void)
  */
 static const char *const cluster_wal_state_census_deferred_sites[] = {
 	"cluster_hw_remaster.c",
-	"cluster_thread_recovery_orchestrator.c",
 	NULL
 };
 

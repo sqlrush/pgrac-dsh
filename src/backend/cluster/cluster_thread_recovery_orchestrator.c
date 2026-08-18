@@ -531,7 +531,6 @@ cluster_thread_recovery_replay_one(uint16 dead_tid, uint64 episode_epoch,
 								   ClusterRecoverySerialGuard *serial_guard)
 {
 	ClusterThreadRecScope scope;
-	ClusterWalStateSlot slot;
 	XLogRecPtr lower;
 	XLogRecPtr validated_min;
 	XLogRecPtr scan_upper;
@@ -559,38 +558,62 @@ cluster_thread_recovery_replay_one(uint16 dead_tid, uint64 episode_epoch,
 		return CLUSTER_THREADREC_NOT_APPLICABLE;
 
 	/*
-	 * Window derivation: lower = the dead thread's last checkpoint redo (a sound,
-	 * redo-idempotent replay start); the registry's observational highest_lsn is
-	 * the durable-write watermark (validated_min), NOT the replay upper.  A slot
-	 * read failure or an unusable slot (missing checkpoint history / nothing
-	 * written / inverted) fails closed.  A window-derivation BLOCKED is a real
-	 * fail-closed outcome of the live FSM path (the executor worker reaches it),
-	 * so it must bump the D5 failclosed counter too -- replay_one_window's own
-	 * counting is only reached once a window is derived (otherwise the most common
-	 * live fail-closed would be invisible in thread_recovery_replay_failclosed).
+	 * Window derivation (RF-ROOT P7 G1b step 4 ③, increment 30/31): lower =
+	 * the dead thread's last checkpoint redo (a sound, redo-idempotent replay
+	 * start); validated_min = the canonical validated tail (the
+	 * CHECKPOINT_ADVANCE validated extent — the registry's write-position
+	 * watermark has no root equivalent and is no longer read).  The
+	 * projection was pinned by the LMON tick BEFORE the episode freeze
+	 * (cluster_thread_recovery_pin_projection under the launch attempt
+	 * stamp); this worker consumes ONLY the pinned fields and never
+	 * re-acquires CF(S) inside the episode (补记 31 item 2 / §1.3).  A
+	 * missing/stale projection or an unusable window (missing checkpoint
+	 * history / nothing validated / inverted) fails closed.  A
+	 * window-derivation BLOCKED is a real fail-closed outcome of the live
+	 * FSM path (the executor worker reaches it), so it must bump the D5
+	 * failclosed counter too -- replay_one_window's own counting is only
+	 * reached once a window is derived (otherwise the most common live
+	 * fail-closed would be invisible in thread_recovery_replay_failclosed).
 	 */
-	if (cluster_wal_state_read_slot(dead_tid, &slot) != CLUSTER_WAL_SLOT_OK) {
-		/* spec-6.14 D9: window-derivation fail-closes were silent; a frozen
-		 * thread needs an operator trace (launches are reconfig-driven, so
-		 * these one-per-launch LOGs cannot spam). */
-		ereport(LOG, (errmsg("cluster thread recovery: dead thread %u wal-state slot unreadable "
-							 "-> BLOCKED (kept frozen)",
-							 dead_tid)));
-		cluster_thread_recovery_count_blocked();
-		return CLUSTER_THREADREC_BLOCKED;
-	}
-	if (slot.checkpoint_redo_lsn == 0 || slot.highest_lsn == 0
-		|| slot.highest_lsn <= slot.checkpoint_redo_lsn) {
-		ereport(LOG, (errmsg("cluster thread recovery: dead thread %u wal-state slot unusable "
-							 "(checkpoint_redo %X/%X, highest %X/%X) -> BLOCKED (kept frozen)",
-							 dead_tid, LSN_FORMAT_ARGS((XLogRecPtr)slot.checkpoint_redo_lsn),
-							 LSN_FORMAT_ARGS((XLogRecPtr)slot.highest_lsn))));
-		cluster_thread_recovery_count_blocked();
-		return CLUSTER_THREADREC_BLOCKED;
-	}
+	{
+		ClusterControlRootReadToken pin_token;
+		uint64 pin_validated_tail;
+		uint64 pin_checkpoint_lower;
+		uint64 pin_lifecycle;
+		uint32 pin_tail_tli;
+		uint32 pin_checkpoint_tli;
 
-	lower = (XLogRecPtr)slot.checkpoint_redo_lsn;
-	validated_min = (XLogRecPtr)slot.highest_lsn;
+		if (!cluster_thread_recovery_projection_current(
+				dead_tid, episode_epoch, &pin_token, &pin_validated_tail,
+				&pin_checkpoint_lower, &pin_lifecycle, &pin_tail_tli,
+				&pin_checkpoint_tli)) {
+			/* spec-6.14 D9: window-derivation fail-closes were silent; a
+			 * frozen thread needs an operator trace (launches are
+			 * reconfig-driven, so these one-per-launch LOGs cannot spam). */
+			ereport(LOG, (errmsg("cluster thread recovery: dead thread %u canonical projection "
+								 "unavailable -> BLOCKED (kept frozen)",
+								 dead_tid)));
+			cluster_thread_recovery_count_blocked();
+			return CLUSTER_THREADREC_BLOCKED;
+		}
+		if (pin_checkpoint_lower == 0 || pin_validated_tail == 0
+			|| pin_validated_tail <= pin_checkpoint_lower) {
+			ereport(LOG, (errmsg("cluster thread recovery: dead thread %u canonical projection "
+								 "unusable (checkpoint_lower %X/%X, validated_tail %X/%X) "
+								 "-> BLOCKED (kept frozen)",
+								 dead_tid,
+								 LSN_FORMAT_ARGS((XLogRecPtr) pin_checkpoint_lower),
+								 LSN_FORMAT_ARGS((XLogRecPtr) pin_validated_tail))));
+			cluster_thread_recovery_count_blocked();
+			return CLUSTER_THREADREC_BLOCKED;
+		}
+		(void) pin_token;
+		(void) pin_lifecycle;
+		(void) pin_tail_tli;
+		(void) pin_checkpoint_tli;
+		lower = (XLogRecPtr) pin_checkpoint_lower;
+		validated_min = (XLogRecPtr) pin_validated_tail;
+	}
 
 	/*
 	 * D4 (spec-4.11 3b-4a): the replay upper is the VALIDATED torn-tail boundary
