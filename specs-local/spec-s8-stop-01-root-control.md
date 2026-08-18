@@ -2447,3 +2447,59 @@ canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X
 - **strict 模式 = bit22 打开强制门**：当前 RED（5 deferred）→ G5 的
   bit22 打开被 census 拦住（fail-closed 正确方向）；deferred 站点全部
   关闭后转 GREEN 才允许 R4 迁移轮打开 bit22。
+
+---
+
+## 增量 23：G3/G5 设计 —— R4 生产 cutover 驱动 + bit22 ACK 门（2026-08-18，设计稿）
+
+### 现状（审计 + 本会话复核）
+
+- ACK 机制已就绪：semantic_activation.c:1202-1226 的 ACK 表消费（两阶段
+  SAMPLE→EXPECTED_VALID→全成员 COMPLETE，含成员位图与 full-table 校验）；
+- create/activate 库层已就绪：cluster_control_root.c:1335/1424 +
+  encode_round（:933 强制 target 含 bit22、禁 bit24）+ decode_image（:623）；
+- **生产驱动缺失**：cluster_recovery_duty.c:43-61 的 create/activate
+  authority 桩恒返 false（注释明言 "The R4 OPEN cutover batch will
+  replace this refusal with an exact, one-shot coordinator proof"）；
+  ACK COMPLETE 无人消费；bit22 仅在单测设置。
+
+### 设计（R4 cutover 批次，operator 驱动）
+
+1. **operator 入口**：utility 激活记录路径（semantic_activation 的
+   utility mailbox）接收 cutover 请求（source/target feature bitmap 含
+   bit22、round 参数）——阶段 ACK 广播（SAMPLE→PREPARED）。
+2. **协调者 proof（替换 recovery_duty.c:43-61 桩）**：
+   `cluster_control_root_create_authority_current_v1` 的新实现 = 一次性
+   coordinator proof：本进程持有 ACK 表 COMPLETE（observed==expected 全
+   成员位图）+ round 的 exact 副本 + 迁移映像 digest；通过后
+   create_prepared 落地 PREPARED。**fail-closed**：非协调者 / ACK 未
+   COMPLETE / round 不匹配 / census RED 一律拒绝。
+3. **全成员 CLOSED ACK 绑定**（W6 条款 3）：PREPARED 后收集各成员对
+   迁移映像的 CLOSED ACK（observed==expected 的 PREPARED 阶段 ACK 即
+   CLOSED 事实绑定：每个成员的 merge_recovered_lsn==0 + 非 STOPPED 源拒
+   已在 read_source_wal_state:1113 层强制）；全成员 ACK 后协调者调
+   `activate_prepared`（ACTIVE = bit22 打开）。
+4. **census 强制门**：activate 前运行
+   scripts/ci/check-wal-state-correctness-census.sh（strict）——RED 时
+   activate 拒绝（fail-closed；deferred 站点关闭前 bit22 不可打开）。
+   运行时对应：激活驱动的代码面同时断言 census 白名单（或依赖 CI 门 +
+   测试面双保险）。
+5. **deferred 站点关闭**（census 转 GREEN 的前置，按增量 22 补记 4/5）：
+   B4 的 SCN 维度 spec 决策 + B5/B6/hw_remaster 的 episode 窗口 CF(S)
+   调度（或按冻结语义降级为 node-local authority——与 merged.authority
+   同型，独立设计评审）。
+
+### 验收
+
+- 单测：create/activate authority 的协调者 proof（ACK COMPLETE 注入 /
+  非协调者拒 / census RED 拒 / round 不匹配拒）；
+- TAP：R4 cutover 全成员 ACK → PREPARED → CLOSED ACK → ACTIVE(bit22)
+  全链 + census 门拦截用例；
+- 静态：census strict 模式随 deferred 关闭逐步转 GREEN。
+
+### 实施顺序（每步提交 + 等复审）
+
+1. create authority proof + 单测（census 门先以脚本为证）；
+2. ACK COMPLETE 消费接线（coordinator 侧 R4 驱动）；
+3. activate + bit22 门 + census 集成；
+4. deferred 站点关闭（B4 SCN 决策 → B5/B6/hw_remaster 调度设计）。
