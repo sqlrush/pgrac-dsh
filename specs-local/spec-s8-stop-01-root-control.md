@@ -4230,3 +4230,29 @@ multi-node harness 建设 = 独立工作项（P9 后）。
 - §8.1 ✅（本审计）；
 - P9 合同全部达成（faithful legs 按环境能力 + 合同允许的 honest
   标注；RED matrix 全对照；观测性 G2 审计）。
+
+---
+
+## 增量 56：外部审计 #4 修复 —— WALR resid 编码移出 Assert（2026-08-18，
+## 补记 62/63 顺序第 1 项）
+
+### 发现
+
+cluster_wal_retention.c:819 `walr_share_request_init` 的
+`cluster_wal_retention_resid_encode` 在 Assert 内——AGENTS.md 明令禁止的
+"Assert 承载唯一正确性"类：release build（--disable-cassert）下 Assert
+消失 → resid 全零进入 GES 锁请求（错误资源身份）。
+
+### 修法
+
+- `walr_share_request_init` 改为返回 bool：encode 失败 → false（不填
+  resid、不初始化锁请求）；
+- 调用者（pin 借出路径，:893）encode 失败 → fail-closed 返回
+  CLUSTER_WAL_PIN_UNAVAILABLE（pfree guard 后）。
+- encode 失败条件（thread_id 越界/非法）本就该被上层校验拒绝；此处
+  显式 fail-closed 是纵深防御（AGENTS.md 合规）。
+
+### 验收
+
+- 现有 wal_retention 36/36 复跑；
+- release build（--disable-cassert）至少编译通过。
