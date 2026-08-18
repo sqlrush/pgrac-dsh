@@ -119,6 +119,15 @@
 - [x] **【P6 重新冻结条件核对】**（供 DSH 裁定）：A ✓ + B ✓ + C ✓ +
       regress 13/13 ✓ + t243 33/33（多轮）✓ + 全树 TEMP 复核 0 ✓ +
       cluster_unit 232 闭包 ✓（3 二进制/8 测试文档化 pre-existing）。
+- [x] **【P7 G3 step 1 已提交】**（2026-08-18 13:03，c448a57602）：
+      R4 cutover create-authority coordinator proof 落地——recovery_duty.c
+      `cluster_control_root_create_authority_current_v1` 替换 P5 拒桩（四重
+      fail-closed：非协调者 fail-fast / ACK 未 COMPLETE / 未知 feature 位 /
+      target 缺 bit22）；新 accessor `cluster_semantic_activation_ack_complete_matches`
+      （COMPLETE 表 + round 身份绑定，seqlock snapshot）。证据：recovery_duty
+      24/24、r4_activation_fsm 174/174、t243 33/33。**待 DSH 复审**；通过后
+      按增量 23 步骤 2-3 接 ACK 消费（coordinator R4 驱动）+ activate/bit22
+      门 + census strict 集成。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
