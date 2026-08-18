@@ -3257,3 +3257,165 @@ vs minted-lost）+ registry 判别器 + 不持 gate。其中：
    否则迁移惰性永不可见。
 6. hw_remaster 现 committed 的 registry 读保持不动——它是 §17.8-correct
    的 bit22 前行为；不再把 site-4 "迁移" 当 bit22 前置任务。
+
+---
+
+## 增量 39：P7 收尾重排落地设计 —— NULL-identity 修法 + reader 双路径
+## bit22 门控 + census 重定义（2026-08-18，补记 43 裁决落地；文档先行，
+## 交 DSH 复审后再动码）
+
+### 裁定来源与任务映射
+
+- 复审补记 43（2026-08-18 17:40）：cutover 语义反转裁决（§17.8 + §17.7-4 +
+  §17.9 ⇒ reader 在 bit22 前必须保持 wal-state 权威源）+ E1/E2 惰性证据 +
+  下一步四条。增量 38 已落档裁决与增量 37 处置；本增量是**落地设计**。
+- 映射：§A = 任务 1（NULL-identity 修法）；§B = 任务 2（双路径 bit22 门控）；
+  §C = 任务 5 文档面（census 重定义）；§D = 任务 3（测试强度选项，待裁定）；
+  §E = 任务 4 要点（bit22 首开轮，详设留后续增量）。
+
+### §A NULL-identity bug：取证与修法（任务 1）
+
+**取证（committed tree 72b33253e3 实测）**：
+
+- `cluster_control_root_read_canonical` 前置检查（cluster_control_root.c:815-819）：
+  `strong && expected_identity == NULL` → 恒返 `INVALID_ARGUMENT=23`，
+  先于任何文件访问。
+- 三个 committed 读点全部传 NULL：
+  ① plan.c:219-220（plan verdict 逐 tid 读）；
+  ② plan.c:335-336（`cluster_thread_recovery_pin_projection`，worker:247 /
+     orchestrator:572 的投影数据源——pin 恒 false ⇒ 两个 consumer 经
+     `cluster_thread_recovery_projection_current` 恒 fail-closed）；
+  ③ worker.c:213-214（`cluster_recovery_worker_revalidate`，恒 UNREADABLE）。
+- 惰性链（补记 43 E1）：plan 恒 "0 alive, 127 unknown" → 0 candidates →
+  worker/orchestrator 永不启动；t243 绿不证明迁移正确（测试强度缺口，§D）。
+- 对照合法用法：thread_recovery_worker.c:162-164 与 merge.c:1388-1390 传
+  `&duty`（真实 identity）——五站惰性不代表全部 root 读坏死。
+
+**修法 = committed 先例的两步合法模式**（wal_retention.c:1355-1373 /
+`wal_retention_e1_read_root` :1644-1675 已在树）：
+
+1. `read_canonical(tid, NULL, READ_BOOTSTRAP_VALIDATE, &bootstrap, NULL)`
+   —— **仅做 identity 发现**（验证语义：不持 CF、不铸 token，strong=false）；
+2. `read_canonical(tid, &discovered_identity, READ_STRONG, &snapshot, &token)`
+   —— 正确性读仍是 STRONG + expected_identity 绑定（token 只在此铸造）。
+
+不变量与 fail-closed：
+
+- BOOTSTRAP 永不直接服务 correctness 判定（补记 43："BOOTSTRAP 仅限验证语义"）；
+- discover→STRONG 之间 root 重发布 → `IDENTITY_MISMATCH` →
+  UNKNOWN/UNREADABLE/pin-false（与现行 fail-closed 方向一致，下一周期重试）；
+- `control_root_read_ready` 现为 wal_retention.c:130 static——实施时导出为
+  共用内联（control_root.h）或各站复制两行判式（实现细节，复审定）。
+
+**落地耦合（硬约束）**：§A 单独落地会让 root 读在 bit22 前变成活路径
+（plan 开始真产 candidate、worker 真启动）= bit22 前 root 成事实权威，
+正是补记 43 裁定的反转方向。故 **§A 不得单独落地**——必须与 §B 门控同批：
+root 分支在 bit22 latch 置位前动态不可达（见 §B）。
+
+### §B reader 双路径 bit22 门控（任务 2）
+
+**门谓词合同**（新设施，任务 4 的 cutover 驱动负责置位）：
+
+- `cluster_r4_bit22_cutover_active(void)`（名待定）→ bool：
+  shmem latch，默认 false，单调一次性置位，无锁可查（pg_atomic），
+  任何不确定 → false（fail-closed 到 pre-bit22 分支）。
+- 置位合同：节点本轮 cutover FSM 到达 OPEN_APPLIED（ACK stage 枚举已存在，
+  semantic_activation.h:45）且绑定本轮 round identity 时置位；latch 记录
+  {transition_epoch, prepare_generation} 供观测。**驱动落地前 latch 永不
+  置位 ⇒ 全部 reader 走 pre-bit22 分支 = 冻结 §17.8 行为逐字恢复。**
+
+**统一 gate idiom**（census gate 建模的机器可识别锚，见 §C）：
+
+```c
+if (cluster_r4_bit22_cutover_active()) {
+    /* post-bit22: root-only，ABSENT 按增量 37 二分 fail-closed */
+} else {
+    /* pre-bit22: wal-state registry 权威源（§17.8） */
+}
+```
+
+**逐站形状**（实施分批，每批一 commit）：
+
+| 站 | pre-bit22 分支（恢复形态） | post-bit22 分支（修好形态） |
+|---|---|---|
+| S1 plan.c:219（plan verdict，startup 上下文） | `read_slot` + `classify_slot`（29efc553b0^ 原形，header-only inline 仍在 plan.h:116；阈值 `cluster_recovery_stale_active_ms`） | §A 两步读 + `classify_root_slot`（补记 32 方案 A 不变） |
+| S2 worker.c:213（revalidate，startup 上下文） | `read_slot` + registry 版 `validate_stream`（从 34eb81cc71^ 恢复；迁移时删除，worker.c:141 注释实证） | §A 两步读 + `validate_stream_from_root` |
+| S3 pin（plan.c:335，调用点 worker.c:393 workers_launch / thread_recovery_worker.c:452 LMON launch）+ consumer（worker:247、orchestrator:572） | **不 pin**：consumer 直接 registry 读（恢复 a9be5590d0^ / bb7fda782e^ 消费形态，无 CF 依赖） | §A 修好 pin + `projection_current` 消费（增量 30/31 形状不变） |
+| S4 hw_remaster.c:487 | **不动**（committed registry 读 = §17.8-correct，补记 43 项 6） | 本批不加；root 分支在任务 4 cutover 轮内入场 |
+
+- 观测字段（plan.max_highest_lsn 等）随各分支源走：观测不是 correctness，
+  不进 census。
+- **增量 37 二分语义的位置**：never-minted 降级 / minted-lost fail-stop /
+  registry 发布记录判别器 / 不持 hw_gate——全部只在 **post-bit22 分支**内
+  有效；pre-bit22 分支无 root 读，无 ABSENT 问题。
+- §17.7-4 "after bit22 ... statically unreachable" 与运行时分支的张力由
+  §C 的 gate 建模化解（静态证明对象 = "无 ungated correctness 调用点"）。
+
+### §C census 重定义：post-bit22 静态证明（gate 建模）（任务 5 文档面）
+
+**问题（补记 43 裁决）**：现行 census 把 §17.9 的 **post-bit22** exactly-zero
+操作成 **pre-bit22 前置门**——activate proof 的运行时门
+（recovery_duty.c:103 `cluster_wal_state_correctness_census_ok()`）+ 脚本头
+"must pass GREEN before bit22 opens"——迫使 reader 在 bit22 前 root-only，
+违反 §17.8。hw_remaster 的 §17.8-correct registry 读反被列 KNOWN-DEFERRED
+= 框架颠倒。
+
+**新模型（gate 建模）**：
+
+- census 静态证明对象重定义为："生产树中**不存在未被公认 bit22-gate idiom
+  包住的** registry correctness 调用点"。被 idiom 包住的站点 = post-bit22
+  静态不可达的建模证明（latch 单调 ⇒ post-bit22 永远走 root 分支）。
+- 脚本（scripts/ci/check-wal-state-correctness-census.sh）：strict 的 RED
+  条件从 "DEFERRED 非空" 改为 "存在 ungated 且不在 telemetry 白名单的
+  correctness 调用点"；KNOWN-DEFERRED 语义**翻转**为 GATE-BOUND 清单
+  （bit22 前合法，§17.8；cutover 轮提交内完成切换后移除）。
+- activate proof 的 census 运行时门（recovery_duty.c:103）**移除**——bit22
+  开门的绑定改为任务 4 的 all-member PREPARED-stage CLOSED-ACK + reader
+  切换同轮（W6 条款 3 原义）。**补记 28 "census 做成运行时调用" 硬性要求
+  在此显式处置**：该要求建立在反转模型上（pre-bit22 归零前置）；补记 43 的
+  gate 建模取代之——post-bit22 的证明是静态 gate 建模 + cutover 提交内
+  清单归零，而非 pre-bit22 运行时门。
+- C 表（wal_state.c:821 `cluster_wal_state_census_deferred_sites`）随 §B
+  实施批同步处置：改为 gate-bound 站点表（运行时自检用途）或删除，
+  与脚本 lockstep 校验保持语义一致（实施批内定稿，复审确认）。
+
+### §D 测试强度缺口（任务 3：选项，待 DSH/用户裁定）
+
+缺口证据：补记 43 E1；t243 全文 grep 无任何 candidate/plan 断言（实测零
+命中）——plan "0 alive, 127 unknown" 在绿跑里不可见。
+
+- **选项 1**：t243 补 candidate>0 断言（L4 crash 腿后 plan 日志须出现
+  "crashed candidate [2]"类）。⚠️ 撞红线 "t243 断言不可改"——需用户显式
+  裁决授权。
+- **选项 2（推荐）**：独立 crash 腿新 TAP（不动 t243）：2-node shared-root，
+  kill -9 一腿，断言 survivor plan 产 candidate + worker 启动。基础设施
+  复用 ClusterPair；代价是新文件维护面。
+- **选项 3（配套，不替代）**：聚焦单测直接杀死本类惰性——pin_projection /
+  plan root 分支用真实 root fixture（control_root 单测 :792 起的真实文件
+  先例）驱动：断言两步读成功、latch=false 时 root 分支动态不可达、
+  NULL-identity 型失败立即红。
+
+请 DSH/用户在 1 / 2 间裁定；3 无论何选都做。
+
+### §E bit22 首开轮要点（任务 4 预览；详设 = 后续增量）
+
+- 驱动接线：coordinator R4 驱动（utility mailbox cutover，补记 29 遗留）；
+  create/activate proof seam（recovery_duty.c:44-120）尚无生产调用方
+  （grep 实证），首开轮设计必须含驱动 + latch 置位点。
+- 同轮绑定（§17.7-3 "same migration round"）：all-member PREPARED-stage
+  CLOSED-ACK（W6 条款 3）+ reader 切换 latch 置位 + hw_remaster root 分支
+  入场 + census GATE-BOUND 清单归零，同一 cutover 提交内完成。
+
+### 落地顺序与验收
+
+1. 本增量交 DSH 复审（文档先行，不动码）。
+2. 复审通过后按批实施，每批一 commit、批批等复审：
+   批 1 = S1+S2（startup 上下文双路径 + §A 修法内嵌）；
+   批 2 = S3（pin 修好 + consumer 双路径）；
+   批 3 = §C（census 脚本头/strict 语义 + C 表 + activate proof 门移除）。
+3. §D 裁定后落地测试强度（与批 1/2 并行可行）。
+4. 任务 4/5 随首开轮设计增量落地。
+- 每批验收：t243 33/33 + cluster_regress 13/13 + 聚焦单测绿（plan /
+  recovery_worker / control_root）+ census 脚本行为符合本批语义。
+- 全程不变量：latch=false 时行为逐字等价迁移前（registry 权威）；
+  root 分支静态存在、动态不可达；ABSENT 二分只在 post-bit22 分支内。
