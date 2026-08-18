@@ -42,6 +42,11 @@ static ClusterControlRootPatch ut_root_published_patch;
 static ClusterControlRootPublishReason ut_root_published_reason;
 static bool ut_root_publish_context_authorized;
 static bool ut_root_publish_mutate_token;
+/* RF-ROOT P6 increment 21: the commit-time re-vet reads the durable
+ * clean-departed evidence to distinguish the missed-clean-close repair
+ * (OPEN root under the old owner, clean-departed) from a crash-rejoin
+ * commit racing the FSM (stays fail-closed). */
+static bool ut_clean_departed = false;
 
 ClusterControlRootResult
 cluster_control_root_lookup_owner_by_node_runtime(
@@ -325,7 +330,16 @@ setup_owner_rejoin(uint64 old_incarnation, uint64 new_incarnation)
 	ut_root_publish_calls = 0;
 	ut_root_publish_context_authorized = false;
 	ut_root_publish_mutate_token = false;
+	ut_clean_departed = false;
 	memset(&ut_root_published_patch, 0, sizeof(ut_root_published_patch));
+}
+
+/* Link-only stub for the durable clean-departed evidence read (increment
+ * 21 repair routing); the fixture sets ut_clean_departed. */
+bool
+cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
+{
+	return ut_clean_departed;
 }
 
 UT_TEST(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas)
@@ -363,6 +377,43 @@ UT_TEST(test_owner_rejoin_publication_context_rejects_token_drift)
 	UT_ASSERT(!cluster_control_root_publish_authority_current_v1(
 		&ut_root_token, &ut_root_published_patch,
 		CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN));
+}
+
+UT_TEST(test_owner_rejoin_repairs_missed_clean_close_open_stale_owner)
+{
+	/* specs-local STOP-01 increment 21: an OPEN root under the OLD owner
+	 * with durable clean-departed evidence = the L10 serving-stale missed
+	 * clean-close (THREAD_CLEAN_CLOSE was denied, root never became CLOSED).
+	 * The commit-time re-vet repairs it with the two FROZEN CAS shapes:
+	 * THREAD_CLEAN_CLOSE (OPEN -> CLOSED, owner lineage unchanged) then
+	 * THREAD_OPEN (CLOSED -> OPEN, owner = admitted, lineage+1). */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	ut_clean_departed = true;
+	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 2); /* close CAS + open CAS */
+	UT_ASSERT(ut_root_publish_context_authorized);
+	UT_ASSERT_EQ((int)ut_root_published_reason,
+				 (int)CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN);
+	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED);
+	UT_ASSERT_EQ(ut_root_published_patch.desired.lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT_EQ(
+		ut_root_published_patch.desired.identity.origin_owner_incarnation,
+		UINT64_C(77));
+	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq,
+				 ut_root_identity.root_lineage_seq + 1);
+
+	/* A crash-rejoin commit racing the FSM (OPEN old owner, NOT
+	 * clean-departed) stays fail-closed: zero publishes — the FSM writes
+	 * RECOVERY_COMPLETE first, then the frozen OWNER_REJOIN path. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	ut_clean_departed = false;
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+	ut_clean_departed = false;
 }
 
 UT_TEST(test_owner_rejoin_closed_lifecycle_routes_to_thread_open)
@@ -816,7 +867,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(17);
+	UT_PLAN(19);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -828,6 +879,7 @@ main(void)
 	UT_RUN(test_owner_import_slot_fallback_requires_absent_jcmk_and_claim);
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
+	UT_RUN(test_owner_rejoin_repairs_missed_clean_close_open_stale_owner);
 	UT_RUN(test_owner_rejoin_closed_lifecycle_routes_to_thread_open);
 	UT_RUN(test_owner_rejoin_publication_context_rejects_token_drift);
 	UT_RUN(test_owner_rejoin_fails_closed_on_non_jcmk_drift_or_exhaustion);

@@ -2161,3 +2161,71 @@ PUBLISH_THREAD_OPEN、expected CLOSED、owner=admitted、lineage+1）。
 - recovery_duty 18/18（CLOSED 路由断言）✓ 已达成；
 - C 测试（增量 19）落地：RECOVERY_COMPLETE OWNER_REJOIN 成功 /
   OPEN 与 CLOSED 的 OWNER_REJOIN INVALID_ARGUMENT / THREAD_OPEN CLOSED→OPEN 成功。
+
+---
+
+## 增量 20 补记：执行者范围结论（AD-023 §4 引用，DSH 复审补记 17 验证点 1）
+
+**结论：协调者 LMON 在 join-commit re-vet 执行 THREAD_OPEN CAS 落在 §4
+冻结范围内，不构成偏离。**
+
+- AD-023 §4 原文（~/pgrac/docs/ad-023-rfroot-p04-recovery-authority-
+  serving-split.md:71-96）的 StartupProcess-only allowlist 约束对象 =
+  **恢复期**（phase3、serving 未立）的 recovery access：caller 必须
+  StartupProcess + phase3 + exact generation + 资源恰为 CF(0xF1/S) 或
+  WALR(0xFA/X)。
+- §4 同文界定 serving 期准入："ordinary egress/peer selection 与 local
+  ingress/grant/serve 都必须校验 current-generation SERVING_READY。恢复
+  allowlist 不是 ordinary service 的替代入口。"
+- 本路由的执行点 = join-commit re-vet（协调者 LMON，有 PGPROC）；此刻
+  **集群处于 serving 阶段**（survivor 的 serving binding current），CF(S)
+  走 cluster_lock_acquire.c:196-207 的 serving 分支（exact-LMS 谓词），
+  **不经恢复 allowlist**。与冻结 crash-rejoin 主线的 OWNER_REJOIN CAS
+  （协调者同角色、同锁路径，P4/P5 起 t243 全绿）完全一致。
+- cluster_lock_acquire.c:216 注记 "the root reopen needs a PGPROC executor
+  (deferred to the L5 leg work)" = 本路由正是该注记指向的执行者（LMON 有
+  PGPROC）；postmaster（无 PGPROC）仍被排除（r=10 fail-closed 保持）。
+- 验收日志：CLOSED→THREAD_OPEN 成功发布新增 LOG
+  "clean-reopened by node %d (THREAD_OPEN, owner ..., lineage ...)"，
+  供 t243 "reopened by owner" 型证据取证。
+
+---
+
+## 增量 21：L10 serving-stale 变体的两段冻结 CAS 修复（2026-08-18）
+
+### 复现（t243 final run 09:39:12，THREAD_OPEN 路由首轮即命中）
+
+L10 末次 fast-stop：`cluster clean-leave: committed but the local serving
+authority did not re-confirm before the barrier deadline; proceeding with
+the shutdown checkpoint`（09:39:12.588）→ 该 run **无 "clean-closed by
+owner"**（THREAD_CLEAN_CLOSE 的 CF(X) 被 S1 serving-stale 拒，fail-closed
+跳过）→ root 停 OPEN(owner=旧化身 840332317297894) → 重启 phase-3：
+"clean reopen detected" 后 join commit 的 owner-rejoin OPEN 分支
+（owner != admitted）永拒 → phase-3 barrier 饿死 → 60s bail（node0 被判
+DEAD）。= run-54 的 pre-increment-17 楔子，原由增量 17（已回退，§17.4
+违规）覆盖；THREAD_OPEN 只认 CLOSED、OWNER_REJOIN 只认 RECOVERY_COMPLETE，
+两者均不覆盖 OPEN(old) —— 冻结系统对该状态无路径。
+
+### 设计（仅冻结 CAS 形状，无新捷径）
+
+commit 时点 re-vet（owner_rejoin_v1）新增分支：**OPEN + owner < admitted
++ clean-departed 证据**（cluster_reconfig_is_clean_departed(node_id)，
+durable CLEAN_LEAVE marker 的运行时面）= 上次 clean-close 被拒的漏关：
+
+1. CAS1 = THREAD_CLEAN_CLOSE（冻结 0x39 形状：OPEN→CLOSED，owner lineage
+   不变，checkpoint/tail/progress 取自当前 snapshot——即上次 shutdown
+   checkpoint 的 durable 数据）；
+2. CAS2 = THREAD_OPEN（冻结 0x3b 形状：CLOSED→OPEN，owner=admitted，
+   lineage+1）——复用既有 CLOSED 路由。
+
+非 clean-departed 的 OPEN+owner<admitted（crash 链 commit 抢跑）保持拒绝
+（fail-closed，FSM 会先写 RECOVERY_COMPLETE）。执行者范围同增量 20 补记
+（serving 期协调者，AD-023 §4 结论引用成立）；两段 CAS 均原子，中间态
+CLOSED 无并发执行者（phase-3 postmaster 已拆除、startup 死锁方案已废弃）。
+
+### 验收
+
+- t243 33/33 多轮（含 L10 变体轮）；日志同时出现 "clean-reopened by node"
+  与（变体轮）"clean-closed"→"clean-reopened" 对；
+- recovery_duty 18/18（新增 repair 用例：OPEN(old)+clean-departed →
+  close→open 两段发布、reason 断言）。

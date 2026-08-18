@@ -345,8 +345,12 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 			 * forked only after phase-3, whose barrier waits on this very
 			 * commit — running the reopen later deadlocks. */
 			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+		/* specs-local STOP-01 increment 21: OPEN + owner == admitted is the
+		 * already-satisfied state; OPEN + owner < admitted is the missed
+		 * clean-close repair (clean-departed evidence, below).  Only a
+		 * STALE process (owner > admitted) is rejected outright. */
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-			&& identity.origin_owner_incarnation != admitted_incarnation)
+			&& identity.origin_owner_incarnation > admitted_incarnation)
 		|| (snapshot.lifecycle
 				!= CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 			&& (identity.root_lineage_seq == UINT64_MAX
@@ -357,6 +361,16 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		identity.thread_claim_created_at);
 	if (immutable_claim.crc != identity.thread_claim_crc32c)
 		return false;
+	/* specs-local STOP-01 increment 21: OPEN under an OLDER owner is the
+	 * missed-clean-close repair ONLY when the durable clean-departed
+	 * evidence exists (the L10 serving-stale variant).  Without it — a
+	 * crash-rejoin commit racing the FSM — fail closed BEFORE any JCMK
+	 * read: the survivor's GRD recovery writes RECOVERY_COMPLETE first,
+	 * and the re-vet then takes the frozen OWNER_REJOIN path. */
+	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& identity.origin_owner_incarnation < admitted_incarnation
+		&& !cluster_reconfig_is_clean_departed(node_id))
+		return false;
 	owner_result = cluster_recovery_owner_import_read_v1(
 		node_id, &immutable_claim, 0, 0, &proven_incarnation);
 	if (owner_result != CLUSTER_RECOVERY_OWNER_IMPORT_JCMK
@@ -365,8 +379,81 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 	/* A previous attempt may have completed the single ROOT CAS and then lost
 	 * the local membership publish race.  Exact OPEN+owner plus the same direct
 	 * majority JCMK is the already-satisfied gate; never advance lineage twice. */
-	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& identity.origin_owner_incarnation == admitted_incarnation)
 		return true;
+
+	/*
+	 * RF-ROOT P6 (specs-local STOP-01 increment 21):  a CLEAN-DEPARTED node
+	 * whose previous clean stop's THREAD_CLEAN_CLOSE was DENIED in a
+	 * serving-stale window (the shutdown checkpoint's CF(X) failed S1)
+	 * restarts with the root still OPEN under the OLD incarnation — the L10
+	 * serving-stale variant (run-54 wedge).  Neither frozen path covers it:
+	 * THREAD_OPEN only accepts CLOSED, OWNER_REJOIN only RECOVERY_COMPLETE.
+	 * Repair it with the two FROZEN CAS shapes in sequence, executed here
+	 * (commit-time re-vet, serving phase — same executor scope as the
+	 * CLOSED routing, increment 20):
+	 *   CAS1 THREAD_CLEAN_CLOSE (0x39: OPEN -> CLOSED, owner lineage
+	 *        unchanged, checkpoint/tail/progress from the snapshot — the
+	 *        durable shutdown-checkpoint data);
+	 *   CAS2 THREAD_OPEN (0x3b: CLOSED -> OPEN, owner = admitted,
+	 *        lineage+1).
+	 * Non-clean-departed OPEN+owner<admitted (a crash-rejoin commit racing
+	 * the FSM) stays rejected — the FSM writes RECOVERY_COMPLETE first.
+	 */
+	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& identity.origin_owner_incarnation < admitted_incarnation
+		&& cluster_reconfig_is_clean_departed(node_id)) {
+		ClusterControlRootPatch close_patch;
+
+		memset(&close_patch, 0, sizeof(close_patch));
+		close_patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
+						   | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
+						   | CLUSTER_CONTROL_ROOT_PATCH_TAIL
+						   | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
+		close_patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+		close_patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+		close_patch.desired.root_flags = snapshot.root_flags;
+		close_patch.desired.checkpoint_tli = snapshot.checkpoint_tli;
+		close_patch.desired.checkpoint_source_kind = snapshot.checkpoint_source_kind;
+		close_patch.desired.checkpoint_lower_lsn = snapshot.checkpoint_lower_lsn;
+		close_patch.desired.checkpoint_record_crc32c =
+			snapshot.checkpoint_record_crc32c;
+		close_patch.desired.tail_tli = snapshot.tail_tli;
+		close_patch.desired.tail_validation_kind = snapshot.tail_validation_kind;
+		close_patch.desired.validated_tail_lsn_exclusive =
+			snapshot.validated_tail_lsn_exclusive;
+		close_patch.desired.tail_last_record_lsn = snapshot.tail_last_record_lsn;
+		close_patch.desired.tail_last_record_crc32c =
+			snapshot.tail_last_record_crc32c;
+		close_patch.desired.recovered_tli = snapshot.recovered_tli;
+		close_patch.desired.recovered_through_lsn_exclusive =
+			snapshot.recovered_through_lsn_exclusive;
+		close_patch.desired.recovered_last_record_lsn =
+			snapshot.recovered_last_record_lsn;
+		close_patch.desired.recovered_last_record_crc32c =
+			snapshot.recovered_last_record_crc32c;
+
+		if (!cluster_control_root_publish_authority_bind_v1(
+				&token, &close_patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE))
+			return false;
+		root_result = cluster_control_root_compare_and_publish(
+			&token, &close_patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE,
+			&published, &published_token);
+		cluster_control_root_publish_authority_clear_v1();
+		if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+			|| published.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+			return false;
+
+		ereport(LOG,
+				(errmsg("cluster control root: thread %u missed clean-close repaired by "
+						"node %d (THREAD_CLEAN_CLOSE, owner " UINT64_FORMAT " -> CLOSED)",
+						identity.origin_thread_id, node_id,
+						identity.origin_owner_incarnation)));
+		/* CAS2 reuses the CLOSED routing below: snapshot = the published
+		 * CLOSED root (owner lineage unchanged). */
+		snapshot = published;
+	}
 
 	memset(&patch, 0, sizeof(patch));
 	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
@@ -416,10 +503,19 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		: CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN,
 		&published, &published_token);
 	cluster_control_root_publish_authority_clear_v1();
-	return root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
-		   && published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-		   && published.identity.origin_owner_incarnation == admitted_incarnation
-		   && published.identity.root_lineage_seq == identity.root_lineage_seq + 1;
+	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& published.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
+		&& published.identity.origin_owner_incarnation == admitted_incarnation
+		&& published.identity.root_lineage_seq == identity.root_lineage_seq + 1) {
+		if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
+			ereport(LOG,
+					(errmsg("cluster control root: thread %u clean-reopened by node %d "
+							"(THREAD_OPEN, owner " UINT64_FORMAT ", lineage " UINT64_FORMAT ")",
+							identity.origin_thread_id, node_id, admitted_incarnation,
+							identity.root_lineage_seq + 1)));
+		return true;
+	}
+	return false;
 }
 
 /*
