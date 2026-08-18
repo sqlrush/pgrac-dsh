@@ -3552,3 +3552,104 @@ online_join（spec-5.22）落地或 3-node 编队；届时按本增量 §A 的�
 **P7 状态**：批 1-4 完成 + 任务 3 定案（受集群语义限制）+ census GREEN。
 剩余：任务 4 bit22 首开轮（coordinator R4 驱动 + OPEN_APPLIED latch 置位
 + 混合窗口证明，增量 40 §B）——post-bit22 分支全部就位，唯一缺口是驱动。
+
+---
+
+## 增量 42：任务 4 bit22 首开轮详细设计（2026-08-18，文档先行；
+## 增量 40 §B 要点展开；实施前交 DSH 复审）
+
+### 目标
+
+coordinator 驱动 R4 cutover 轮：create（PREPARED）→ 全成员 ACK 编排
+（SAMPLE→BARRIER→PREPARED，既有机制）→ activate（root ACTIVATION_ACTIVE，
+四门 proof 已就绪）→ **OPEN_APPLIED 段（新增）**：全成员应用
+`cluster_r4_bit22_cutover_latch_apply`（reader 切换 + census 自检放行）。
+轮内同批关闭 census（批 4 已完成：KNOWN-DEFERRED 空 → GREEN）。
+
+### 现有机制盘点（grep 实证，2026-08-18）
+
+- ACK 表/请求编排：SAMPLE→BARRIER→PREPARED→COMMIT_APPLIED 全链路存在
+  （semantic_activation.c:2460-2570 协调者推进、:3800 成员侧分派、
+  :4586 成员校验）；OPEN_APPLIED stage 常量存在（h:45）但**无推进/应用
+  路径**——本任务最小扩展点。
+- 协调者 proof seam：`cluster_control_root_create_authority_current_v1` /
+  `activate_authority_current_v1`（recovery_duty.c:44-120）+ 
+  `create_prepared` / `activate_prepared`（control_root.c:1287/1380）——
+  **无生产调用者**（补记 44 设计点 ③）。
+- utility mailbox（semantic_activation.c:5383 submit，IDLE→WRITING→
+  PENDING→COMPLETE）：**无生产驱动**。
+- latch apply（批 3）：`cluster_r4_bit22_cutover_latch_apply`（census 自检
+  内置，KNOWN-DEFERRED 空 → 现为 GREEN 放行）。
+- 成员应用模式：PREPARED 成员 `r4_descriptor.prepare_target(...)` +
+  finish_member_prepared（:3817-3821）——OPEN_APPLIED 成员应用 = 
+  `cluster_r4_bit22_cutover_latch_apply(round->transition_epoch,
+  round->prepare_generation)` + 结果 ACK，同构。
+
+### 设计
+
+**A. 协调者侧 OPEN_APPLIED 推进**（扩展 :2564 模式，transition_closed 后）：
+1. 前置：ACK 表 PREPARED 全成员 COMPLETE + transition_closed + 
+   source_feature_bitmap == active_bits（既有检查）；
+2. `cluster_control_root_activate_prepared(expected_token, round_sha,
+   round, &out_token)`（root PREPARED→ACTIVE；activate proof 四门：协调者
+   身份 / ACK PREPARED COMPLETE 绑 round / bit22 target / ——census 门已
+   移除（批 3），census 由 latch apply 自检承担）；失败 → 轮失败（fail-
+   closed，root 保持 PREPARED，可重试或回滚——回滚面沿用既有
+   rollback_feature_bitmap 机制）；
+3. 成功 → 发布 OPEN_APPLIED REQUEST（stage=OPEN_APPLIED，round 身份
+   绑定：transition_epoch/prepare_generation/admitted bitmap/feature
+   bitmap/digest 全带，wire 编码沿用 ACK wire v1）；
+4. 等待全成员 OPEN_APPLIED ACK（observed == expected + COMPLETE）→ 轮
+   完成（root ACTIVE + 全成员 latch 置位）。
+
+**B. 成员侧 OPEN_APPLIED 应用**（扩展 :3800 分派）：
+1. 校验 REQUEST（同 :4586 模式：source=coordinator、stage 精确、
+   round 身份、membership MEMBER、capability）；
+2. 应用 = `cluster_r4_bit22_cutover_latch_apply(transition_epoch,
+   prepare_generation)`——**一次性**：返回 false（已置位/round 无效/census
+   RED）→ ACK 失败（轮失败，协调者 fail-closed）；
+3. 成功 → ACK（observed 置位，stage=OPEN_APPLIED）；
+4. **幂等**：latch 已置位的成员对重复 REQUEST 直接 ACK 成功（单调 latch
+   语义，重放安全）。
+
+**C. utility mailbox 驱动**（operator 触发，最小面）：
+- 新入口（SQL 函数或 postmaster 信号路径——实施时定）：构造 round
+  （coordinator 从当前 formation 取样：members/epoch/generation/feature
+  bitmaps/capability digest）→ mailbox submit（action=
+  CLUSTER_SEMANTIC_ENABLE_ALL 既有枚举或新增 CUTOVER_BIT22）→ LMON 编排
+  （既有 ingress/consume 循环）→ 轮推进（A/B）→ 结果回 mailbox（COMPLETE
+  + result）→ operator 可见。
+- **安全**：驱动仅协调者（cluster_node_id == coordinator_node）可提交；
+  未知 feature bit 白名单（既有）；bit22 必须在 target（proof 强制）；
+  round 身份绑定贯穿（ACK accessor 全字段比较）。
+
+**D. 混合 latch 窗口证明**（补记 44 设计点 ①，文档义务）：
+CLOSED-ACK（PREPARED-stage all-member ACK，W6 条款 3）后、个别节点
+OPEN_APPLIED 应用完成前的窗口内，节点 A（latch 置位）root-only vs 节点
+B（未置位）registry——两节点从不同源推导恢复判定。**安全性论证**：
+1. root 的 checkpoint/tail 界由 G1a CHECKPOINT_ADVANCE / G1a-2 FPW_STICKY
+   从 wal-state 发布历史派生（root 界 ⊆ registry 发布历史界）；
+2. W6 条款 3 的 CLOSED 绑定 = 全成员在 PREPARED 轮边界冻结（没有节点在
+   轮外写 registry correctness 数据）；
+3. 窗口内：root 界是 registry 界的"滞后快照"（root 只按 checkpoint 刷，
+   registry 每 1s tick）→ root-only 节点读到的是**更保守**的界（validated
+   tail ≤ 写位置）→ 两节点判定方向一致（fail-closed 侧）或 root-only 更
+   严——**不会出现 root-only 节点接受 registry-only 节点拒绝的数据**；
+4. minted-lost（root 读失败）fail-stop（批 4 已实现）在窗口内同样成立。
+⇒ 混合窗口安全。**TAP 混合腿**受增量 40/41 §A 限制（节点重启需 peer 在线
++ online_join 未实现）——混合腿推迟，由 unit（latch 置位/未置位的双路径
+单测）承担，TAP 侧以位22 开后的全 root-only 断言（bit22=1 日志）验收。
+
+**E. 验收**：
+- 单测：OPEN_APPLIED 推进/成员应用/latch 幂等/round 绑定拒绝（r4fsm 扩展）；
+  activate_prepared 生产调用链（control_root 扩展）；
+- TAP：t243 33/33 不回归；新 TAP（若可行）断言 bit22 开后 plan 日志
+  bit22=1 + worker 走 root 分支（受 §A 限制则 unit 承担）；
+- census strict GREEN 保持；regress 13/13。
+
+### 实施顺序（每步一 commit，等 DSH 复审增量 42）
+
+1. 协调者 OPEN_APPLIED 推进 + activate 接线（r4fsm 单测）；
+2. 成员 OPEN_APPLIED 应用 + latch 幂等（r4fsm 单测）；
+3. utility mailbox 驱动（operator 入口 + 单测）；
+4. 验收跑批（t243/regress/census）+ 推送。
