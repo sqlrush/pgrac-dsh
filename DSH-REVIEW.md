@@ -1969,3 +1969,31 @@ DSH 复审，不得自行改方案。
 
 - 删 TEMP 后：wal_retention 36/36 复跑 + t243 33/33 + regress 13/13 +
   commit（引用补记 62 #4）。
+
+---
+
+## 复审补记 65（2026-08-19 07:25，审计修复 #4 + #3 + #8 封板）
+
+### #4（29781c8fd7）：批准 ✅
+
+resid 出 Assert、显式 fail-closed、TEMP fprintf 已删（grep 零命中）、唯一
+调用者正确处理。补记 64 的必改项已兑现。
+
+### #3（ad8bd731c9）：批准 ✅
+
+open_applied_advance：latch apply 先于 observed 发布，返回值检查；失败 →
+无 observed/publish/REQUEST → 轮保持 PREPARED fail-closed。新增 test_145
+（census-RED 场景）断言。补记 61/63 的 MUST-FIX 落实。
+
+### #8：批准 ✅
+
+r4fsm 链接 superuser + build_migration_image stub（该二进制不链 backend
+superuser/control_root.o）。r4fsm 194/194。注：operator 与真实
+build_migration_image 的集成测试随 #1（首开可达）修复落地，当前 stub
+是合理中间态。
+
+### 审计修复进度
+
+- ✅ #4（resid）、✅ #3（排序）、✅ #8（链接）
+- ⬜ #1（首开可达：PCRM 字段 + lineage + SAMPLE-ACK 循环）——最大项
+- ⬜ #2（latch 跨重启）、#5（幂等窗口）、#7（P4/P9 标 BLOCKED）
