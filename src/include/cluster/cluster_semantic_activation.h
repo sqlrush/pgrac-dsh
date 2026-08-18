@@ -314,6 +314,16 @@ extern bool cluster_semantic_activation_qvotec_complete_undo_root_descriptor_rea
 extern void cluster_semantic_activation_ack_handler(
 	const ClusterICEnvelope *env, const void *payload);
 extern void cluster_semantic_activation_lmon_tick(void);
+/* RF-ROOT P7 G3: the R4 cutover coordinator proof reads the ACK table's
+ * COMPLETE state bound to the exact round identity (transition epoch,
+ * prepare generation, the expected/observed member sets, the source/target
+ * feature bitmaps and the capability sample digest).  True only when every
+ * member's ACK was observed (observed == expected) for THIS round. */
+extern bool cluster_semantic_activation_ack_complete_matches(
+	uint64 transition_epoch, uint64 record_generation,
+	uint64 expected_members_lo, uint64 expected_members_hi,
+	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
+	uint64 capability_sample_digest);
 extern ClusterSemanticActivationResult
 cluster_semantic_activation_submit(ClusterSemanticActivationAction action,
 								   ClusterSemanticActivationRefusal *refusal);

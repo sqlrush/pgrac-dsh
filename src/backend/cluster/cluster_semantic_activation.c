@@ -840,8 +840,45 @@ cluster_semantic_activation_ack_handler(
 		semantic_activation_ack_ingress_result_count[result]++;
 }
 
+/*
+ * cluster_semantic_activation_ack_complete_matches -- RF-ROOT P7 G3: the R4
+ * cutover coordinator proof.  True iff the ACK table is COMPLETE (every
+ * expected member observed == expected) AND the table is bound to the exact
+ * round identity passed by the caller (transition epoch, prepare generation,
+ * member set, source/target feature bitmaps, capability sample digest).
+ * The round binding prevents a stale table from a previous attempt from
+ * authorizing a new round; the COMPLETE check is the all-member-ACK fact the
+ * bit22 cutover requires (STOP-01 §17.7 W6 clause 3 binding).
+ */
 static bool semantic_activation_ack_table_snapshot(
-	ClusterSemanticActivationAckTableV1 *out) pg_attribute_unused();
+	ClusterSemanticActivationAckTableV1 *out);
+
+bool
+cluster_semantic_activation_ack_complete_matches(
+	uint64 transition_epoch, uint64 record_generation,
+	uint64 expected_members_lo, uint64 expected_members_hi,
+	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
+	uint64 capability_sample_digest)
+{
+	ClusterSemanticActivationAckTableV1 current;
+
+	if (!semantic_activation_ack_table_snapshot(&current))
+		return false;
+	if ((current.flags & CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE) == 0)
+		return false;
+	return current.transition_epoch == transition_epoch
+		&& current.record_generation == record_generation
+		&& current.expected_members_lo == expected_members_lo
+		&& current.expected_members_hi == expected_members_hi
+		&& current.observed_members_lo == current.expected_members_lo
+		&& current.observed_members_hi == current.expected_members_hi
+		&& current.source_feature_bitmap == source_feature_bitmap
+		&& current.target_feature_bitmap == target_feature_bitmap
+		&& current.capability_sample_digest == capability_sample_digest;
+}
+
+static bool semantic_activation_ack_table_snapshot(
+	ClusterSemanticActivationAckTableV1 *out);
 
 static bool
 semantic_activation_ack_table_snapshot(ClusterSemanticActivationAckTableV1 *out)

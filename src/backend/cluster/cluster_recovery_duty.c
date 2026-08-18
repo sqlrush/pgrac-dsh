@@ -13,6 +13,7 @@
 
 #include "cluster/cluster_membership.h"
 #include "cluster/cluster_reconfig.h"
+#include "cluster/cluster_semantic_activation.h" /* R4 cutover ACK proof (G3) */
 #include "cluster/cluster_recovery_duty.h"
 #include "cluster_control_root_private.h"
 #include "cluster/cluster_startup_phase.h" /* serving rebind (路线 1 retry) */
@@ -44,11 +45,34 @@ cluster_control_root_create_authority_current_v1(
 	const ClusterControlRootMigrationImage *image,
 	const ClusterControlRootMigrationRoundV1 *round)
 {
-	/* RF-ROOT P5 closes this public mutation edge.  The R4 OPEN cutover batch
-	 * will replace this refusal with an exact, one-shot coordinator proof. */
-	(void)image;
-	(void)round;
-	return false;
+	/* RF-ROOT P7 G3 (R4 cutover batch, specs-local increment 23): the
+	 * coordinator's exact one-shot proof, replacing the P5 refusal.  This
+	 * process must be the round's coordinator; the ACK table must be
+	 * COMPLETE (every member observed == expected) bound to this exact
+	 * round identity; the round must carry bit22 in its target bitmap.
+	 * Fail-closed on any mismatch.  The census gate is CI-enforced
+	 * (scripts/ci/check-wal-state-correctness-census.sh strict) + the
+	 * unit-tested whitelist assertions; the migration image itself is
+	 * validated by create_prepared before this call. */
+	if (image == NULL || round == NULL || cluster_node_id < 0
+		|| cluster_node_id >= CLUSTER_MAX_NODES)
+		return false;
+	if ((int32) round->coordinator_node_id != cluster_node_id)
+		return false;
+	if (!cluster_semantic_activation_ack_complete_matches(
+			round->transition_epoch, round->prepare_generation,
+			round->admitted_bitmap_low, round->admitted_bitmap_high,
+			round->source_feature_bitmap, round->target_feature_bitmap,
+			round->capability_sample_digest))
+		return false;
+	if (!cluster_control_root_feature_bitmap_is_known(
+			round->source_feature_bitmap)
+		|| !cluster_control_root_feature_bitmap_is_known(
+			round->target_feature_bitmap)
+		|| (round->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0)
+		return false;
+	return true;
 }
 
 bool

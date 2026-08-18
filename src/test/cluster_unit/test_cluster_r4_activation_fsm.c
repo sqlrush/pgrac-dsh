@@ -16,6 +16,7 @@
 #include "cluster/cluster_lms.h"
 #include "cluster/cluster_membership.h"
 #include "cluster/cluster_qvotec.h"
+#include "cluster/cluster_control_root.h" /* bit22 (G3 accessor test) */
 #include "cluster/cluster_reconfig.h"
 #include "cluster/cluster_replacement_wire.h"
 #include "cluster/cluster_semantic_activation.h"
@@ -1954,6 +1955,65 @@ UT_TEST(test_93da_coordinator_begins_exact_four_node_sample_round)
 		request_seq, &refusal));
 	for (node = 1; node < 4; node++)
 		UT_ASSERT_EQ(test_send_calls[node], 1);
+	test_gate_reset();
+}
+
+UT_TEST(test_g3_ack_complete_matches_round_binding)
+{
+	/* RF-ROOT P7 G3: the R4 cutover coordinator proof accessor — true only
+	 * when the ACK table is COMPLETE (observed == expected) AND bound to
+	 * the exact round identity.  The fixture shmem hook points the ACK
+	 * table at test_semantic_ack_table.bytes. */
+	ClusterSemanticActivationAckTableV1 *table;
+	uint64 bit22 = PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+
+	test_gate_reset();
+	UT_ASSERT(SemanticActivationAckTable
+			  == (ClusterSemanticActivationAckTableV1 *)test_semantic_ack_table.bytes);
+	table = (ClusterSemanticActivationAckTableV1 *)test_semantic_ack_table.bytes;
+	memset(table, 0, sizeof(*table));
+	pg_atomic_init_u64(&table->publication_seq, 0);
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	table->transition_epoch = 3;
+	table->record_generation = 7;
+	table->expected_members_lo = UINT64_C(0x0f);
+	table->expected_members_hi = 0;
+	table->observed_members_lo = UINT64_C(0x0f);
+	table->observed_members_hi = 0;
+	table->source_feature_bitmap = UINT64_C(1);
+	table->target_feature_bitmap = UINT64_C(1) | bit22;
+	table->capability_sample_digest = UINT64_C(0xabcd);
+
+	UT_ASSERT(cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
+
+	/* Not COMPLETE -> false. */
+	table->flags = 0;
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+
+	/* Round binding: wrong epoch / generation / members / digest -> false. */
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		4, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 8, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x07), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xdcba)));
+
+	/* observed != expected -> false (a member has not ACKed). */
+	table->observed_members_lo = UINT64_C(0x0e);
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd)));
 	test_gate_reset();
 }
 
@@ -4394,7 +4454,7 @@ UT_TEST(test_125_pgrd_snapshot_requires_majority_mirror_and_current_admission)
 int
 main(void)
 {
-	UT_PLAN(173);
+	UT_PLAN(174);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -4512,6 +4572,7 @@ main(void)
 	UT_RUN(test_93c_utility_mailbox_preserves_exact_owner_tuple_and_completion);
 	UT_RUN(test_93d_formation_lmon_alone_consumes_utility_request);
 	UT_RUN(test_93da_coordinator_begins_exact_four_node_sample_round);
+	UT_RUN(test_g3_ack_complete_matches_round_binding);
 	UT_RUN(test_93daa_member_accumulates_sample_and_closes_barrier);
 	UT_RUN(test_93db_coordinator_reaches_exact_prepared_origin);
 	UT_RUN(test_93e_utility_wait_returns_only_matching_terminal_result);

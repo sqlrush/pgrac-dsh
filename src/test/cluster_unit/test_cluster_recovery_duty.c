@@ -446,6 +446,38 @@ cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
 	return ut_clean_departed;
 }
 
+/* RF-ROOT P7 G3: the R4 cutover coordinator proof's ACK-complete read.
+ * The fixture controls the verdict + records the round identity the proof
+ * presented. */
+static bool ut_ack_complete_ok = false;
+static int ut_ack_complete_calls = 0;
+
+bool
+cluster_semantic_activation_ack_complete_matches(
+	uint64 transition_epoch, uint64 record_generation,
+	uint64 expected_members_lo, uint64 expected_members_hi,
+	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
+	uint64 capability_sample_digest)
+{
+	ut_ack_complete_calls++;
+	(void) transition_epoch;
+	(void) record_generation;
+	(void) expected_members_lo;
+	(void) expected_members_hi;
+	(void) source_feature_bitmap;
+	(void) target_feature_bitmap;
+	(void) capability_sample_digest;
+	return ut_ack_complete_ok;
+}
+
+/* Stateless pure predicate; replicate the production whitelist so the
+ * coordinator proof's known-bit gate is exercised with real semantics. */
+bool
+cluster_control_root_feature_bitmap_is_known(uint64 active_feature_bitmap)
+{
+	return (active_feature_bitmap & ~PGRAC_CONTROL_ROOT_FEATURE_KNOWN_MASK_V1) == 0;
+}
+
 UT_TEST(test_checkpoint_advance_publishes_canonical_bound)
 {
 	/* RF-ROOT P7 G1a: the checkpointer's canonical checkpoint advertisement
@@ -529,6 +561,67 @@ UT_TEST(test_fpw_sticky_publishes_canonical_flag)
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
 	UT_ASSERT(!cluster_control_root_fpw_sticky_publish());
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+}
+
+UT_TEST(test_create_authority_requires_complete_ack_round)
+{
+	/* RF-ROOT P7 G3 (DSH review note 27: ACK-consumer boundary tests):
+	 * the R4 cutover create authority is the coordinator's one-shot proof —
+	 * refused for a non-coordinator, an incomplete ACK table, or a round
+	 * without bit22; granted only when all gates hold. */
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+
+	memset(&image, 0, sizeof(image));
+	memset(&round, 0, sizeof(round));
+	memcpy(round.magic, "PCRM", 4);
+	round.version = 1;
+	round.bytes = sizeof(round);
+	round.prepare_generation = 7;
+	round.transition_epoch = 3;
+	round.source_feature_bitmap = UINT64_C(1);
+	round.target_feature_bitmap =
+		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	round.admitted_bitmap_low = UINT64_C(0x03);
+	round.admitted_bitmap_high = 0;
+	round.capability_sample_digest = UINT64_C(0xabcd);
+	round.coordinator_node_id = 0;
+	round.coordinator_incarnation = 99;
+	cluster_node_id = 0;
+
+	/* ACK table not COMPLETE -> refused. */
+	ut_ack_complete_ok = false;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+
+	/* Non-coordinator -> refused BEFORE any ACK read (fail-fast). */
+	cluster_node_id = 1;
+	ut_ack_complete_ok = true;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
+
+	/* Coordinator + COMPLETE ACK + bit22 target -> granted. */
+	cluster_node_id = 0;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+
+	/* Target WITHOUT bit22 -> refused (the bit22 cutover carrier). */
+	round.target_feature_bitmap = UINT64_C(1);
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+
+	/* Target with an UNKNOWN feature bit -> refused (whitelist gate). */
+	round.target_feature_bitmap = (UINT64_C(1) << 20)
+		| PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	round.target_feature_bitmap =
+		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
 }
 
 UT_TEST(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas)
@@ -1083,7 +1176,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(23);
+	UT_PLAN(24);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -1096,6 +1189,7 @@ main(void)
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
 	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
 	UT_RUN(test_fpw_sticky_publishes_canonical_flag);
+	UT_RUN(test_create_authority_requires_complete_ack_round);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
 	UT_RUN(test_owner_rejoin_rejects_open_stale_owner_frozen);
 	UT_RUN(test_clean_close_retry_transient_refusal_then_success);
