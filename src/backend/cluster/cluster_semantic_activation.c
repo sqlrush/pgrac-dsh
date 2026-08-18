@@ -7751,3 +7751,92 @@ cluster_semantic_activation_r4_descriptor(void)
 {
 	return &r4_descriptor;
 }
+
+#ifdef USE_PGRAC_CLUSTER
+
+#include "fmgr.h"
+#include "miscadmin.h" /* superuser() */
+
+PG_FUNCTION_INFO_V1(pgrac_r4_bit22_cutover_begin);
+
+/*
+ * cutover_round_capability_digest -- RF-ROOT P7 (增量 48 step ④e): a
+ * deterministic round-identity digest built from the members' admitted
+ * incarnations and capability samples (the bit22 round skips the R4 SAMPLE
+ * stage, so the coordinator constructs the digest directly).  The digest
+ * only needs to bind the round identity — members never verify its value,
+ * the ACK table carries it for round identity binding.
+ */
+static uint64
+cutover_round_capability_digest(uint64 members_lo)
+{
+	uint64 digest = UINT64_C(0x9e3779b97f4a7c15); /* FNV-ish seed */
+	int node;
+
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		uint32 word;
+		uint32 gen;
+
+		if (node >= 64 || (members_lo & (UINT64_C(1) << node)) == 0)
+			continue;
+		digest ^= (uint64)node * UINT64_C(0x100000001b3);
+		digest ^= cluster_membership_get_last_admitted_incarnation(node);
+		if (cluster_sf_peer_capability_word_sample(
+				node, CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS,
+				&word, &gen))
+			digest ^= (uint64)word ^ ((uint64)gen << 32);
+	}
+	return digest;
+}
+
+/*
+ * pgrac_r4_bit22_cutover_begin -- RF-ROOT P7 (增量 48 step ④e): operator
+ * entry.  Coordinator-only (superuser + coordinator identity).  Constructs
+ * the round from the current formation, builds the migration image from the
+ * live shared state, then stages create_prepared + seam + PREPARED REQUEST
+ * via cluster_r4_bit22_cutover_begin.  Returns true when staged; the round
+ * completes asynchronously (member CLOSED-ACK -> OPEN_APPLIED advance).
+ */
+Datum
+pgrac_r4_bit22_cutover_begin(PG_FUNCTION_ARGS)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	SemanticActivationAdmissionSnapshot snapshot;
+	ClusterControlRootResult build_result;
+	uint64 current_members_lo;
+	uint64 current_members_hi;
+	uint64 current_epoch;
+	int32 current_coordinator_node;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied for pgrac_r4_bit22_cutover_begin"),
+				 errhint("Only the cluster superuser may drive the bit22 cutover.")));
+	if (!semantic_activation_snapshot(&snapshot)
+		|| !semantic_activation_ack_current_authority(
+			cluster_node_id, &current_members_lo, &current_members_hi,
+			&current_epoch, &current_coordinator_node)
+		|| cluster_node_id != current_coordinator_node)
+		PG_RETURN_BOOL(false);
+
+	memset(&round, 0, sizeof(round));
+	round.prepare_generation = snapshot.record_generation + 1;
+	round.transition_epoch = current_epoch;
+	round.source_feature_bitmap = snapshot.active_bits;
+	round.target_feature_bitmap = snapshot.active_bits
+		| PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	round.admitted_bitmap_low = current_members_lo;
+	round.admitted_bitmap_high = current_members_hi;
+	round.capability_sample_digest
+		= cutover_round_capability_digest(current_members_lo);
+
+	build_result = cluster_control_root_build_migration_image(&image);
+	if (build_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& build_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		PG_RETURN_BOOL(false);
+	PG_RETURN_BOOL(cluster_r4_bit22_cutover_begin(&image, &round));
+}
+
+#endif /* USE_PGRAC_CLUSTER */

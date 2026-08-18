@@ -12527,6 +12527,17 @@
   prorettype => 'text', proargtypes => '',
   prosrc => 'pg_cluster_clean_leave_request' },
 
+# RF-ROOT P7 (增量 48 step ④e) -- pgrac_r4_bit22_cutover_begin(): operator
+# entry driving the bit22 first-open cutover round on the coordinator node.
+# Mutating -> superuser-only (C superuser() gate + REVOKE EXECUTE FROM
+# PUBLIC).  Returns true when the round was staged (create_prepared + seam +
+# PREPARED REQUEST published); the round then completes asynchronously via
+# the ACK orchestration + OPEN_APPLIED advance.
+{ oid => '8976', descr => 'begin the R4 bit22 first-open cutover round (coordinator)',
+  proname => 'pgrac_r4_bit22_cutover_begin', provolatile => 'v',
+  prorettype => 'bool', proargtypes => '',
+  prosrc => 'pgrac_r4_bit22_cutover_begin' },
+
 # spec-5.18 D15 -- pg_cluster_node_removal_state SRF (oid 8963).  Always-1-row
 # permanent-removal progress (phase / target_node_id / coordinator_node_id /
 # remove_epoch / fence_armed / membership_shrunk / grd_cleaned / pcm_cleaned /
