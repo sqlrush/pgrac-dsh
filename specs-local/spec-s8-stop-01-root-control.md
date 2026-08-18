@@ -3899,3 +3899,51 @@ TAP 端到端（2 节点 bit22 开门）——R4 编排的 SAMPLE/BARRIER 四成
 bit22 轮已绕开（协调者直发 PREPARED），**成员侧 barrier 段不再触达**；
 若 2 节点编排仍有其他四成员耦合（wire/ingress 校验），TAP 腿再降级 unit
 （与增量 40/41 §A 同裁）。
+
+---
+
+## 增量 48：image 构造设计（步骤 ④d）+ 步骤 ④e 入口（2026-08-18，
+## 步骤 ④c 完成后；文档先行）
+
+### 背景
+
+begin 驱动（④c）需要 ClusterControlRootMigrationImage（create_prepared
+输入）。t243 cast fixture 手拼 image；生产需构造函数。read_source_wal_state
+（control_root.c:1076）是校验型（验证 image 与 registry/claims 一致），
+read_thread_claim_exact（:1027）是校验型 claim 读。
+
+### 构造函数（新）
+
+`cluster_control_root_build_migration_image(ClusterControlRootMigrationImage
+*out)` —— 协调者调用：
+
+| 字段 | 来源 |
+|---|---|
+| system_identifier | GetSystemIdentifier() |
+| storage_uuid | current_storage_uuid() |
+| authority_uuid | 协调者 pg_strong_random 生成（权威性来自 create proof 的 ACK 绑定与 round 身份，非 UUID 值——create_authority_current_v1 不校验其值；t243 cast 固定值仅为测试便利） |
+| created_at_usec | GetCurrentTimestamp() |
+| records[i].identity.origin_node_id | i-1（slot 非空时） |
+| origin_owner_incarnation | cluster_membership_get_last_admitted_incarnation(node)（协调者已知） |
+| thread_claim_created_at / thread_claim_crc32c | 新 claim 读取（读 thread_i/pgrac_thread.claim 的 40B v1 布局，cluster_wal_thread_claim_validate 校验；从 claim 提取 created_at/crc） |
+| lifecycle | registry STOPPED → CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED；非 STOPPED slot 拒绝（create 语义：全成员已 clean 停止——W6 CLOSED 绑定前置） |
+| checkpoint_lower_lsn / checkpoint_tli | registry slot.checkpoint_redo_lsn / tli |
+| validated_tail_lsn_exclusive / tail_tli | registry slot.highest_lsn / tli（保守：写水位作 validated 界——post-activate 后由 CHECKPOINT_ADVANCE 刷新） |
+| root_flags | CLAIM_VALID \| CHECKPOINT_VALID \| TAIL_VALID \| RECOVERED_VALID |
+| assigned_record_count | 非空 slot 数 |
+
+### 步骤 ④e：operator 入口
+
+SQL 函数 `pgrac_r4_bit22_cutover_begin()`（协调者 backend）：
+1. 构造 round（当前 formation：members/epoch/generation/feature bitmaps/
+   capability digest——digest 从 IC 采样聚合）；
+2. build_migration_image → create_prepared → seam → begin（④c 已有）；
+3. 返回 round 状态（request_seq / 轮进度观测）。
+安全：仅协调者可执行（begin 内校验）；SQL 函数标记非事务安全/受限。
+
+### 验收
+
+- control_root 单测：build_migration_image（真实 registry+claims fixture →
+  断言各字段映射；非 STOPPED slot 拒绝）；
+- r4fsm：④e 的 round 构造（digest 聚合）；
+- t243 33/33 不回归；census GREEN。
