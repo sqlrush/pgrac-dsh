@@ -3947,3 +3947,51 @@ SQL 函数 `pgrac_r4_bit22_cutover_begin()`（协调者 backend）：
   断言各字段映射；非 STOPPED slot 拒绝）；
 - r4fsm：④e 的 round 构造（digest 聚合）；
 - t243 33/33 不回归；census GREEN。
+
+---
+
+## 增量 49：P8 rebuild-first 编排设计（2026-08-18，任务 4 完成后；文档先行）
+
+### 合同（RFROOT-NEXT §5 / RF-ROOT §5）
+
+- rebuild-first：recoverer crash 后，下一 actor 从 canonical sources 重建
+  （root/WAL/formation/fence），**不接管前任 private progress**；
+- BGW_NEVER_RESTART 语义保持；仅新 episode 可重启；
+- STOP-ROOT-GENERATION / SERIAL 未关闭时，同 episode replacement 保持
+  BLOCKED。
+
+### 现状审计（grep 实证，2026-08-18）
+
+- ✅ BGW_NEVER_RESTART：hw_remaster worker（hw_remaster.c:656）与
+  recovery worker（worker.c:501）已设——crash 后不自动重启；
+- ✅ grd 的 rebuild 机制（cluster_grd.c:2027 "P5 rebuild REBUILDING +
+  redeclare + ack barrier"）——**formation 重建**（集群形成层），非
+  recoverer 私有进度；
+- ✅ 投影纪律（批 1-4）：episode worker 只消费 pin 的 canonical projection
+  （post-bit22）或 registry（pre-bit22）——**没有跨 episode private
+  progress 消费**（episode_epoch 绑定，stale 即拒）；
+- ⚠️ **待审 gap 1**：thread recovery replay slot（cluster_recovery_plan.h
+  的 ClusterThreadReplaySlot）的 replay 进度字段（validated 界等）——
+  新 episode 的 worker 是否无条件 fresh（或读旧 slot 进度）？——PIN 由
+  LMON tick 每 episode 重写（episode_epoch 换）→ **fresh** ✓ 需实测确认；
+- ⚠️ **待审 gap 2**：worker pool（cluster_recovery_worker.c 的 slot_state/
+  assigned_bitmap/stream_verdict）跨 episode 重用——generation++ 每 launch
+  重写（:461 一带）→ fresh ✓ 需实测确认；
+- ⚠️ **待审 gap 3**：STOP-ROOT-GENERATION / SERIAL 未关闭时同 episode
+  replacement 的 BLOCKED——thread_recovery_worker.c 的 serial acquire 门
+  （:186 cluster_recovery_serial_acquire）——replacement 在 guard 未释放时
+  → BLOCKED ✓ 需验证。
+
+### 设计（实施步骤）
+
+1. **审计实测**：t243 变体或单元——episode worker crash 后新 episode
+   launch：断言 replay slot / pool / serial guard 全部 fresh（不继承）；
+2. **gap 修复**（若有）：replay slot 的 episode 启动时清零验证；
+3. **P8 聚焦测试**（RU-xx）：worker crash → 下一 episode launch → 断言
+   canonical 重建（pin fresh + slot fresh + pool fresh）；
+4. **P9 移入**：RL-01..12 fault legs（crash 注入）+ RU-01..12 单元矩阵。
+
+### 验收
+
+P8：recoverer crash 后同 episode 无 replacement 接管（BLOCKED 或 episode
+结束）；新 episode 全 fresh；t243 33/33 + regress 13/13 不回归。
