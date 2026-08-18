@@ -694,3 +694,38 @@ A/B/C 落地。**放行 P7**；上述两个小尾巴在 P7 推进中顺手清理
 ### 3.1 仓库裁决（user 2026-08-18）：A = 保持公共
 
 specs-local/README.md 已改为实际政策（公开授权记录）。恢复 push。
+
+---
+
+## 复审补记 21（2026-08-18 10:50，⚠️ 执行指令：增量 21 P0 修复 = 路线 1）
+
+> 用户裁决（2026-08-18）：路线 1 治本——修 owner/checkpointer 按时落 CLOSED。
+> 优先级：**当前 P7 G1a 提交后立即切换到此修复**。
+
+### 背景（证据已在手）
+
+- t243 L10 停机时 THREAD_CLEAN_CLOSE 的 CF(X) S1 因 serving-stale 瞬时被拒
+  （run-29：postmaster 条件锁与 LMON admission 收尾同刻竞争），root 停
+  OPEN(old)；重启后靠增量 21 的 coordinator 补写续命——该补写违反
+  发布者冻结合同（补记 20 P0），不可保留。
+
+### 修复要求（有界重试，不得挂死停机）
+
+1. checkpointer 停机路径（contract 1 顺序内：checkpoint→STOPPED→
+   serving/authority 转换→CLOSED）：THREAD_CLEAN_CLOSE publish 失败
+   （S1 serving-stale / authority 未重确认）时**有界重试**：
+   - 重新校验/重绑 serving authority 后重试 publish；
+   - 上限 = 固定 deadline（建议 ≤ 停机 drain 窗口，如 2-5s）+ 退避
+     （50-100ms 级），**绝不无限阻塞停机**；
+   - 超限仍失败 → 记 LOG 并继续停机（root 停 OPEN(old)，fail-closed）。
+2. 增量 21 的 coordinator 补写路径**验证后删除**（连同其单测与 LOG）：
+   先证明 L10 尾腿在无补写下靠路线 1 收敛，再删——顺序不可反。
+
+### 验收（顺序执行，每步单独提交）
+
+1. 路线 1 落地 + 单测（publish 重试单元：瞬态拒绝后成功 / 超限放弃）；
+2. t243 33/33、bail=0，且 node1 日志 L10 停机处出现 **"clean-closed by
+   owner"**，全程**无** "missed clean-close repaired"（证明未走补写）；
+3. 删增量 21 补写 + 单测，t243 再跑 33/33、bail=0；
+4. cluster_regress 13/13；
+5. 全部绿 → 提交并等 DSH 复审，P6 冻结门才可重新申请。
