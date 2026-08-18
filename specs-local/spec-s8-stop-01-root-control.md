@@ -2660,3 +2660,86 @@ NODE_LOCAL_AUTHORITY 分类，也不等 CF(S) 调度成环）。§17.9 exactly-z
   validated_end 容忍区，语义等价论证）。
 - plan verdict 的 root 映射 truth table 需 DSH 背书（UNKNOWN fail-closed
   方向确认）。
+
+---
+
+## 增量 26 修订：执行形状 = pre-IR pinned canonical projection（DSH 补记 31，2026-08-18 14:40）
+
+补记 31 撤回 READ_SNAPSHOT 无 CF 读方向（撞 §17.7 no-mirror + §1.3 投影纪律
+——不得跨重启 cache、不得绕过 fresh root read）。冻结主线形状（STOP-02 §15）：
+
+**零资源锁 → canonical STRONG read/revalidate → pin root identity + token +
+所需 snapshot 字段 → 进入 episode/CF(X) → bgworker 只消费本 episode 的
+immutable projection（IR 内仅比较 pin 的 token，禁止自行 CF(S)）→ episode
+结束/重启即丢弃 → 下一 episode 重新 fresh read。**
+
+五站点处置（逐站提交，等 DSH 逐站复审）：
+1. startup 上下文（plan.c:203、worker.c:192 revalidate）：pre-IR 直接
+   fresh canonical STRONG read（startup 是 CF(S) 合法执行者，AD-023 §4）。
+2. episode bgworker（worker.c:247、orchestrator.c:572、hw_remaster.c:487）：
+   消费 episode 前固定的 projection；投影构造者 = 同站 startup/coordinator
+   上下文（先落投影 shmem 结构设计，再实施）。
+3. max_highest_scn（plan.c）：无消费者 → 从 correctness 判定删除，降为
+   观测（registry 读仅剩 telemetry 面）。
+4. registry 独有且 root 无等价语义的字段：禁止镜像 → 改保守 root
+   checkpoint/tail 判定或保持 BLOCKED，直到冻结 canonical 表达。
+5. census 保持 strict exactly-zero：每站关闭后同一提交从 C 表 +
+   scripts/ci DEFERRED 双处移除。
+
+---
+
+## 增量 27：站点 1 设计（plan.c:203 verdict 活性判定障碍 + 处置）（2026-08-18，设计稿，待 DSH 复审）
+
+### 障碍取证（活性信号粒度）
+
+- plan verdict 判定 ALIVE 的输入 = registry slot.last_updated，由
+  cluster_stats 主循环每 tick 刷新（cluster_cluster_stats_main_loop_interval
+  = 1000ms，cluster_stats.c:672 stats_refresh_wal_state → update_own）
+  → **1s 粒度跨节点活性信号**；
+- canonical root 的 published_at 只在发布时更新（THREAD_OPEN /
+  THREAD_CLEAN_CLOSE / CHECKPOINT_ADVANCE〔每 checkpoint，PG 默认
+  checkpoint_timeout=300s〕/ FPW_STICKY / OWNER_REJOIN）→ **checkpoint
+  粒度**；
+- stale_active_ms = 10s（cluster_guc.c:81）。若 plan 迁移到 root.published_at
+  且沿用 10s 阈值：活 peer 的 published_at 可能落后 >10s（checkpoint 间隔）
+  → 活 peer 误判 CRASHED_CANDIDATE → plan.n_alive=0 → merge 的 NOT_COLD
+  门失效（merge.c:898）→ 尝试 merge 活 peer → stream SKIPPED → blockers →
+  **FATAL 53RA3**。灾难性方向，不可直接映射。
+
+### 处置选项（需 DSH 定夺）
+
+A. **活性判定降为"生命周期 + 保守 checkpoint 判定"**（补记 31 项 4 的
+   "改保守 root checkpoint/tail 判定"）：ALIVE = lifecycle OPEN 且
+   published_at 距今 < max(checkpoint_timeout × 2, 60s)（阈值随 GUC，
+   保守放大）；CRASHED_CANDIDATE = OPEN 且更旧。误判方向分析：把
+   崩溃 peer 误判 ALIVE → NOT_COLD 拒绝 merge → 走 4.6/4.7 其他路径
+   （非丢失，安全）；把活 peer 误判 CRASHED → merge 尝试 → SKIPPED →
+   FATAL（危险）。故阈值必须保守放大，宁可 ALIVE 误判。
+B. **plan verdict 活性维度保持 registry 读（降级为观测）**：plan 是
+   "observational only"（WARNING 明言），其 verdict 的 ALIVE/CRASHED 仅
+   服务 merge 候选；把活性维度登记为观测面（census telemetry 白名单
+   扩展 "plan liveness probe"），verdict 的 CLEAN/EMPTY 维迁移 root，
+   CRASHED_CANDIDATE 判定改为 root lifecycle（OPEN 且未 CLOSED）+ 保守
+   checkpoint 界。风险：census exactly-zero 字面（§17.9）再次踩线——
+   与补记 30 同型，需显式授权。
+C. **保持 BLOCKED**（补记 31 项 4 的"或保持 BLOCKED，直到冻结 canonical
+   表达"）：plan 的活性判定在 root 无等价字段期间保持 registry 读 +
+   DEFERRED 登记（census 继续 RED），站点 1 只迁移 worker.c:192
+   revalidate（startup 上下文，validate_stream 的写位置锚同样依赖
+   registry highest_lsn——root 无写位置字段，见增量 26 表）。
+
+### 建议
+
+B 与 C 都再次触碰 §17.9；A 是唯一保持 exactly-zero 的路径，但 ALIVE
+误判方向需 DSH 背书阈值。**建议 A + 聚焦单测（verdict truth table：
+published_at 阈值边界 + 崩溃/活 peer 双向）**。待 DSH 复审后实施站点 1。
+
+### 站点 1 实施范围（待复审）
+
+- plan.c:203：per-tid STRONG read（startup pre-IR 合法）→ verdict
+  truth table（lifecycle/published_at 映射，A 方案阈值）；
+  max_highest_scn 从 correctness 删除（补记 31 项 3）；max_highest_lsn
+  用 root checkpoint_lower_lsn/validated_tail 观测。
+- worker.c:192 revalidate：validate_stream 的 target-page 锚从
+  registry highest_lsn（写位置）改保守 root 判定（validated_tail 界
+  或 BLOCKED）——语义论证同增量 26 待背书项。
