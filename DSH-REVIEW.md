@@ -1284,3 +1284,62 @@ expected-ABSENT 不得持 gate**
   utility mailbox cutover）。
 - 批 2 注意：S3 pre-bit22 consumer 恢复 registry 直接读时，registry 读失败
   的既有 fail-closed（UNREADABLE/BLOCKED）必须原样保留。
+
+---
+
+## 复审补记 45（2026-08-18 18:45，批 1 未提交实施中级评审：方向/形状全对；两处实现问题批 1 内必修；DSH 自曝 watchdog 失责）
+
+### DSH 自曝（操作失责）
+
+- 补记 44 提交后的 watchdog 重挂命令结构错误（nohup 被包进后台复合命令未存活），
+  批 1 代码（7 文件 +278/-52）是在**无 60 秒监视**下写出的。DSH 失责，已通过
+  受管后台任务（run_in_background）重启 watchdog（bash-286），此后退出必通知。
+
+### 批 1 中级评审（未提交 diff，524 行全读）
+
+**方向与形状：完全符合增量 39 + 补记 44 批准** ✅
+
+- `cluster_control_root_read_canonical_discovered`（control_root.c）：BOOTSTRAP
+  discover → STRONG bound 两步，注释明确 "BOOTSTRAP 永不直接服务 correctness"，
+  mismatch → 返回值向上传播 fail-closed。与 wal_retention 先例一致。
+- latch 设施（semantic_activation.c/h）：独立 shmem 区（明确避开冻结的
+  ClusterSemanticActivationShmem 1104 布局）、默认 0、0→1 一次性 CAS、
+  赢者记 round identity、loser 不覆盖、shmem 缺席→false（fail-closed 到
+  pre-bit22 冻结行为）。setter 接线留给任务 4——符合"驱动落地前 latch 永不
+  置位 ⇒ 全部 reader 走 pre-bit22 分支"。
+- plan.c：bit22 每 pass 采样一次（一个 plan 内部一致）；pre-bit22 恢复
+  `read_slot + classify_slot`（registry classifier 原形 plan.h:116）；post-bit22
+  走 discovered 两步 + classify_root_slot；DEBUG1 行带 bit22 标志可观测。
+- worker.c：registry 版 validate_stream 完整恢复（claim 内容 + target page +
+  seg 首页三件套，与迁移前同型）；revalidate 双路径。
+- census 脚本 + C 表：plan.c/worker.c 登记回 DEFERRED（批 1 interim，lockstep
+  保持；语义翻转明确留给批 3）——符合增量 39 §C 分批约定。
+
+**问题 ①（中，批 1 内必须补）：S3 惰性投影设施未在批 1 处理。**
+
+增量 39 §B 对批 1 的约束是 "latch=false 时行为逐字等价迁移前 + root 分支静态
+存在、动态不可达"。当前 diff 只改了 S1（plan）/ S2（revalidate），**S3 的
+pin/projection 设施仍是 broken-but-reachable 状态**：`pin_projection` 恒 false
+（STRONG+NULL→23）→ `projection_current` 恒 false → worker.c:278→UNREADABLE /
+orchestrator.c:586→BLOCKED。这不是新引入（committed 树本来就惰性），但批 1
+验收前必须有一个明确处置：要么批 1 内把 S3 consumer 也加 bit22 门
+（pre-bit22 分支 = registry 直读恢复），要么在批 1 commit 里显式声明 S3 归
+批 2 并把"projection 设施在批 2 前保持惰性"写成验收已知项。**不允许含混带过。**
+
+**问题 ②（小，建议批 1 顺手）：S2 pre-bit22 分支不验 slot state。**
+
+`cluster_recovery_worker_revalidate` 的 pre-bit22 分支：`read_slot == OK` 即
+`validate_stream(slot)`，不检查 slot.state。34eb81cc71^ 的迁移前原形是否验
+state（ALIVE 偏置防撕裂读：活 peer 的流可能 mid-write torn → 误判 SUSPECT），
+需要核对——若原形验 state 而本分支没验，就是 fail-closed 方向的弱化
+（误判 SUSPECT 是安全方向，但与"逐字等价迁移前"的批 1 不变量不符）。
+核对原形后对齐。
+
+### 门禁（不变）
+
+- latch 置位点（任务 4）落地前，任何"root 分支活路径"测试必须在 latch=false
+  下证明不可达（补记 44 设计点 ③ 单测要求）。
+- 批 1 验收：t243 33/33 + regress 13/13 + 聚焦单测（plan / recovery_worker /
+  control_root）+ 绿跑 node0 日志应恢复出现 registry 分类行（ALIVE/candidate），
+  不再是 127 unknown（latch=false 下 S1 走 registry）——**这是修复 NULL-identity
+  惰性的第一个正面对照证据，跑批后贴日志行。**
