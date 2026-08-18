@@ -2260,3 +2260,58 @@ head gate 的 non-OPEN 分支按 lifecycle 拆分：RECOVERY_COMPLETE 保持
    age-out + join 重试（53R61 30s+ 余量）保证。
 4. 按 DSH 指令实施拆分（RECOVERY_COMPLETE 分支原样保留；CLOSED 分支只留
    lineage==MAX 拒绝），t243 复跑确认无回归。
+
+---
+
+## 增量 22：P7 审计结论与增量计划（2026-08-18，子代理静态审计 + 本会话复核）
+
+### 审计结论（对冻结 spec §17.7/§17.9 逐条对照）
+
+**已退休（前序 stage 完成）**：
+- 两个 W6 writer pwrite-free：冷路径（xlogrecovery merged-replay 出口只写
+  node-local authority `DataDir/pg_undo/instance_N/merged.authority`，
+  :2963-2976）；online orchestrator（:428 调 node-local 在线变体）。全后端
+  `merge_recovered_lsn` 写路径仅清零（cluster_wal_state.c:571 与 header
+  :418/:439），无任何非零写。
+- W1-W5 与 spec 表一致：W2 清 merge_recovered_lsn；W4/W5/W3 preserve。
+- forged 非零 merge_recovered_lsn 无任何 skip-bound 使用（xlogrecovery
+  :2477 raw_ignored LOG = telemetry；control_root.c:1113 迁移校验拒绝）。
+
+**缺口（G1-G6，本增量实施）**：
+- **G1（核心）六处 correctness reader 仍读 registry 作 correctness 源**：
+  - cluster_recovery_merge.c:990-1002（checkpoint_redo_lsn/fpw_was_off →
+    合并起点，skip-bound 权威）、:1624-1626（highest_lsn → validated_min）；
+  - cluster_thread_recovery_orchestrator.c:582-593（checkpoint_redo_lsn/
+    highest_lsn → online 窗口 lower/validated_min）；
+  - cluster_recovery_plan.c:203-222（highest_lsn/highest_scn → verdict）；
+  - cluster_recovery_worker.c:192-194/:247-254（highest_lsn/tli → 流校验）；
+  - cluster_hw_remaster.c:477-485（highest_lsn → validated_min）。
+  迁移目标 = canonical root 的 checkpoint_lower_lsn / validated_tail_lsn_
+  exclusive / tail_last_record_lsn / recovered_through_lsn_exclusive /
+  FPW flag（`cluster_control_root_read_canonical` STRONG 读 = PAGE/SIDE
+  proof 面）。语义映射：root 值由 lifecycle 发布（迁移映像 + clean-close/
+  reopen 保留）——比 registry 每 checkpoint 刷新更保守（更早），对
+  validated_min/merge-start 均安全（起点更早 = 重放更多，绝不跳过已提交
+  WAL）；Q5 fail-closed（0 → 53RA3）保持。
+- **G2**：spec §17.7 冻结要求追加 update result 枚举 `RELEASE_UNCERTAIN=9`、
+  `SOURCE_CLOSED=10`；两个 W6 包装器（冷/在线）在 transition 模式返回
+  SOURCE_CLOSED 且零 pwrite（transition 模式由 G3/G5 的 R4 驱动接线触发）。
+- **G3**：R4 PREPARE 生产驱动不可达（create_prepared/activate_prepared 无
+  生产调用者；cluster_recovery_duty.c:32-53 authority 桩恒 false）。需把
+  全成员 ACK（semantic_activation ACK 表 COMPLETE）接线到 round 构造 →
+  create_prepared → activate_prepared。
+- **G4**：无静态 census 产物。新增 census 脚本/测试：post-bit22 wal-state
+  correctness reader/writer == 0（G1 落地后归零）。
+- **G5**：bit22 打开门缺失——target_feature_bitmap 含 bit22 由 encode_round/
+  decode_image 强制，但"PREPARED/ACTIVE 全成员 ACK 后才 ACTIVE"无生产接线。
+- **G6**：cluster_debug.c:2875-2877 注释过时（声称 registry 派生，实际
+  node-local marker）；在线路径"不写 merge_recovered_lsn"缺断言。
+
+### 实施顺序（每个可验证子步一次 commit）
+
+1. G2：枚举追加（frozen 字面量）+ 单测断言。
+2. G6：debug.c 注释修正 + 在线不写断言。
+3. G1：五文件逐一迁移（hw_remaster → recovery_worker/plan → recovery_merge
+   两处 → orchestrator），每个配聚焦单测/TAP；registry 仅 telemetry。
+4. G4：census 脚本（白名单 == 0）。
+5. G3+G5：R4 生产接线 + bit22 ACK 门（最大块，先落设计再实现）。
