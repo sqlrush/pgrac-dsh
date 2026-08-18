@@ -47,6 +47,7 @@
 #include "cluster/cluster_recovery_plan.h"
 #include "cluster/cluster_recovery_worker.h" /* pool lives in this wrapper (spec-4.4 D5) */
 #include "cluster/cluster_scn.h"
+#include "cluster/cluster_semantic_activation.h" /* bit22 cutover latch (增量 39 §B) */
 #include "cluster/cluster_shmem.h"
 #include "cluster/cluster_thread_recovery.h" /* ClusterThreadRecReplayState (slot init) */
 #include "cluster/cluster_wal_thread.h"
@@ -167,6 +168,7 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 	uint16 own_thread;
 	int64 now_us;
 	uint16 tid;
+	bool bit22_active;
 
 	if (cluster_wal_threads_dir == NULL || cluster_wal_threads_dir[0] == '\0')
 		return;
@@ -183,15 +185,22 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 	now_us = (int64)GetCurrentTimestamp();
 	plan.generated_at = now_us;
 
+	/* RF-ROOT P7 (增量 39 §B / 补记 43-44): dual-path by the bit22 cutover
+	 * latch, sampled once per pass so one plan is coherent.  false =
+	 * pre-bit22 (frozen §17.8: the wal-state registry remains the selected
+	 * authority); true = post-bit22 (root-only). */
+	bit22_active = cluster_r4_bit22_cutover_active();
+
 	/*
 	 * Defensive pass-level gate.  Under today's startup ordering the
 	 * spec-4.2 ensure() FATAL gate has already validated the registry
 	 * before the startup process runs, so this branch is not reachable
 	 * in practice; it exists so a future reordering degrades to an
 	 * honest 'failed' plan instead of 128 bogus EMPTY verdicts
-	 * (read_slot maps a missing file to EMPTY).
+	 * (read_slot maps a missing file to EMPTY).  Post-bit22 the registry
+	 * is telemetry-only (§17.9), so the precondition no longer applies.
 	 */
-	if (!cluster_wal_state_registry_ready()) {
+	if (!bit22_active && !cluster_wal_state_registry_ready()) {
 		plan.failed = true;
 		plan.generated = true;
 		publish_plan(&plan);
@@ -204,40 +213,64 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 
 	initStringInfo(&candidates);
 	for (tid = 1; tid <= CLUSTER_RECOVERY_PLAN_THREADS; tid++) {
-		ClusterControlRootSnapshot snapshot;
-		ClusterControlRootReadToken token;
-		ClusterControlRootResult root_result;
 		ClusterRecoveryThreadVerdict verdict;
+		int read_verdict; /* root result or slot verdict, for the DEBUG1 line */
 
-		/*
-		 * RF-ROOT P7 G1b step 4 (site 1): the plan's per-thread source is
-		 * the canonical control root (STRONG read — the startup process is
-		 * the frozen CF(S)-capable recovery admission, AD-023 §4; the
-		 * same read the G1b-A merge engage uses).  The registry is no
-		 * longer a correctness source for the plan.
-		 */
-		root_result = cluster_control_root_read_canonical(
-			tid, NULL, CLUSTER_CONTROL_ROOT_READ_STRONG, &snapshot, &token);
-		verdict = cluster_recovery_classify_root_slot(
-			root_result, &snapshot, own_thread, tid, now_us, CheckPointTimeout);
+		if (bit22_active) {
+			ClusterControlRootSnapshot snapshot;
+			ClusterControlRootReadToken token;
+			ClusterControlRootResult root_result;
+
+			/*
+			 * Post-bit22 (§17.8 Target OPEN): the plan's per-thread source
+			 * is the canonical control root — STRONG read via the 增量 39
+			 * §A two-step discovered-identity pattern (the startup process
+			 * is the frozen CF(S)-capable recovery admission, AD-023 §4).
+			 */
+			root_result = cluster_control_root_read_canonical_discovered(
+				tid, &snapshot, &token);
+			read_verdict = (int)root_result;
+			verdict = cluster_recovery_classify_root_slot(
+				root_result, &snapshot, own_thread, tid, now_us, CheckPointTimeout);
+
+			if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+				|| root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED) {
+				/*
+				 * Observation (max_highest_lsn): the registry's highest_lsn
+				 * is a write-position watermark the root does not carry; use
+				 * the canonical checkpoint/tail bounds as the conservative
+				 * observation (specs-local increment 28).
+				 */
+				if (snapshot.validated_tail_lsn_exclusive > plan.max_highest_lsn)
+					plan.max_highest_lsn = snapshot.validated_tail_lsn_exclusive;
+				if (snapshot.checkpoint_lower_lsn > plan.max_highest_lsn)
+					plan.max_highest_lsn = snapshot.checkpoint_lower_lsn;
+				/* 补记 31 item 3: max_highest_scn has no consumer; the SCN
+				 * ordering dimension is removed from correctness. */
+			}
+		} else {
+			ClusterWalStateSlot slot;
+			ClusterWalSlotVerdict v;
+
+			/*
+			 * Pre-bit22 (frozen §17.8 Source R4 OPEN): the wal-state
+			 * registry remains the selected authority — the restored
+			 * pre-migration shape (29efc553b0^).  The SCN ordering removed
+			 * by 补记 31 item 3 stays removed (no consumer).
+			 */
+			v = cluster_wal_state_read_slot(tid, &slot);
+			read_verdict = (int)v;
+			verdict = cluster_recovery_classify_slot(v, &slot, own_thread, tid,
+													 now_us,
+													 cluster_recovery_stale_active_ms);
+			if (v == CLUSTER_WAL_SLOT_OK) {
+				if (slot.highest_lsn > plan.max_highest_lsn)
+					plan.max_highest_lsn = slot.highest_lsn;
+			}
+		}
+
 		plan.verdict[tid] = (uint8)verdict;
 		plan.threads_scanned++;
-
-		if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
-			|| root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED) {
-			/*
-			 * Observation (max_highest_lsn): the registry's highest_lsn is
-			 * a write-position watermark the root does not carry; use the
-			 * canonical checkpoint/tail bounds as the conservative
-			 * observation (specs-local increment 28).
-			 */
-			if (snapshot.validated_tail_lsn_exclusive > plan.max_highest_lsn)
-				plan.max_highest_lsn = snapshot.validated_tail_lsn_exclusive;
-			if (snapshot.checkpoint_lower_lsn > plan.max_highest_lsn)
-				plan.max_highest_lsn = snapshot.checkpoint_lower_lsn;
-			/* 补记 31 item 3: max_highest_scn has no consumer; the SCN
-			 * ordering dimension is removed from correctness. */
-		}
 
 		switch (verdict) {
 		case CLUSTER_RECOVERY_THREAD_CLEAN:
@@ -262,8 +295,9 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 		}
 
 		if (verdict != CLUSTER_RECOVERY_THREAD_EMPTY)
-			ereport(DEBUG1, (errmsg("recovery plan: thread %u verdict %d (root result %d)",
-									(unsigned)tid, (int)verdict, (int)root_result)));
+			ereport(DEBUG1, (errmsg("recovery plan: thread %u verdict %d (read verdict %d, bit22=%d)",
+									(unsigned)tid, (int)verdict, read_verdict,
+									bit22_active ? 1 : 0)));
 	}
 	plan.generated = true;
 

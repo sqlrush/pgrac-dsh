@@ -145,6 +145,30 @@ static ClusterSemanticActivationUtilityMailboxShmem
 	*SemanticActivationUtilityMailbox = NULL;
 static ClusterSemanticActivationPgrdSnapshotShmem
 	*SemanticActivationPgrdSnapshot = NULL;
+
+/*
+ * RF-ROOT P7 (specs-local increment 39 / DSH 补记 43-44): the bit22 cutover
+ * reader latch.  Frozen §17.8 keeps the wal-state registry as the selected
+ * authority until bit22 opens; §17.9's exactly-zero census is a POST-bit22
+ * static proof (gate modeling), not a pre-bit22 precondition.  Readers gate
+ * on this latch: false -> registry branch (pre-bit22 authority), true ->
+ * root-only branch.  The latch is node-local shmem, defaults to 0, is
+ * monotonic (a one-shot 0->1 CAS), and any uncertainty (shmem absent) reads
+ * as false — fail-closed to the frozen pre-bit22 behavior.  The SETTER is
+ * wired by the bit22 first-open round (task 4 / 增量 39 §E): a node latches
+ * when its cutover FSM reaches OPEN_APPLIED bound to the round identity;
+ * until that driver lands the latch never sets and every reader takes the
+ * pre-bit22 branch.  Kept OUT of ClusterSemanticActivationShmem whose layout
+ * is frozen (StaticAssertDecl sizeof == 1104 above).
+ */
+typedef struct ClusterR4Bit22CutoverLatchShmem {
+	pg_atomic_uint32 active; /* 0 = pre-bit22 (registry authority) */
+	uint32 reserved;
+	uint64 transition_epoch; /* round identity, observability only */
+	uint64 prepare_generation;
+} ClusterR4Bit22CutoverLatchShmem;
+
+static ClusterR4Bit22CutoverLatchShmem *SemanticActivationBit22Latch = NULL;
 static uint32 semantic_activation_local_inflight[2][64];
 static int semantic_activation_exit_hook_pid;
 static uint64 semantic_activation_lmon_record_read_seq;
@@ -5194,7 +5218,8 @@ cluster_semantic_activation_shmem_size(void)
 	return MAXALIGN(sizeof(ClusterSemanticActivationShmem))
 		   + MAXALIGN(sizeof(ClusterSemanticActivationUtilityMailboxShmem))
 		   + MAXALIGN(sizeof(ClusterSemanticActivationAckTableV1))
-		   + MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem));
+		   + MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem))
+		   + MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem));
 }
 
 void
@@ -5204,6 +5229,7 @@ cluster_semantic_activation_shmem_init(void)
 	bool mailbox_found;
 	bool ack_table_found;
 	bool pgrd_snapshot_found;
+	bool latch_found;
 	int side;
 	int feature_index;
 
@@ -5225,10 +5251,16 @@ cluster_semantic_activation_shmem_init(void)
 			"pgrac cluster semantic activation PGRD snapshot",
 			MAXALIGN(sizeof(ClusterSemanticActivationPgrdSnapshotShmem)),
 			&pgrd_snapshot_found);
+	SemanticActivationBit22Latch
+		= (ClusterR4Bit22CutoverLatchShmem *)ShmemInitStruct(
+			"pgrac cluster r4 bit22 cutover latch",
+			MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem)),
+			&latch_found);
 	if (SemanticActivationShmem == NULL
 		|| SemanticActivationUtilityMailbox == NULL
 		|| SemanticActivationAckTable == NULL
-		|| SemanticActivationPgrdSnapshot == NULL)
+		|| SemanticActivationPgrdSnapshot == NULL
+		|| SemanticActivationBit22Latch == NULL)
 		return;
 	if (!ack_table_found) {
 		memset(SemanticActivationAckTable, 0,
@@ -5284,6 +5316,52 @@ cluster_semantic_activation_shmem_init(void)
 		SemanticActivationUtilityMailbox->utility_result_feature_bit = 0;
 		SemanticActivationUtilityMailbox->utility_result_expected_generation = 0;
 	}
+	if (!latch_found) {
+		pg_atomic_init_u32(&SemanticActivationBit22Latch->active, 0);
+		SemanticActivationBit22Latch->reserved = 0;
+		SemanticActivationBit22Latch->transition_epoch = 0;
+		SemanticActivationBit22Latch->prepare_generation = 0;
+	}
+}
+
+/*
+ * cluster_r4_bit22_cutover_active -- RF-ROOT P7 (增量 39 §B, 补记 44 设计点
+ *	②): the dual-path reader gate idiom anchor.  Lock-free atomic read; the
+ *	census gate modeling recognizes this exact call as the gate.  Fail-closed:
+ *	shmem absent (early startup / unattached) reads as pre-bit22.
+ */
+bool
+cluster_r4_bit22_cutover_active(void)
+{
+	return SemanticActivationBit22Latch != NULL
+		&& pg_atomic_read_u32(&SemanticActivationBit22Latch->active) != 0;
+}
+
+/*
+ * cluster_r4_bit22_cutover_latch_apply -- the one-shot latch setter.  Wired
+ *	by the bit22 first-open round (增量 39 §E): a node latches when its
+ *	cutover FSM reaches OPEN_APPLIED bound to the round identity.  The 0->1
+ *	CAS is the publication: only the winning call records the round identity
+ *	(identity fields are observability-only; the gate reads `active` alone),
+ *	so a losing apply never overwrites the bound round.  Monotonic: a second
+ *	apply (any round) is rejected.  Returns true iff this call flipped the
+ *	latch.
+ */
+bool
+cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
+									 uint64 prepare_generation)
+{
+	uint32 expected = 0;
+
+	if (SemanticActivationBit22Latch == NULL
+		|| transition_epoch == 0 || prepare_generation == 0)
+		return false;
+	if (!pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
+										&expected, 1))
+		return false;
+	SemanticActivationBit22Latch->transition_epoch = transition_epoch;
+	SemanticActivationBit22Latch->prepare_generation = prepare_generation;
+	return true;
 }
 
 /*

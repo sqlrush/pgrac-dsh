@@ -36,6 +36,8 @@ extern bool cluster_semantic_activation_resolve_shared_undo_root_live_owner_sour
 #define TEST_SEMANTIC_UTILITY_MAILBOX_BYTES 80
 #define TEST_SEMANTIC_ACK_TABLE_BYTES 16496
 #define TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES 528
+/* RF-ROOT P7 (增量 39 §B): ClusterR4Bit22CutoverLatchShmem = u32+u32+u64+u64 */
+#define TEST_SEMANTIC_BIT22_LATCH_BYTES 24
 #define TEST_GATE_SEQ_OFFSET 552
 #define TEST_GATE_ACTIVE_BITS_OFFSET 560
 #define TEST_GATE_RECORD_GENERATION_OFFSET 568
@@ -63,18 +65,26 @@ typedef union TestSemanticPgrdSnapshotStorage {
 	uint8 bytes[TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES];
 } TestSemanticPgrdSnapshotStorage;
 
+typedef union TestSemanticBit22LatchStorage {
+	pg_atomic_uint64 align;
+	uint8 bytes[TEST_SEMANTIC_BIT22_LATCH_BYTES];
+} TestSemanticBit22LatchStorage;
+
 static TestSemanticShmemStorage test_semantic_shmem;
 static TestSemanticUtilityMailboxStorage test_semantic_utility_mailbox;
 static TestSemanticAckTableStorage test_semantic_ack_table;
 static TestSemanticPgrdSnapshotStorage test_semantic_pgrd_snapshot;
+static TestSemanticBit22LatchStorage test_semantic_bit22_latch;
 static bool test_shmem_found;
 static bool test_utility_mailbox_found;
 static bool test_ack_table_found;
 static bool test_pgrd_snapshot_found;
+static bool test_bit22_latch_found;
 static Size test_shmem_requested_size;
 static Size test_utility_mailbox_requested_size;
 static Size test_ack_table_requested_size;
 static Size test_pgrd_snapshot_requested_size;
+static Size test_bit22_latch_requested_size;
 static pg_on_exit_callback test_exit_callback;
 static Datum test_exit_callback_arg;
 static int test_exit_registration_count;
@@ -185,6 +195,11 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 		test_utility_mailbox_requested_size = size;
 		*foundPtr = test_utility_mailbox_found;
 		return test_semantic_utility_mailbox.bytes;
+	}
+	if (strcmp(name, "pgrac cluster r4 bit22 cutover latch") == 0) {
+		test_bit22_latch_requested_size = size;
+		*foundPtr = test_bit22_latch_found;
+		return test_semantic_bit22_latch.bytes;
 	}
 	test_shmem_requested_size = size;
 	*foundPtr = test_shmem_found;
@@ -614,14 +629,17 @@ test_gate_reset(void)
 	memset(&test_semantic_ack_table, 0xa5, sizeof(test_semantic_ack_table));
 	memset(&test_semantic_pgrd_snapshot, 0xa5,
 		   sizeof(test_semantic_pgrd_snapshot));
+	memset(&test_semantic_bit22_latch, 0, sizeof(test_semantic_bit22_latch));
 	test_shmem_found = false;
 	test_utility_mailbox_found = false;
 	test_ack_table_found = false;
 	test_pgrd_snapshot_found = false;
+	test_bit22_latch_found = false;
 	test_shmem_requested_size = 0;
 	test_utility_mailbox_requested_size = 0;
 	test_ack_table_requested_size = 0;
 	test_pgrd_snapshot_requested_size = 0;
+	test_bit22_latch_requested_size = 0;
 	test_exit_callback = NULL;
 	test_exit_callback_arg = (Datum)0;
 	test_exit_registration_count = 0;
@@ -706,6 +724,7 @@ test_gate_reset(void)
 	SemanticActivationUtilityMailbox = NULL;
 	SemanticActivationAckTable = NULL;
 	SemanticActivationPgrdSnapshot = NULL;
+	SemanticActivationBit22Latch = NULL;
 	memset(semantic_activation_local_inflight, 0, sizeof(semantic_activation_local_inflight));
 	semantic_activation_exit_hook_pid = 0;
 	semantic_activation_lmon_record_read_seq = 0;
@@ -3314,11 +3333,15 @@ UT_TEST(test_99_shared_gate_layout_and_bootstrap_are_fail_closed)
 				 TEST_SEMANTIC_ACK_TABLE_BYTES);
 	UT_ASSERT_EQ(test_pgrd_snapshot_requested_size,
 				 TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES);
+	UT_ASSERT_EQ(test_bit22_latch_requested_size,
+				 TEST_SEMANTIC_BIT22_LATCH_BYTES);
 	UT_ASSERT_EQ(cluster_semantic_activation_shmem_size(),
 				 TEST_SEMANTIC_GATE_SHMEM_BYTES
 				 + TEST_SEMANTIC_UTILITY_MAILBOX_BYTES
 				 + TEST_SEMANTIC_ACK_TABLE_BYTES
-				 + TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES);
+				 + TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES
+				 + MAXALIGN(TEST_SEMANTIC_BIT22_LATCH_BYTES));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(SemanticActivationAckTable
 			  == (ClusterSemanticActivationAckTableV1 *)test_semantic_ack_table.bytes);
 	UT_ASSERT(semantic_activation_bytes_are_zero(
@@ -4474,10 +4497,53 @@ UT_TEST(test_125_pgrd_snapshot_requires_majority_mirror_and_current_admission)
 	test_gate_reset();
 }
 
+/* RF-ROOT P7 (增量 39 §B / 补记 44 §D-3): the bit22 cutover reader latch.
+ * Default-inactive + fail-closed without shmem; one-shot apply; monotonic. */
+UT_TEST(test_126_bit22_latch_fail_closed_without_shmem)
+{
+	test_gate_reset();
+	SemanticActivationBit22Latch = NULL; /* shmem unattached */
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 1));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	test_gate_reset();
+}
+
+UT_TEST(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_round)
+{
+	test_gate_reset();
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->prepare_generation, 3);
+	test_gate_reset();
+}
+
+UT_TEST(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept)
+{
+	test_gate_reset();
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
+	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(8, 4));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
+	UT_ASSERT_EQ(SemanticActivationBit22Latch->prepare_generation, 3);
+	test_gate_reset();
+}
+
+UT_TEST(test_129_bit22_latch_rejects_zero_round_identity)
+{
+	test_gate_reset();
+	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(0, 1));
+	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 0));
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	test_gate_reset();
+}
+
 int
 main(void)
 {
-	UT_PLAN(174);
+	UT_PLAN(178);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -4652,6 +4718,10 @@ main(void)
 	UT_RUN(test_123_incarnation_drift_rejects_pending_pgrd_without_mutation);
 	UT_RUN(test_124_cold_bootstrap_zero_historical_floor_accepts_live_pgrd_binding);
 	UT_RUN(test_125_pgrd_snapshot_requires_majority_mirror_and_current_admission);
+	UT_RUN(test_126_bit22_latch_fail_closed_without_shmem);
+	UT_RUN(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_round);
+	UT_RUN(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept);
+	UT_RUN(test_129_bit22_latch_rejects_zero_round_identity);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

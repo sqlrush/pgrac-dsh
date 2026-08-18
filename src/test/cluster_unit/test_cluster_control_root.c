@@ -1255,6 +1255,71 @@ UT_TEST(test_bootstrap_read_never_returns_authority_token)
 	UT_ASSERT_EQ(read_token.file_txn_seq, 0);
 }
 
+/* RF-ROOT P7 (增量 39 §A / 补记 43 E1): the NULL-identity bug class — a
+ * STRONG read with expected_identity == NULL must stay INVALID_ARGUMENT=23
+ * (the G1b step-4 sites' inertness signature).  The legal no-prior-identity
+ * path is the two-step discovered read below. */
+UT_TEST(test_strong_read_null_identity_stays_invalid_argument)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken file_token;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootReadToken read_token;
+
+	wipe_root_files();
+	UT_ASSERT_EQ(create_prepared(&image, &round, &file_token), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	memset(&snapshot, 0xee, sizeof(snapshot));
+	memset(&read_token, 0xee, sizeof(read_token));
+	UT_ASSERT_EQ(cluster_control_root_read_canonical(1, NULL,
+											  CLUSTER_CONTROL_ROOT_READ_STRONG,
+											  &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
+	UT_ASSERT_EQ(snapshot.identity.system_identifier, 0);
+	UT_ASSERT_EQ(read_token.file_txn_seq, 0);
+}
+
+UT_TEST(test_discovered_read_binds_identity_and_mints_token)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken file_token;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootReadToken read_token;
+
+	wipe_root_files();
+	UT_ASSERT_EQ(create_prepared(&image, &round, &file_token), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	memset(&snapshot, 0xee, sizeof(snapshot));
+	memset(&read_token, 0xee, sizeof(read_token));
+	UT_ASSERT_EQ(cluster_control_root_read_canonical_discovered(1, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT(cluster_control_root_identity_equal(&snapshot.identity,
+											 &image.records[0].identity));
+	UT_ASSERT_EQ(snapshot.checkpoint_lower_lsn, UINT64_C(0x1000000));
+	/* The STRONG step mints the authority token (BOOTSTRAP never does). */
+	UT_ASSERT_EQ(read_token.file_txn_seq, 1);
+	UT_ASSERT_EQ(read_token.origin_thread_id, 1);
+}
+
+UT_TEST(test_discovered_read_absent_thread_fails_closed)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken file_token;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootReadToken read_token;
+
+	wipe_root_files();
+	UT_ASSERT_EQ(create_prepared(&image, &round, &file_token), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	memset(&snapshot, 0xee, sizeof(snapshot));
+	memset(&read_token, 0xee, sizeof(read_token));
+	/* The fixture mints record[0] only; tid 2 was never present. */
+	UT_ASSERT_EQ(cluster_control_root_read_canonical_discovered(2, &snapshot, &read_token),
+				 CLUSTER_CONTROL_ROOT_ABSENT);
+	UT_ASSERT_EQ(snapshot.identity.system_identifier, 0);
+	UT_ASSERT_EQ(read_token.file_txn_seq, 0);
+}
+
 UT_TEST(test_valid_bak_blocks_corrupt_primary)
 {
 	ClusterControlRootMigrationImage image;
@@ -1987,12 +2052,15 @@ main(int argc, char **argv)
 		return fixture_root_main(argc, argv);
 	setup_fixture();
 
-	UT_PLAN(26);
+	UT_PLAN(29);
 	UT_RUN(test_abi_identity_and_features);
 	UT_RUN(test_invalid_argument_precedes_authority_io);
 	UT_RUN(test_external_fence_bit24_activation_is_forbidden_without_provider);
 	UT_RUN(test_create_and_read_primary);
 	UT_RUN(test_bootstrap_read_never_returns_authority_token);
+	UT_RUN(test_strong_read_null_identity_stays_invalid_argument);
+	UT_RUN(test_discovered_read_binds_identity_and_mints_token);
+	UT_RUN(test_discovered_read_absent_thread_fails_closed);
 	UT_RUN(test_valid_bak_blocks_corrupt_primary);
 	UT_RUN(test_storage_contract_fails_before_cf_or_file_io);
 	UT_RUN(test_single_node_local_probe_fails_before_cf_or_file_io);

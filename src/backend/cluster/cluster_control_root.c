@@ -859,6 +859,47 @@ cluster_control_root_read_canonical(uint16 origin_thread_id,
 	return result;
 }
 
+/*
+ * cluster_control_root_read_canonical_discovered -- RF-ROOT P7 (specs-local
+ *	增量 39 §A, DSH 补记 43-44): the legal no-prior-identity STRONG read.
+ *	A STRONG read requires a bound expected_identity (control_root.c arg
+ *	check: STRONG+NULL -> INVALID_ARGUMENT), so a caller that does not yet
+ *	know the record's identity performs the committed two-step pattern
+ *	(wal_retention.c precedent): BOOTSTRAP_VALIDATE discovers the identity
+ *	(validation semantics only — no CF hold, no token minted), then the
+ *	STRONG read binds that exact identity and mints the token.  A republish
+ *	between the steps lands IDENTITY_MISMATCH (fail-closed; the caller's
+ *	next pass retries).  BOOTSTRAP output never serves a correctness
+ *	decision directly.
+ */
+ClusterControlRootResult
+cluster_control_root_read_canonical_discovered(
+	uint16 origin_thread_id, ClusterControlRootSnapshot *out_snapshot,
+	ClusterControlRootReadToken *out_token)
+{
+	ClusterControlRootSnapshot bootstrap;
+	ClusterControlRootIdentity discovered;
+	ClusterControlRootResult result;
+
+	/* Clear the caller's outputs up front: a failed discovery must never
+	 * leak stale caller data (fail-closed hygiene, mirrors read_canonical). */
+	if (out_snapshot != NULL)
+		memset(out_snapshot, 0, sizeof(*out_snapshot));
+	if (out_token != NULL)
+		memset(out_token, 0, sizeof(*out_token));
+	memset(&bootstrap, 0, sizeof(bootstrap));
+	result = cluster_control_root_read_canonical(
+		origin_thread_id, NULL, CLUSTER_CONTROL_ROOT_READ_BOOTSTRAP_VALIDATE,
+		&bootstrap, NULL);
+	if (result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return result;
+	discovered = bootstrap.identity;
+	return cluster_control_root_read_canonical(
+		origin_thread_id, &discovered, CLUSTER_CONTROL_ROOT_READ_STRONG,
+		out_snapshot, out_token);
+}
+
 ClusterControlRootResult
 cluster_control_root_lookup_owner_by_node_runtime(int32 old_node_id,
 										  ClusterControlRootIdentity *out_identity,

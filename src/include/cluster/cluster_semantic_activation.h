@@ -266,6 +266,12 @@ cluster_semantic_activation_modifier_recheck(const ClusterSemanticAdmissionToken
 									 bool writable_admission);
 extern Size cluster_semantic_activation_shmem_size(void);
 extern void cluster_semantic_activation_shmem_init(void);
+/* RF-ROOT P7 (增量 39 §B): the bit22 cutover reader latch — the dual-path
+ * gate idiom anchor (DSH 补记 44 设计点 ②).  False = pre-bit22, the frozen
+ * §17.8 wal-state authority; true = post-bit22 root-only. */
+extern bool cluster_r4_bit22_cutover_active(void);
+extern bool cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
+												 uint64 prepare_generation);
 extern void
 cluster_semantic_activation_register(const ClusterSemanticActivationDescriptor *descriptor);
 extern bool cluster_semantic_activation_record_encode(const ClusterSemanticActivationRecord *record,

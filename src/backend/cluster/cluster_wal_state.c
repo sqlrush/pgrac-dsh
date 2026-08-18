@@ -817,9 +817,20 @@ cluster_wal_state_refresh_fail_count(void)
  * the canonical control root (G1b step 4), at which point the entry is
  * removed from BOTH this table and the script's DEFERRED list in the same
  * commit (the script cross-checks the two lists stay in lockstep).
+ *
+ * 增量 39 / 补记 43-44 (batch 1 interim): the pre-bit22 root-only migration
+ * order was ruled an inversion of the frozen §17.8/§17.9 cutover semantics;
+ * the recovery_plan.c / recovery_worker.c registry reads are RESTORED behind
+ * the bit22-gate idiom (cluster_r4_bit22_cutover_active) and are the legal
+ * pre-bit22 authority.  They stay listed here (lockstep with the script)
+ * until the batch-3 semantic flip (KNOWN-DEFERRED -> GATE-BOUND; census as
+ * the post-bit22 static proof).
  */
 static const char *const cluster_wal_state_census_deferred_sites[] = {
 	"cluster_hw_remaster.c",
+	"cluster_recovery_plan.c",
+	"cluster_recovery_worker.c",
+	"cluster_thread_recovery_orchestrator.c",
 	NULL
 };
 

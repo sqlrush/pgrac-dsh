@@ -78,8 +78,21 @@ TELEMETRY_OK=(
 # recovery_worker.c + cluster_thread_recovery_orchestrator.c migrated to the
 # canonical control root / pre-IR pinned projection and removed — their
 # registry reads are gone.
+# 增量 39 / 补记 43-44 (2026-08-18, batch 1 interim registration): the G1b
+# step-4 pre-bit22 root-only order was ruled an inversion of the frozen
+# §17.8/§17.9 cutover semantics.  recovery_plan.c + recovery_worker.c regain
+# their registry reads behind the bit22-gate idiom
+# (cluster_r4_bit22_cutover_active); pre-bit22 those reads are the LEGAL
+# authority source.  They are registered here so the interim strict census
+# keeps lockstep with the runtime table; the KNOWN-DEFERRED -> GATE-BOUND
+# semantic flip (census as the post-bit22 static proof) lands in batch 3.
+# 补记 46 (batch 1 补充): orchestrator window derivation also regained its
+# pre-bit22 registry read (bb7fda782e^ shape restored under the gate idiom).
 DEFERRED=(
 	'src/backend/cluster/cluster_hw_remaster.c'
+	'src/backend/cluster/cluster_recovery_plan.c'
+	'src/backend/cluster/cluster_recovery_worker.c'
+	'src/backend/cluster/cluster_thread_recovery_orchestrator.c'
 )
 
 violations=0

@@ -426,6 +426,11 @@ extern ClusterControlRootResult cluster_control_root_read_canonical(
 	uint16 origin_thread_id, const ClusterControlRootIdentity *expected_identity,
 	ClusterControlRootReadMode mode, ClusterControlRootSnapshot *out_snapshot,
 	ClusterControlRootReadToken *out_token);
+/* 增量 39 §A: BOOTSTRAP identity discovery + STRONG bound read (token
+ * minted by the STRONG step only). */
+extern ClusterControlRootResult cluster_control_root_read_canonical_discovered(
+	uint16 origin_thread_id, ClusterControlRootSnapshot *out_snapshot,
+	ClusterControlRootReadToken *out_token);
 extern ClusterControlRootResult cluster_control_root_lookup_owner_by_node_runtime(
 	int32 old_node_id, ClusterControlRootIdentity *out_identity,
 	ClusterControlRootSnapshot *out_snapshot, ClusterControlRootReadToken *out_token);
