@@ -558,3 +558,26 @@ A → 裁决(B) → C → D → 双绿 → 重新申请 P6 冻结。中途任何
 
 t243 33/33 + "reopened by owner" 日志 + recovery_duty 单测绿 + regress
 13/13 + C 端到端测试（增量 19）落地。
+
+---
+
+## 复审补记 17（2026-08-18 09:40，B 实施提交 958b941130 复审）
+
+- 代码面通过：CLOSED 分支走 THREAD_OPEN reason（expected=CLOSED→desired=OPEN，
+  owner=admitted、lineage+1、0x3b mask 冻结形状）；OWNER_REJOIN 严格
+  RECOVERY_COMPLETE-only（control_root allowlist 已收窄回冻结态）；
+  单测翻转正确（routes_to_thread_open：断言 reason=THREAD_OPEN、owner=77、
+  0 次 OWNER_REJOIN 发布）。
+- 文档面通过：增量 20 已写入 corrected design，含 StartupXLOG 方案的阴性
+  结果（t243 bail 证据 + 循环死锁机理）与终态设计（commit 时点路由、
+  proof 集、authority 模式一致）。
+- **两个剩余验证点（未闭合，必须闭环后再谈 P6 冻结）**：
+  1. AD-023 §4 执行者范围：文档论证了 postmaster 不可执行，但"协调者
+     LMON（有 PGPROC）执行 THREAD_OPEN CAS 是否落在 §4 冻结范围内"仍缺
+     一句结论性引用（§4 原文 vs cluster_lock_acquire.c:216 的 "needs a
+     PGPROC executor" 注记）。请补一行 spec 依据或用户裁决确认。
+  2. **本设计尚无 t243 绿证**：21ok 红轮是已废弃的 StartupXLOG 方案；
+     958b941130 的 commit 时点路由还没跑过 t243。下一轮 t243 33/33 +
+     "reopened by owner" 日志是硬验收；跑前请先全量重建（结构体/头文件
+     变更后构建纪律）。
+- 之后：C 端到端测试（增量 19）落地 + cluster_regress 13/13。
