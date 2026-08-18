@@ -100,15 +100,25 @@
 - [x] **【补记 13-A】增量 17 已回退**（5074881fa7）：head gate 恢复
   `owner != admitted`、捷径恢复无条件 `if (OPEN) return true;`、单测
   删除假绿用例、specs-local 标注回退。recovery_duty 18/18 PASS。
-- [ ] **【补记 13-B 待裁决】增量 13**（CLOSED 进 OWNER_REJOIN，§17.4
-      偏离）：裁决未批前不动代码。若裁决 = clean-reopen 走 THREAD_OPEN：
-      ① 先实现 THREAD_OPEN 路由接通 L10；② t243 33/33 复证；③ 再摘除
-      OWNER_REJOIN 的 CLOSED 允许。当前 t243 绿依赖 CLOSED 路由——先接
-      新路再拆旧路。
-- [ ] **【补记 13-C】端到端 lifecycle 测试**（不打桩低层发布）：真实 shmem
-      控制根 + 真实 compare_and_publish；断言 ① OWNER_REJOIN 前态
-      RECOVERY_COMPLETE 成功；② 前态 OPEN/CLOSED 的 OWNER_REJOIN 被
-      patch_shape_valid 拒绝；③ THREAD_OPEN 的 CLOSED→OPEN 成功。
+- [x] **【补记 13-B 已执行】增量 13 裁决 = 按 DSH 倾向（用户 2026-08-18）**：
+  clean-reopen 走 THREAD_OPEN 冻结主线（958b941130，commit 时点路由：
+  协调者持完整 proof 集执行冻结 CLOSED→OPEN CAS；OWNER_REJOIN 严格
+  RECOVERY_COMPLETE-only，control_root allowlist 收窄）。执行者范围结论
+  （AD-023 §4 = 恢复期 allowlist；serving 期协调者走 serving 准入）已落
+  specs-local 增量 20 补记。L10 serving-stale 变体（clean-close 被拒 →
+  root 停 OPEN(old)）由增量 21 修复（两段冻结 CAS：THREAD_CLEAN_CLOSE
+  OPEN→CLOSED + THREAD_OPEN CLOSED→OPEN，clean-departed 证据门控；
+  非 clean-departed 的 OPEN(old) 保持 fail-closed）。DSH 补记 18 的
+  head gate lifecycle 拆分已照办（b4fb9ece30；CLOSED 分支靠 CAS 单调性
+  兜底，验证记录见增量 21 补记）。t243 33/33 ×7 连绿（含变体轮）。
+- [x] **【补记 13-C 已完成】端到端 lifecycle 测试**（d7820ab33e）：真实
+  文件根 + 真实 compare_and_publish/patch_shape_valid，断言 ① OWNER_REJOIN
+  RECOVERY_COMPLETE 成功；② OPEN/CLOSED 前态 OWNER_REJOIN 被
+  patch_shape_valid 拒（零 CF/文件 I/O）；③ THREAD_OPEN CLOSED→OPEN 成功
+  （owner 重盖 + lineage+1）。control_root 26/26 PASS。
+- [x] **【P6 重新冻结条件核对】**（供 DSH 裁定）：A ✓ + B ✓ + C ✓ +
+      regress 13/13 ✓ + t243 33/33（多轮）✓ + 全树 TEMP 复核 0 ✓ +
+      cluster_unit 232 闭包 ✓（3 二进制/8 测试文档化 pre-existing）。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
