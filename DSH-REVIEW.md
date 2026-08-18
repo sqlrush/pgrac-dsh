@@ -1451,3 +1451,31 @@ worker.c:484 的 `cluster_thread_recovery_pin_projection` 仍对每个 candidate
 - t243 33/33 + regress 13/13
 - **绿跑 node0 日志 plan 行必须出现 registry 分类行**（ALIVE/candidate，不再是 127 unknown）
 - commit message 含问题 ① 结案声明（S3 全部门控）
+
+---
+
+## 复审补记 49（2026-08-18 19:55，批 1 commit 9a72084695 终审：批准封板）
+
+### 独立证据核验（DSH 亲自读取，不依赖 commit message）
+
+- t243：regress log 33 ok / 0 not ok ✅
+- plan 日志行（node0，三次生成）：
+  - L1 "0 clean, 127 empty, 0 crashed, 0 alive, **0 unknown**"
+  - L2 "0 clean, 127 empty, 0 crashed, 0 alive, **0 unknown**"
+  - L3 "**1 clean**, 126 empty, 0 crashed, 0 alive, **0 unknown**"
+  → NULL-identity 惰性签名（127 unknown）已消除，registry 分类恢复 ✅
+- regress：13 .out 19:47 全新，全树零 regression.diffs ✅
+- 工作树干净，无 TEMP 残留，无未提交改动 ✅
+
+### commit message 审计
+
+- 问题 ① 结案声明显式（"S3 no longer inert pre-bit22"）✅
+- 全部 6 个 DSH review round 引用（补记 43/44/46/47/48）✅
+- 每站恢复形状标注（29efc553b0^ / 34eb81cc71^ / a9be5590d0^ / bb7fda782e^）✅
+- 跑批证据齐全（t243 33/33 82s + regress 13/13 + 7 个单测套全绿）✅
+
+### 批 1 封板
+
+批 1 完成：NULL-identity bug 修复 + S1-S3 bit22 门控双路径 + latch 设施 + 单测 + census 锁步。
+P7 剩余：批 2（S3 pin 修好 + consumer post-bit22 分支，latch 永不置位 ⇒ 动态不可达，
+不影响批 1 绿跑）+ 批 3（census 重定义 + activate proof 门移除）+ 任务 4（bit22 首开轮）。
