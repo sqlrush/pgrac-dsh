@@ -77,7 +77,11 @@ cluster_control_root_publish_authority_bind_v1(
 			 * Sole publisher = the checkpointer; no cross-publisher mixing
 			 * with the three lifecycle reasons (DSH review note 1 F3
 			 * re-check: the token/patch/reason triple stays exact). */
-			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE))
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_CHECKPOINT_ADVANCE
+			/* RF-ROOT P7 G1a-2: the checkpointer's FPW-off sticky root
+			 * publication (FPW_STICKY, frozen 0x40 shape).  Same sole
+			 * publisher = the checkpointer. */
+			&& reason != CLUSTER_CONTROL_ROOT_PUBLISH_FPW_STICKY))
 		return false;
 	memset(&root_publish_authority, 0, sizeof(root_publish_authority));
 	root_publish_authority.active = true;
@@ -804,6 +808,73 @@ cluster_control_root_thread_clean_close_publish_retry(void)
 						"within the bounded shutdown window; the root stays OPEN and the "
 						"restart takes the ordinary crash-rejoin chain (fail-closed)")));
 	return closed_ok;
+}
+
+/*
+ * cluster_control_root_fpw_sticky_publish -- RF-ROOT P7 G1a-2: the
+ * checkpointer publishes the FPW-off sticky into the canonical control root
+ * (STOP-01 §17.2 reason FPW_STICKY, frozen 0x40 shape) after the W5b
+ * registry sticky succeeded (same checkpoint, CF(X) released, before the
+ * recycle — mirroring the CHECKPOINT_ADVANCE placement).  The root's
+ * FLAG_FPW_WAS_OFF is sticky: once set it is never cleared (the apply_patch
+ * guard), so the merged-recovery 53RA3 gate (G1b target) can read the
+ * canonical flag instead of the registry.  Non-fatal: any failure is
+ * retried by the next checkpoint.
+ */
+bool
+cluster_control_root_fpw_sticky_publish(void)
+{
+	ClusterControlRootIdentity identity;
+	ClusterControlRootSnapshot snapshot;
+	ClusterControlRootSnapshot published;
+	ClusterControlRootReadToken token;
+	ClusterControlRootReadToken published_token;
+	ClusterControlRootPatch patch;
+	ClusterControlRootResult root_result;
+
+	if (cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES)
+		return false;
+	root_result = cluster_control_root_lookup_owner_by_node_runtime(
+		cluster_node_id, &identity, &snapshot, &token);
+	if ((root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		 && root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		|| !cluster_recovery_duty_key_valid_v1(&identity)
+		|| cluster_recovery_duty_key_compare(&identity, &snapshot.identity)
+			   != CLUSTER_RECOVERY_DUTY_COMPARE_EXACT
+		|| snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN)
+		return false; /* not an OPEN owner thread */
+	if ((snapshot.root_flags & CLUSTER_CONTROL_ROOT_FLAG_FPW_WAS_OFF) != 0)
+		return true; /* already sticky — no-op */
+
+	memset(&patch, 0, sizeof(patch));
+	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_FPW_STICKY;
+	patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	/* No LIFECYCLE bit in the 0x40 mask: desired.lifecycle stays 0. */
+	patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_UNUSED;
+	patch.desired.root_flags = snapshot.root_flags
+							   | CLUSTER_CONTROL_ROOT_FLAG_FPW_WAS_OFF;
+
+	if (!cluster_control_root_publish_authority_bind_v1(
+			&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_FPW_STICKY))
+		return false;
+	root_result = cluster_control_root_compare_and_publish(
+		&token, &patch, CLUSTER_CONTROL_ROOT_PUBLISH_FPW_STICKY,
+		&published, &published_token);
+	cluster_control_root_publish_authority_clear_v1();
+	if (root_result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& (published.root_flags & CLUSTER_CONTROL_ROOT_FLAG_FPW_WAS_OFF) != 0) {
+		ereport(LOG,
+				(errmsg("cluster control root: thread %u FPW-off sticky published by node %d "
+						"(root publish seq " UINT64_FORMAT ")",
+						identity.origin_thread_id, cluster_node_id,
+						published.root_publish_seq)));
+		return true;
+	}
+	ereport(WARNING,
+			(errmsg("cluster control root: FPW sticky publish failed for thread %u "
+					"(result %d); the next checkpoint will retry",
+					identity.origin_thread_id, (int) root_result)));
+	return false;
 }
 
 static bool

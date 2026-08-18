@@ -204,6 +204,8 @@ cluster_control_root_compare_and_publish(
 			out_snapshot->tail_last_record_crc32c =
 				patch->desired.tail_last_record_crc32c;
 		}
+		if ((patch->mask & CLUSTER_CONTROL_ROOT_PATCH_FPW_STICKY) != 0)
+			out_snapshot->root_flags = patch->desired.root_flags;
 		memset(out_token, 0, sizeof(*out_token));
 	}
 	return ut_root_publish_result;
@@ -494,6 +496,38 @@ UT_TEST(test_checkpoint_advance_publishes_canonical_bound)
 	UT_ASSERT(!cluster_control_root_checkpoint_advance_publish(
 		UINT64_C(0x2000000), 1, UINT64_C(0x1fffff0), UINT64_C(0x2000020),
 		UINT32_C(0x44556677)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+}
+
+UT_TEST(test_fpw_sticky_publishes_canonical_flag)
+{
+	/* RF-ROOT P7 G1a-2: the checkpointer's canonical FPW-off sticky
+	 * (FPW_STICKY, frozen 0x40 shape) sets the root's FLAG_FPW_WAS_OFF. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	UT_ASSERT(cluster_control_root_fpw_sticky_publish());
+	UT_ASSERT_EQ(ut_root_publish_calls, 1);
+	UT_ASSERT(ut_root_publish_context_authorized);
+	UT_ASSERT_EQ((int)ut_root_published_reason,
+				 (int)CLUSTER_CONTROL_ROOT_PUBLISH_FPW_STICKY);
+	UT_ASSERT_EQ(ut_root_published_patch.mask,
+				 CLUSTER_CONTROL_ROOT_PATCH_FPW_STICKY);
+	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
+	UT_ASSERT((ut_root_published_patch.desired.root_flags
+			   & CLUSTER_CONTROL_ROOT_FLAG_FPW_WAS_OFF) != 0);
+
+	/* Already sticky is a no-op (the apply_patch guard never clears it). */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	ut_root_snapshot.root_flags |= CLUSTER_CONTROL_ROOT_FLAG_FPW_WAS_OFF;
+	UT_ASSERT(cluster_control_root_fpw_sticky_publish());
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+
+	/* Not OPEN is fail-closed. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+	UT_ASSERT(!cluster_control_root_fpw_sticky_publish());
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 }
 
@@ -1049,7 +1083,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(22);
+	UT_PLAN(23);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -1061,6 +1095,7 @@ main(void)
 	UT_RUN(test_owner_import_slot_fallback_requires_absent_jcmk_and_claim);
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
 	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
+	UT_RUN(test_fpw_sticky_publishes_canonical_flag);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
 	UT_RUN(test_owner_rejoin_rejects_open_stale_owner_frozen);
 	UT_RUN(test_clean_close_retry_transient_refusal_then_success);

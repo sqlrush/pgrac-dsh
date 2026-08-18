@@ -796,7 +796,7 @@ static void RemoveOldXlogFilesCluster(
 	XLogSegNo segno, XLogRecPtr lastredoptr, XLogRecPtr endptr,
 	TimeLineID insertTLI, ClusterWalRetentionE1Context *context);
 static void ClusterWalStateValidateHistoricalFpwOff(void);
-static void UpdateFullPageWritesForCheckpoint(void);
+static bool UpdateFullPageWritesForCheckpoint(void); /* RF-ROOT P7 G1a-2: returns FPW-off transition */
 static void ClusterWalStatePublishCheckpointRedo(XLogRecPtr redo);
 static uint32 ClusterCheckpointRecordCrc32(XLogRecPtr recptr); /* RF-ROOT P7 G1a */
 #endif
@@ -7616,6 +7616,7 @@ CreateCheckPoint(int flags)
 	XLogRecPtr	slotsMinReqLSN;
 #ifdef USE_PGRAC_CLUSTER
 	bool		cf_x_taken = false; /* PGRAC: spec-5.6 Dc1 — held CF X to release */
+	bool		fpw_off_transition = false; /* RF-ROOT P7 G1a-2: W5b FPW-off happened this checkpoint */
 #endif
 
 	/*
@@ -7802,7 +7803,7 @@ CreateCheckPoint(int flags)
 	 * section.  The helper borrows that hold and never reacquires it.
 	 */
 	if ((flags & CHECKPOINT_END_OF_RECOVERY) == 0)
-		UpdateFullPageWritesForCheckpoint();
+		fpw_off_transition = UpdateFullPageWritesForCheckpoint();
 #endif
 
 	/*
@@ -8342,6 +8343,11 @@ CreateCheckPoint(int flags)
 			(void) cluster_control_root_checkpoint_advance_publish(
 				checkPoint.redo, checkPoint.ThisTimeLineID, ProcLastRecPtr,
 				recptr, ckpt_record_crc);
+		/* RF-ROOT P7 G1a-2: the W5b FPW-off sticky lands in the canonical
+		 * root in the same CF-free window (the merged-recovery 53RA3 gate
+		 * reads the root's FLAG_FPW_WAS_OFF after the G1b migration). */
+		if (fpw_off_transition)
+			(void) cluster_control_root_fpw_sticky_publish();
 	}
 #endif
 	if (ClusterWalStateConfigured())
@@ -9341,8 +9347,11 @@ ClusterWalStateValidateHistoricalFpwOff(void)
  * The non-EOR checkpoint is the sole formed-registry FPW-off actor.  A
  * disabled registry retains ordinary PostgreSQL behavior.  Every formed
  * registry result other than a verified write/no-op leaves FPW enabled.
+ * RF-ROOT P7 G1a-2: returns true iff the FPW-off transition actually took
+ * effect this checkpoint (the caller then publishes the canonical root's
+ * FPW_WAS_OFF sticky after the CF(X) release).
  */
-static void
+static bool
 UpdateFullPageWritesForCheckpoint(void)
 {
 	ClusterWalStateUpdate update;
@@ -9350,7 +9359,7 @@ UpdateFullPageWritesForCheckpoint(void)
 	XLogCtlInsert *Insert = &XLogCtl->Insert;
 
 	if (fullPageWrites || !Insert->fullPageWrites)
-		return;
+		return false;
 
 	MemSet(&update, 0, sizeof(update));
 	update.kind = CLUSTER_WAL_STATE_UPDATE_FPW_STICKY;
@@ -9361,7 +9370,7 @@ UpdateFullPageWritesForCheckpoint(void)
 		|| result == CLUSTER_WAL_STATE_UPDATE_DISABLED)
 	{
 		UpdateFullPageWritesInternal(true);
-		return;
+		return true;
 	}
 
 	ereport(WARNING,
@@ -9369,6 +9378,7 @@ UpdateFullPageWritesForCheckpoint(void)
 			 errmsg("could not persist WAL state FPW-off evidence; full_page_writes remains enabled"),
 			 errdetail("WAL state update result was %d; the next non-EOR checkpoint will retry.",
 					   (int) result)));
+	return false;
 }
 
 static void

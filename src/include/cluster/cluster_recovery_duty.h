@@ -139,6 +139,7 @@ extern bool cluster_control_root_thread_open_publish(
 extern bool cluster_control_root_checkpoint_advance_publish(
 	XLogRecPtr redo, TimeLineID tli, XLogRecPtr ckpt_record_start,
 	XLogRecPtr ckpt_record_end, uint32 record_crc32c); /* RF-ROOT P7 G1a */
+extern bool cluster_control_root_fpw_sticky_publish(void); /* RF-ROOT P7 G1a-2 */
 extern ClusterFormationWitnessResult cluster_formation_witness_decide_v1(
 	const ClusterFormationSnapshotV1 *f1, const ClusterFenceAuthorityProof *authority,
 	const ClusterFormationSnapshotV1 *f2, uint16 origin_thread, bool opening_new_duty);
