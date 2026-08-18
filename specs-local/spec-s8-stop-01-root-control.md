@@ -3995,3 +3995,43 @@ SQL 函数 `pgrac_r4_bit22_cutover_begin()`（协调者 backend）：
 
 P8：recoverer crash 后同 episode 无 replacement 接管（BLOCKED 或 episode
 结束）；新 episode 全 fresh；t243 33/33 + regress 13/13 不回归。
+
+---
+
+## 增量 50：P8 审计结论 —— 结构性满足，无产品修复（2026-08-18）
+
+### 三 gap 审计结果
+
+1. **replay slot fresh（gap 1）**：✅ 结构性满足——pin 由 LMON tick 每
+   episode 重写（episode_epoch 绑定，projection_current 对 stale episode
+   拒——plan 单测 test_projection_read_rejects_stale_episode 已有覆盖）；
+2. **worker pool fresh（gap 2）**：✅ 结构性满足——workers_launch 每
+   launch `pool->generation++` + memset stream_verdict/assigned_bitmap
+   （worker.c:461 一带）；generation 参与 projection_current 绑定；
+3. **serial guard crash 语义（gap 3）**：✅ 结构性满足——guard 的锁是
+   PG advisory/shared-lock 语义（cluster_lock_acquire_seven_step，
+   ir_lock.c:332）：进程退出（含 SIGKILL）后 postmaster 清理其锁表记录
+   → 下一 episode 的 acquire 重新成功；同 episode 内无 replacement
+   （BGW_NEVER_RESTART + grd launch 每 episode 一次）→ 结构性 BLOCKED。
+
+**结论**：rebuild-first 的 canonical 重建语义（fresh pin/pool/serial）由
+既有机制保证，**无产品修复需求**；批 1-4 的 projection 纪律（episode
+绑定）正是 P8 的提前实现。P8 的交付 = 审计记录（本增量）+ 测试固化。
+
+### RU 补强评估（P8）
+
+- projection stale 拒绝：✅ 已有（plan 31/31）；
+- pool generation 重置：worker.o 不链接单测（launch 在 .c）——
+  assign 的纯逻辑（striping）已有覆盖；generation 重置的**集成断言**
+  归 RL 腿（TAP，受 2-node 集群语义限制，增量 40/41 §A 同裁）；
+- serial 锁清理：PG 锁表语义（postmaster 层）——unit 不可测，TAP 受限。
+⇒ RU-01..12 的 P8 部分：以现有 unit 覆盖 + 审计记录闭合；RL-01..12
+（TAP fault legs）按 RF-ROOT §9.2 合同逐条评估可行性（受 §A 限制的腿
+标注降级）。
+
+### P9 状态
+
+- RL-01..12：下一条读取 RF-ROOT §9.2 合同清单，逐腿设计（fault 注入 =
+  kill/断连/文件破坏——2-node 可行性评估）；
+- RU-01..12：§9.1 单元 RED matrix——逐条对照现有 unit 面；
+- §8.1 观测性：counter 语义 G2 分级。
