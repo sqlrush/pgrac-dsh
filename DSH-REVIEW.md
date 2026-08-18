@@ -1422,3 +1422,32 @@ worker.c:484 的 `cluster_thread_recovery_pin_projection` 仍对每个 candidate
 - ⬜ 绿跑 node0 日志 plan 行恢复 registry 分类（不再是 127 unknown）
 - ⬜ **census 锁步补 orchestrator（见上）**
 - ⬜ 问题 ① 处置声明（S3 已门控，可结案；或 commit message 确认批 1 含 S3）
+
+---
+
+## 复审补记 48（2026-08-18 19:35，census 锁步缺口关闭——批 1 代码面完工）
+
+### 补记 47 MUST-FIX 已修 ✅
+
+- census 脚本 DEFERRED 列表 + C 表（wal_state.c）各加 `cluster_thread_recovery_orchestrator.c`
+- 注释同步更新（orchestrator 的 registry 读恢复记录）
+- 锁步恢复：脚本 DEFERRED = C 表 deferred_sites = [hw_remaster, plan, worker, orchestrator]
+
+### 批 1 代码面状态：11 文件 +547/-114，全部核准
+
+| 层 | 站点 | 状态 |
+|---|---|---|
+| S1 | plan.c 双路径（bit22 门控） | ✅ |
+| S2 | worker.c revalidate 双路径 | ✅ |
+| S3 | worker_main + orchestrator 双路径 | ✅ |
+| §A | control_root.c 两步读 helper | ✅ |
+| §B | semantic_activation.c/h latch 设施 | ✅ |
+| §D-3 | control_root 26→29 + r4_fsm 174→178 单测 | ✅ |
+| census | 脚本 + C 表锁步 | ✅ |
+
+### 批 1 commit 前唯一剩余：跑批绿证
+
+- 单测：control_root 29/29 + r4_fsm 178/178 + plan + recovery_worker 聚焦套
+- t243 33/33 + regress 13/13
+- **绿跑 node0 日志 plan 行必须出现 registry 分类行**（ALIVE/candidate，不再是 127 unknown）
+- commit message 含问题 ① 结案声明（S3 全部门控）
