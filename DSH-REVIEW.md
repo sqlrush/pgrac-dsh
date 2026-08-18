@@ -1507,3 +1507,26 @@ CF(S) 在零资源锁点获取，不构成新锁嵌套 ✅
 - pre-bit22 行为不变（pin 不调用，consumer 走 registry）
 - post-bit22 分支：pin 现在功能正常，latch 置位后 projection 可用
 - 验收：单测 + t243 33/33 + regress 13/13（跑批后 commit）
+
+---
+
+## 复审补记 51（2026-08-18 20:05，批 2 commit 11d6ac246a 终审：批准封板）
+
+### 独立核验
+
+- 工作树干净，3 文件 +45/-30，与补记 50 核准的 diff 逐字一致 ✅
+- commit message 引用补记 47 minor + 50，锁序核验记录 ✅
+- 证据：t243 33/33 + regress 13/13 + control_root 29/29 + plan 31/31 +
+  worker 21/21 + r4_fsm 178/178 ✅
+
+### 批 2 封板
+
+pin 从惰性（STRONG+NULL→23）变为功能（两步读→token 铸成）；调用者以 latch 门控。
+pre-bit22 行为不变，post-bit22 分支 pin 现在真正可用。
+
+### P7 状态
+
+- ✅ 批 1（9a72084695）：S1-S3 门控双路径 + §A 两步读 + §B latch + census 锁步
+- ✅ 批 2（11d6ac246a）：pin 修复 + 调用者门控
+- ⬜ 批 3：census 重定义（GATE-BOUND 语义翻转）+ activate proof 门移除
+- ⬜ 任务 4：bit22 首开轮（coordinator 驱动 + latch 置位 + all-member CLOSED-ACK）
