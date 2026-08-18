@@ -816,3 +816,21 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
   G1b 锁序设计的可迁移上下文分类。
 - DSH 独立复跑：recovery_duty 23/23（含新用例）、control_root 26/26。
 - P7 进度：G1a ✅ G1a-2 ✅ ｜ G1b（按 site 分阶段）⏳ G2-G6 ⏳
+
+---
+
+## 复审补记 27（2026-08-18 12:40，G4 census 门 + 增量 23 设计复审：通过）
+
+- 44c20d16a6（G4 census 门）：DSH 实跑——当前 5 处 violation（
+  recovery_plan:203 / recovery_worker:192,247 / hw_remaster:487 /
+  orchestrator:572），输出 "bit22 must NOT open"（RED 按设计）。
+  白名单=纯 telemetry 面，deferred site 清单与 G1b 锁序分类一致。
+  **门是真的，不是摆设** ✓。
+- 55b47463c3（增量 23，G3/G5 设计稿）：R4 cutover 驱动复用既有 ACK
+  机制（semantic_activation 两阶段 encode_round + decode_image），
+  coordinator one-shot proof；全成员 CLOSED-ACK 绑定（W6 条款 3）；
+  activate 前 census strict 强制门；四重 fail-closed（非协调者/ACK
+  未 COMPLETE/round 不匹配/census RED）。与冻结 P7 合同一致，批准。
+- 提醒：G3/G5 实施时，ACK 表消费路径（semantic_activation.c:1202-1226）
+  目前"COMPLETE 无人消费"——cutover 驱动是第一个生产消费者，单测要覆盖
+  observed==expected 的边界（含成员缺失 ACK 的 fail-closed）。
