@@ -318,12 +318,15 @@ extern void cluster_semantic_activation_lmon_tick(void);
  * COMPLETE state bound to the exact round identity (transition epoch,
  * prepare generation, the expected/observed member sets, the source/target
  * feature bitmaps and the capability sample digest).  True only when every
- * member's ACK was observed (observed == expected) for THIS round. */
+ * member's ACK was observed (observed == expected) for THIS round AND the
+ * table stands at (or beyond) minimum_stage — SAMPLE for the create proof,
+ * PREPARED for the activate proof (the W6 clause 3 CLOSED binding). */
 extern bool cluster_semantic_activation_ack_complete_matches(
 	uint64 transition_epoch, uint64 record_generation,
 	uint64 expected_members_lo, uint64 expected_members_hi,
 	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
-	uint64 capability_sample_digest);
+	uint64 capability_sample_digest,
+	ClusterSemanticActivationAckStage minimum_stage);
 extern ClusterSemanticActivationResult
 cluster_semantic_activation_submit(ClusterSemanticActivationAction action,
 								   ClusterSemanticActivationRefusal *refusal);

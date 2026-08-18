@@ -14,6 +14,7 @@
 #include "cluster/cluster_membership.h"
 #include "cluster/cluster_reconfig.h"
 #include "cluster/cluster_semantic_activation.h" /* R4 cutover ACK proof (G3) */
+#include "cluster/cluster_wal_state.h" /* G4 runtime census gate (bit22) */
 #include "cluster/cluster_recovery_duty.h"
 #include "cluster_control_root_private.h"
 #include "cluster/cluster_startup_phase.h" /* serving rebind (路线 1 retry) */
@@ -63,7 +64,8 @@ cluster_control_root_create_authority_current_v1(
 			round->transition_epoch, round->prepare_generation,
 			round->admitted_bitmap_low, round->admitted_bitmap_high,
 			round->source_feature_bitmap, round->target_feature_bitmap,
-			round->capability_sample_digest))
+			round->capability_sample_digest,
+			CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE))
 		return false;
 	if (!cluster_control_root_feature_bitmap_is_known(
 			round->source_feature_bitmap)
@@ -78,12 +80,43 @@ cluster_control_root_create_authority_current_v1(
 bool
 cluster_control_root_activate_authority_current_v1(
 	const ClusterControlRootFileToken *expected_token,
-	const uint8 expected_round_sha256[32])
+	const uint8 expected_round_sha256[32],
+	const ClusterControlRootMigrationRoundV1 *round)
 {
-	/* No current product caller owns activation authority. */
-	(void)expected_token;
-	(void)expected_round_sha256;
-	return false;
+	/* RF-ROOT P7 G3 (R4 cutover batch, specs-local increment 23): the
+	 * activate proof — the bit22 OPEN gate.  This process must be the
+	 * round's coordinator; the ACK table must be COMPLETE (every member
+	 * observed == expected) AND stand at (or beyond) the PREPARED stage
+	 * (W6 clause 3: only the PREPARED-stage all-member ACK is the CLOSED
+	 * binding that opens bit22); the round must carry bit22 in its target
+	 * bitmap; the runtime census gate must pass (补记 28: the census strict
+	 * gate is a runtime call, not only a documented promise).  Fail-closed
+	 * on any mismatch.  The expected token/sha freshness is established by
+	 * the caller against the canonical PREPARED image. */
+	if (expected_token == NULL || expected_round_sha256 == NULL || round == NULL
+		|| cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES)
+		return false;
+	if ((int32) round->coordinator_node_id != cluster_node_id)
+		return false;
+	/* Census gate first (fail-fast before any ACK read): while the runtime
+	 * census is RED, bit22 must not open regardless of the ACK table. */
+	if (!cluster_wal_state_correctness_census_ok())
+		return false;
+	if (!cluster_semantic_activation_ack_complete_matches(
+			round->transition_epoch, round->prepare_generation,
+			round->admitted_bitmap_low, round->admitted_bitmap_high,
+			round->source_feature_bitmap, round->target_feature_bitmap,
+			round->capability_sample_digest,
+			CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED))
+		return false;
+	if (!cluster_control_root_feature_bitmap_is_known(
+			round->source_feature_bitmap)
+		|| !cluster_control_root_feature_bitmap_is_known(
+			round->target_feature_bitmap)
+		|| (round->target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0)
+		return false;
+	return true;
 }
 
 static bool

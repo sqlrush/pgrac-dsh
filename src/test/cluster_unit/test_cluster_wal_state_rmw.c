@@ -857,10 +857,21 @@ UT_TEST(test_a1_w3_publish_stopped_cf_failure_preserves_active)
 	UT_ASSERT_EQ((int)ondisk->state, (int)CLUSTER_WAL_SLOT_STATE_ACTIVE);
 }
 
+UT_TEST(test_g4_census_gate_red_while_deferred_sites_linked)
+{
+	/* RF-ROOT P7 G4 (补记 28: the census strict gate is a runtime call):
+	 * the real runtime census table must be RED while the known-deferred
+	 * correctness sites are still linked, so the activate authority proof
+	 * fails closed and bit22 cannot open.  When G1b step 4 migrates the
+	 * last deferred site, this table entry is removed AND this test flips
+	 * to asserting GREEN in the same commit. */
+	UT_ASSERT(!cluster_wal_state_correctness_census_ok());
+}
+
 int
 main(int argc pg_attribute_unused(), char **argv pg_attribute_unused())
 {
-	UT_PLAN(12);
+	UT_PLAN(13);
 
 	UT_RUN(test_a1_verified_cf_gate_rejects_before_io);
 	UT_RUN(test_a1_acquire_fresh_rmw_exact_order_and_distinct_postread);
@@ -874,6 +885,7 @@ main(int argc pg_attribute_unused(), char **argv pg_attribute_unused())
 	UT_RUN(test_a1_w3_publish_stopped_uses_verified_cf_rmw);
 	UT_RUN(test_a1_w3_publish_stopped_is_idempotent);
 	UT_RUN(test_a1_w3_publish_stopped_cf_failure_preserves_active);
+	UT_RUN(test_g4_census_gate_red_while_deferred_sites_linked);
 
 	UT_DONE();
 	return ut_failed_count != 0 ? 1 : 0;

@@ -2503,3 +2503,52 @@ canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X
 2. ACK COMPLETE 消费接线（coordinator 侧 R4 驱动）；
 3. activate + bit22 门 + census 集成；
 4. deferred 站点关闭（B4 SCN 决策 → B5/B6/hw_remaster 调度设计）。
+
+---
+
+## 增量 24：G3 step 2-3 实施记录 —— activate proof + stage 绑定 + census 运行时门（2026-08-18，实施随 补记 28）
+
+### 决策（实现时定稿）
+
+1. **activate authority 签名携带 round**：`cluster_control_root_activate_authority_current_v1`
+   增加 `const ClusterControlRootMigrationRoundV1 *round` 参数（private seam + 公开
+   `cluster_control_root_activate_prepared` 同步加参）。理由：activate proof 需要
+   round 身份字段做 ACK 绑定（epoch/generation/成员位图/bitmaps/digest），token+sha
+   无法还原这些字段；fail-closed 语义要求 round 精确副本。
+2. **ACK accessor 增加 minimum_stage**：`cluster_semantic_activation_ack_complete_matches`
+   增加 `ClusterSemanticActivationAckStage minimum_stage`。create proof 传 SAMPLE
+   （SAMPLE-round COMPLETE 即可落地 PREPARED）；activate proof 传 PREPARED
+   （W6 条款 3：只有 PREPARED 阶段全成员 ACK 才是开 bit22 的 CLOSED 绑定）。
+   非法 min_stage（< SAMPLE 或 > OPEN_APPLIED）fail-closed。
+3. **census 运行时门**（补记 28 硬性要求："把该门做成运行时调用而非仅文档承诺"）：
+   - `cluster_wal_state.c` 新增静态表 `cluster_wal_state_census_deferred_sites[]`
+     （当前 4 个 deferred 站点 basename），运行时函数
+     `cluster_wal_state_correctness_census_ok()` = 表首项为 NULL 才 GREEN。
+   - activate authority proof 调用它并 fail-closed；deferred 站点关闭（G1b step 4）
+     时同 commit 从 C 表和脚本 DEFERRED 双删。
+   - 脚本 `check-wal-state-correctness-census.sh` 增加 lockstep 交叉校验：C 表
+     basename 集合 == 脚本 DEFERRED basename 集合，漂移即 VIOLATION。
+   - 选型理由：presence-based（代码面存在即 RED）而非 liveness-based（进程注册
+     会因 bgworker 未拉起而 fail-open），与静态 census 语义一致；单测在
+     test_cluster_wal_state_rmw 断言当前 RED（G1b step 4 关闭最后一个站点时同
+     commit 翻转 GREEN 断言）。
+4. **activate proof 四重 fail-closed**：非协调者 fail-fast（ACK/census 零读取）/
+   ACK 未 COMPLETE 或 stage < PREPARED / round target 缺 bit22 或含未知位 /
+   census RED。
+
+### 单测覆盖（补记 27/28 边界要求）
+
+- recovery_duty `test_activate_authority_requires_complete_ack_round_census`：
+  census RED 拒（ACK 零读取）、PREPARED stage 断言、ACK 不 COMPLETE 拒、
+  非协调者 fail-fast、bit22 缺失拒、未知位拒、NULL round/sha 拒。
+- r4_activation_fsm `test_g3_ack_complete_matches_round_binding` 扩展：stage
+  PREPARED 满足 SAMPLE/PREPARED 两种 min；SAMPLE stage 下 min=PREPARED 拒；
+  min_stage 非法拒。
+- wal_state_rmw `test_g4_census_gate_red_while_deferred_sites_linked`：真实表 RED。
+- control_root 既有 activate_prepared 全链（stub 授权）同步新签名。
+
+### 验收
+
+- 单测：recovery_duty 25/25、r4_activation_fsm 174/174（g3 用例内扩展，未新增函数）、wal_state_rmw 13/13、
+  control_root 26/26；t243 33/33。
+- 静态：census strict 仍 RED（5 violation，按设计）+ lockstep 校验绿。

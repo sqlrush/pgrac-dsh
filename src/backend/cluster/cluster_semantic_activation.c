@@ -843,12 +843,16 @@ cluster_semantic_activation_ack_handler(
 /*
  * cluster_semantic_activation_ack_complete_matches -- RF-ROOT P7 G3: the R4
  * cutover coordinator proof.  True iff the ACK table is COMPLETE (every
- * expected member observed == expected) AND the table is bound to the exact
- * round identity passed by the caller (transition epoch, prepare generation,
- * member set, source/target feature bitmaps, capability sample digest).
- * The round binding prevents a stale table from a previous attempt from
- * authorizing a new round; the COMPLETE check is the all-member-ACK fact the
- * bit22 cutover requires (STOP-01 §17.7 W6 clause 3 binding).
+ * expected member observed == expected) AND bound to the exact round
+ * identity passed by the caller (transition epoch, prepare generation,
+ * member set, source/target feature bitmaps, capability sample digest) AND
+ * standing at (or beyond) minimum_stage.  The round binding prevents a
+ * stale table from a previous attempt from authorizing a new round; the
+ * COMPLETE check is the all-member-ACK fact the bit22 cutover requires
+ * (STOP-01 §17.7 W6 clause 3 binding).  minimum_stage distinguishes the
+ * create proof (SAMPLE-round COMPLETE suffices to land PREPARED) from the
+ * activate proof (only the PREPARED-stage all-member ACK is the CLOSED
+ * binding that opens bit22).
  */
 static bool semantic_activation_ack_table_snapshot(
 	ClusterSemanticActivationAckTableV1 *out);
@@ -858,13 +862,19 @@ cluster_semantic_activation_ack_complete_matches(
 	uint64 transition_epoch, uint64 record_generation,
 	uint64 expected_members_lo, uint64 expected_members_hi,
 	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
-	uint64 capability_sample_digest)
+	uint64 capability_sample_digest,
+	ClusterSemanticActivationAckStage minimum_stage)
 {
 	ClusterSemanticActivationAckTableV1 current;
 
+	if (minimum_stage < CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE
+		|| minimum_stage > CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED)
+		return false;
 	if (!semantic_activation_ack_table_snapshot(&current))
 		return false;
 	if ((current.flags & CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE) == 0)
+		return false;
+	if (current.stage < minimum_stage)
 		return false;
 	return current.transition_epoch == transition_epoch
 		&& current.record_generation == record_generation

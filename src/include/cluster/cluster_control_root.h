@@ -446,7 +446,9 @@ extern ClusterControlRootResult cluster_control_root_create_prepared(
 	ClusterControlRootFileToken *out_token);
 extern ClusterControlRootResult cluster_control_root_activate_prepared(
 	const ClusterControlRootFileToken *expected_token,
-	const uint8 expected_round_sha256[32], ClusterControlRootFileToken *out_token);
+	const uint8 expected_round_sha256[32],
+	const ClusterControlRootMigrationRoundV1 *round,
+	ClusterControlRootFileToken *out_token);
 extern ClusterControlRootResult cluster_control_root_discard_inactive(
 	const ClusterControlRootFileToken *expected_token,
 	const uint8 expected_round_sha256[32]);

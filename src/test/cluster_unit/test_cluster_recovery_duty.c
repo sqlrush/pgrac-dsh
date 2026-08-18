@@ -10,6 +10,7 @@
 #include <stdlib.h>
 
 #include "cluster/cluster_recovery_duty.h"
+#include "cluster/cluster_semantic_activation.h" /* ACK stage enum (G3) */
 #include "cluster/cluster_wal_thread.h"
 #include "common/cryptohash.h"
 #include "common/sha2.h"
@@ -448,18 +449,21 @@ cluster_reconfig_is_clean_departed(int32 node_id pg_attribute_unused())
 
 /* RF-ROOT P7 G3: the R4 cutover coordinator proof's ACK-complete read.
  * The fixture controls the verdict + records the round identity the proof
- * presented. */
+ * presented and the minimum stage demanded. */
 static bool ut_ack_complete_ok = false;
 static int ut_ack_complete_calls = 0;
+static uint32 ut_ack_min_stage = 0;
 
 bool
 cluster_semantic_activation_ack_complete_matches(
 	uint64 transition_epoch, uint64 record_generation,
 	uint64 expected_members_lo, uint64 expected_members_hi,
 	uint64 source_feature_bitmap, uint64 target_feature_bitmap,
-	uint64 capability_sample_digest)
+	uint64 capability_sample_digest,
+	ClusterSemanticActivationAckStage minimum_stage)
 {
 	ut_ack_complete_calls++;
+	ut_ack_min_stage = (uint32) minimum_stage;
 	(void) transition_epoch;
 	(void) record_generation;
 	(void) expected_members_lo;
@@ -468,6 +472,16 @@ cluster_semantic_activation_ack_complete_matches(
 	(void) target_feature_bitmap;
 	(void) capability_sample_digest;
 	return ut_ack_complete_ok;
+}
+
+/* RF-ROOT P7 G4: the runtime census gate stub.  The activate proof fails
+ * closed while the census is RED (deferred correctness sites still linked). */
+static bool ut_census_ok = false;
+
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return ut_census_ok;
 }
 
 /* Stateless pure predicate; replicate the production whitelist so the
@@ -595,6 +609,14 @@ UT_TEST(test_create_authority_requires_complete_ack_round)
 	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
 	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
 
+	/* The create proof demands only the SAMPLE-stage COMPLETE round. */
+	ut_ack_complete_ok = true;
+	ut_ack_min_stage = 0;
+	UT_ASSERT(cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ((int)ut_ack_min_stage,
+				 (int)CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE);
+	ut_ack_complete_ok = false;
+
 	/* Non-coordinator -> refused BEFORE any ACK read (fail-fast). */
 	cluster_node_id = 1;
 	ut_ack_complete_ok = true;
@@ -622,6 +644,97 @@ UT_TEST(test_create_authority_requires_complete_ack_round)
 	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
 	round.target_feature_bitmap =
 		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+}
+
+UT_TEST(test_activate_authority_requires_complete_ack_round_census)
+{
+	/* RF-ROOT P7 G3 (DSH review note 28: the bit22 OPEN gate needs the
+	 * census strict gate as a runtime call): the activate proof demands
+	 * coordinator identity, the PREPARED-stage all-member COMPLETE ACK
+	 * bound to the round (W6 clause 3 CLOSED binding), bit22 in the target,
+	 * and a GREEN runtime census.  Fail-closed on each. */
+	ClusterControlRootFileToken token;
+	ClusterControlRootMigrationRoundV1 round;
+	uint8 sha[32];
+
+	memset(&token, 0, sizeof(token));
+	memset(&round, 0, sizeof(round));
+	memcpy(round.magic, "PCRM", 4);
+	round.version = 1;
+	round.bytes = sizeof(round);
+	round.prepare_generation = 7;
+	round.transition_epoch = 3;
+	round.source_feature_bitmap = UINT64_C(1);
+	round.target_feature_bitmap =
+		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	round.admitted_bitmap_low = UINT64_C(0x03);
+	round.admitted_bitmap_high = 0;
+	round.capability_sample_digest = UINT64_C(0xabcd);
+	round.coordinator_node_id = 0;
+	round.coordinator_incarnation = 99;
+	cluster_node_id = 0;
+	memset(sha, 0x11, sizeof(sha));
+
+	/* Census RED -> refused (补记 28: runtime call, fail-closed). */
+	ut_census_ok = false;
+	ut_ack_complete_ok = true;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
+
+	/* Census GREEN + ACK COMPLETE + bit22 target -> granted, and the
+	 * activate proof demands the PREPARED stage (W6 clause 3). */
+	ut_census_ok = true;
+	ut_ack_min_stage = 0;
+	UT_ASSERT(cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ((int)ut_ack_min_stage,
+				 (int)CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+
+	/* ACK not COMPLETE -> refused. */
+	ut_ack_complete_ok = false;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	ut_ack_complete_ok = true;
+
+	/* Non-coordinator -> refused BEFORE any ACK/census read (fail-fast). */
+	cluster_node_id = 1;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
+	cluster_node_id = 0;
+
+	/* Target WITHOUT bit22 -> refused (the bit22 cutover carrier). */
+	round.target_feature_bitmap = UINT64_C(1);
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	round.target_feature_bitmap =
+		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+
+	/* Target with an UNKNOWN feature bit -> refused (whitelist gate). */
+	round.target_feature_bitmap = (UINT64_C(1) << 20)
+		| PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	round.target_feature_bitmap =
+		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
+
+	/* NULL round / NULL sha -> refused before any read. */
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, sha, NULL));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
+	UT_ASSERT(!cluster_control_root_activate_authority_current_v1(
+		&token, NULL, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
 }
 
 UT_TEST(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas)
@@ -1176,7 +1289,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(24);
+	UT_PLAN(25);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -1190,6 +1303,7 @@ main(void)
 	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
 	UT_RUN(test_fpw_sticky_publishes_canonical_flag);
 	UT_RUN(test_create_authority_requires_complete_ack_round);
+	UT_RUN(test_activate_authority_requires_complete_ack_round_census);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
 	UT_RUN(test_owner_rejoin_rejects_open_stale_owner_frozen);
 	UT_RUN(test_clean_close_retry_transient_refusal_then_success);

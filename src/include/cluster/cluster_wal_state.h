@@ -544,6 +544,13 @@ extern ClusterWalSlotVerdict cluster_wal_state_read_slot(uint16 thread_id,
 extern bool cluster_wal_state_registry_ready(void);
 extern uint64 cluster_wal_state_refresh_fail_count(void);
 
+/* RF-ROOT P7 G4: the runtime wal-state correctness census gate (bit22 open
+ * enforcement).  False while any known-deferred correctness reader/writer
+ * site is still linked (mirror of scripts/ci/check-wal-state-correctness-
+ * census.sh strict mode; the activate authority proof calls this and fails
+ * closed). */
+extern bool cluster_wal_state_correctness_census_ok(void);
+
 #endif /* !FRONTEND */
 
 #endif /* CLUSTER_WAL_STATE_H */

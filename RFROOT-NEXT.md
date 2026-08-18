@@ -128,6 +128,16 @@
       24/24、r4_activation_fsm 174/174、t243 33/33。**待 DSH 复审**；通过后
       按增量 23 步骤 2-3 接 ACK 消费（coordinator R4 驱动）+ activate/bit22
       门 + census strict 集成。
+- [x] **【P7 G3 step 2-3 已提交】**（2026-08-18 13:4x，见下）：activate
+      authority proof（bit22 OPEN 门）——seam + `cluster_control_root_activate_prepared`
+      签名携带 round；ACK accessor 增加 minimum_stage（create=SAMPLE /
+      activate=PREPARED，W6 条款 3 CLOSED 绑定）；census 运行时门
+      `cluster_wal_state_correctness_census_ok`（静态 deferred 表，
+      补记 28 硬性要求），脚本加 lockstep 交叉校验。证据：recovery_duty 25/25、
+      r4_activation_fsm 174/174、wal_state_rmw 13/13、control_root 26/26、
+      t243 33/33；census strict 仍 RED（5 deferred violation，按设计）。
+      **待 DSH 复审**；剩余：coordinator R4 驱动接线（utility mailbox
+      cutover）+ census strict 转 GREEN（deferred 站点关闭，G1b step 4）。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）

@@ -805,6 +805,33 @@ cluster_wal_state_refresh_fail_count(void)
 	return cluster_wal_thread_refresh_fail_read();
 }
 
+/*
+ * RF-ROOT P7 G4 (bit22 open gate; 补记 28): the runtime census.  The static
+ * CI census (scripts/ci/check-wal-state-correctness-census.sh, strict mode)
+ * counts every production correctness reader/writer call site of the
+ * wal-state registry; this table is its runtime mirror — every known-deferred
+ * correctness site that still exists in the binary is listed here.  The
+ * activate proof (cluster_control_root_activate_authority_current_v1) calls
+ * cluster_wal_state_correctness_census_ok() and fails closed while the table
+ * is non-empty: bit22 must NOT open until each deferred site is migrated to
+ * the canonical control root (G1b step 4), at which point the entry is
+ * removed from BOTH this table and the script's DEFERRED list in the same
+ * commit (the script cross-checks the two lists stay in lockstep).
+ */
+static const char *const cluster_wal_state_census_deferred_sites[] = {
+	"cluster_hw_remaster.c",
+	"cluster_thread_recovery_orchestrator.c",
+	"cluster_recovery_worker.c",
+	"cluster_recovery_plan.c",
+	NULL
+};
+
+bool
+cluster_wal_state_correctness_census_ok(void)
+{
+	return cluster_wal_state_census_deferred_sites[0] == NULL;
+}
+
 #else /* !USE_PGRAC_CLUSTER */
 
 /* Disable-cluster build: this file compiles to nothing. */

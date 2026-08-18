@@ -1983,37 +1983,60 @@ UT_TEST(test_g3_ack_complete_matches_round_binding)
 	table->source_feature_bitmap = UINT64_C(1);
 	table->target_feature_bitmap = UINT64_C(1) | bit22;
 	table->capability_sample_digest = UINT64_C(0xabcd);
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
 
+	/* COMPLETE + round binding at PREPARED satisfies any minimum stage up
+	 * to PREPARED (create proof: SAMPLE; activate proof: PREPARED). */
 	UT_ASSERT(cluster_semantic_activation_ack_complete_matches(
 		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
+	UT_ASSERT(cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED));
+
+	/* Stage below the demanded minimum -> false (W6 clause 3: the activate
+	 * proof needs the PREPARED-stage all-member ACK, the CLOSED binding). */
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE;
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED));
+	/* ...but the create proof's SAMPLE minimum still holds at SAMPLE. */
+	UT_ASSERT(cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED;
+
+	/* Invalid minimum stage -> false (fail-closed). */
+	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
+		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_INVALID));
 
 	/* Not COMPLETE -> false. */
 	table->flags = 0;
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
 
 	/* Round binding: wrong epoch / generation / members / digest -> false. */
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		4, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		3, 8, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		3, 7, UINT64_C(0x07), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xdcba)));
+		UINT64_C(0xdcba), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 
 	/* observed != expected -> false (a member has not ACKed). */
 	table->observed_members_lo = UINT64_C(0x0e);
 	UT_ASSERT(!cluster_semantic_activation_ack_complete_matches(
 		3, 7, UINT64_C(0x0f), 0, UINT64_C(1), UINT64_C(1) | bit22,
-		UINT64_C(0xabcd)));
+		UINT64_C(0xabcd), CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE));
 	test_gate_reset();
 }
 

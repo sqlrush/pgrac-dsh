@@ -257,7 +257,8 @@ cluster_control_root_create_authority_current_v1(
 bool
 cluster_control_root_activate_authority_current_v1(
 	const ClusterControlRootFileToken *expected_token pg_attribute_unused(),
-	const uint8 expected_round_sha256[32] pg_attribute_unused())
+	const uint8 expected_round_sha256[32] pg_attribute_unused(),
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused())
 {
 	return test_activate_authorized;
 }
@@ -781,7 +782,7 @@ fixture_root_main(int argc, char **argv)
 		return 1;
 	}
 	round_sha256(&round, round_sha);
-	if (cluster_control_root_activate_prepared(&prepared, round_sha, &active)
+	if (cluster_control_root_activate_prepared(&prepared, round_sha, &round, &active)
 		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		|| active.activation_state != CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE) {
 		fprintf(stderr, "control-root activation verification failed\n");
@@ -1022,7 +1023,7 @@ fixture_cast_main(int argc, char **argv)
 		return 1;
 	}
 	round_sha256(&round, round_sha);
-	if (cluster_control_root_activate_prepared(&prepared, round_sha, &active)
+	if (cluster_control_root_activate_prepared(&prepared, round_sha, &round, &active)
 		!= CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		|| active.activation_state != CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE) {
 		fprintf(stderr, "control-root cast activation failed\n");
@@ -1325,12 +1326,12 @@ UT_TEST(test_activate_and_stale_token)
 	wipe_root_files();
 	UT_ASSERT_EQ(create_prepared(&image, &round, &prepared), CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	round_sha256(&round, round_sha);
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &active),
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &round, &active),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	UT_ASSERT_EQ(active.activation_state, CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE);
 	UT_ASSERT_EQ(active.file_txn_seq, 2);
 	memset(&stale_out, 0xee, sizeof(stale_out));
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &stale_out),
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &round, &stale_out),
 				 CLUSTER_CONTROL_ROOT_STALE_TOKEN);
 	UT_ASSERT_EQ(stale_out.file_txn_seq, 0);
 }
@@ -1364,7 +1365,7 @@ UT_TEST(test_unbound_cutover_mutators_fail_before_cf_and_preserve_prepared_root)
 	memset(&active, 0xee, sizeof(active));
 	test_activate_authorized = false;
 	UT_ASSERT_EQ(cluster_control_root_activate_prepared(
-				 &prepared, round_sha, &active),
+				 &prepared, round_sha, &round, &active),
 				 CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
 	UT_ASSERT_EQ(test_cf_lock_calls, lock_calls_before);
 	UT_ASSERT_EQ(test_durable_rename_calls, rename_calls_before);
@@ -1373,7 +1374,7 @@ UT_TEST(test_unbound_cutover_mutators_fail_before_cf_and_preserve_prepared_root)
 	/* The refused attempt cannot consume or mutate the PREPARED image. */
 	test_activate_authorized = true;
 	UT_ASSERT_EQ(cluster_control_root_activate_prepared(
-				 &prepared, round_sha, &active),
+				 &prepared, round_sha, &round, &active),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	UT_ASSERT_EQ(active.activation_state, CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE);
 	UT_ASSERT_EQ(active.file_txn_seq, prepared.file_txn_seq + 1);
@@ -1421,7 +1422,7 @@ UT_TEST(test_activation_rejects_changed_source_wal_bytes)
 	close(fd);
 	round_sha256(&round, round_sha);
 	memset(&active, 0xee, sizeof(active));
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &active),
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &round, &active),
 				 CLUSTER_CONTROL_ROOT_HASH_MISMATCH);
 	UT_ASSERT_EQ(active.file_txn_seq, 0);
 	build_source_wal_state();
@@ -1446,7 +1447,7 @@ UT_TEST(test_activation_rejects_same_node_thread_claim_drift)
 	write_all_or_abort(path, &claim, sizeof(claim));
 	round_sha256(&round, round_sha);
 	memset(&active, 0xee, sizeof(active));
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &active),
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha, &round, &active),
 				 CLUSTER_CONTROL_ROOT_HASH_MISMATCH);
 	UT_ASSERT_EQ(active.file_txn_seq, 0);
 	build_source_wal_state();

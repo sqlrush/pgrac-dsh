@@ -1379,6 +1379,7 @@ cluster_control_root_create_prepared(const ClusterControlRootMigrationImage *ima
 ClusterControlRootResult
 cluster_control_root_activate_prepared(const ClusterControlRootFileToken *expected_token,
 									   const uint8 expected_round_sha256[32],
+									   const ClusterControlRootMigrationRoundV1 *round,
 									   ClusterControlRootFileToken *out_token)
 {
 	ControlRootImage *primary;
@@ -1391,7 +1392,7 @@ cluster_control_root_activate_prepared(const ClusterControlRootFileToken *expect
 
 	if (out_token != NULL)
 		memset(out_token, 0, sizeof(*out_token));
-	if (expected_token == NULL || expected_round_sha256 == NULL
+	if (expected_token == NULL || expected_round_sha256 == NULL || round == NULL
 		|| expected_token->file_txn_seq == 0
 		|| expected_token->activation_state != CLUSTER_CONTROL_ROOT_ACTIVATION_PREPARED
 		|| expected_token->format_version != CONTROL_ROOT_FORMAT_VERSION
@@ -1399,9 +1400,10 @@ cluster_control_root_activate_prepared(const ClusterControlRootFileToken *expect
 		|| bytes_are_zero(expected_round_sha256, PG_SHA256_DIGEST_LENGTH))
 		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
 	/* The PREPARED token and round hash establish freshness only.  Activation
-	 * also requires the cutover owner's separately bound authority. */
+	 * also requires the cutover owner's separately bound authority (the round
+	 * carries the coordinator identity + ACK-binding fields for the proof). */
 	if (!cluster_control_root_activate_authority_current_v1(
-			expected_token, expected_round_sha256))
+			expected_token, expected_round_sha256, round))
 		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
 	result = storage_contract_check(NULL, true);
 	if (result != CLUSTER_CONTROL_ROOT_OK_PRIMARY)

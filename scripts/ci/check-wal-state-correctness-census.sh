@@ -127,5 +127,28 @@ if [ "$violations" -gt 0 ]; then
 	echo "wal-state correctness census: $violations violation(s) — bit22 must NOT open."
 	exit 1
 fi
+
+# Lockstep check: the runtime mirror table in cluster_wal_state.c
+# (cluster_wal_state_correctness_census_ok) must list EXACTLY the same
+# deferred sites as this script's DEFERRED list.  Closing a deferred site
+# removes it from both in the same commit; a mismatch means the runtime gate
+# and the static census disagree about whether bit22 may open.
+CENSUS_TABLE='src/backend/cluster/cluster_wal_state.c'
+if [ -f "$CENSUS_TABLE" ]; then
+	table_sites=$(sed -n '/cluster_wal_state_census_deferred_sites\[\]/,/^};/p' "$CENSUS_TABLE" \
+		| grep -oE '"[a-z_./]+\.c"' | tr -d '"' || true)
+	# The script's DEFERRED entries carry src/... paths; the runtime table
+	# uses basenames — compare normalized basenames.
+	script_sites=$(printf '%s\n' "${DEFERRED[@]}" | sed 's#^.*/##' | grep -v '^$' || true)
+	table_diff=$(comm -3 <(printf '%s\n' $table_sites | sort) \
+		<(printf '%s\n' "$script_sites" | sort))
+	if [ -n "$table_diff" ]; then
+		echo "VIOLATION (lockstep drift between the runtime census table and the script DEFERRED list):"
+		printf '%s\n' "$table_diff" | sed 's/^/  /'
+		echo "bit22 must NOT open."
+		exit 1
+	fi
+fi
+
 echo "wal-state correctness census: clean (all registry call sites are telemetry)."
 exit 0
