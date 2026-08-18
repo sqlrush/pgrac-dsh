@@ -1086,3 +1086,13 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
    t243 确认 PANIC 是否复现：复现 → G1a 时序照出的 P5 遗留；不复现 →
    ④ 的 grd pin 前移改变了 fence 刷新时序，④ 方案需重排 pin 点。
 4. 顺序：复现归因 → 增量文档 → 修复 → t243 33/33 + regress 13/13。
+
+---
+
+## 复审补记 40（2026-08-18 16:35，anchor 预检跳过修复复审：通过）
+
+- 711802129d：实现 = 补记 39 处方（预检 write_fence_allowed → LOG
+  跳过 return；stale-member PANIC 保留）；冻结 P5 注释意图兑现；
+  测试计数同步完毕。DSH 独立复跑 anchor 单测 12/12。
+- 待办：t243 33/33 + regress 13/13 复跑（会话尚未起跑批）；
+  ④ 重开（pin 前移已无 PANIC 路障）。
