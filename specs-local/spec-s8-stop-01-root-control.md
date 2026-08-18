@@ -2381,3 +2381,41 @@ THREAD_CLEAN_CLOSE 有界重试（重绑 leaver serving authority + 50ms 退避 
 实施：579fdde166（retry wrapper + checkpointer 接线 + owner_rejoin_v1 恢复
 冻结 OPEN 门 + 增量 21 补写/LOG/特例全删 + 单测 22/22）。验收：t243 33/33
 bail=0 + L5/L6/L10 "clean-closed by owner" ×3 + 无补写路径 + regress 13/13。
+
+---
+
+## 增量 22 补记 4：G1b 锁序设计分析（2026-08-18，按 site 上下文分阶段）
+
+### 原则（STOP-05 §5.4 锁序纪律面，DSH 补记 24）
+
+canonical STRONG 读需要 CF(S)（0xF1 同资源）；recovery-episode 的 CF(X)
+持锁与其互斥。按 site 的执行上下文分类：
+
+| Site | 执行上下文 | CF(S) 可行性 | 迁移策略 |
+|---|---|---|---|
+| recovery_merge :990-1002/:1624-1626（engage gate / merge_begin） | startup 进程（冷恢复）| **可行**：StartupProcess 是冻结 CF(S) 执行者（AD-023 §4 恢复 allowlist）| 可直接迁（G1b-A）|
+| orchestrator :582-593（online 窗口） | 协调者 LMON（serving 期）| **可行**：serving 准入（与 commit 时点 THREAD_OPEN 同面）| 可直接迁（G1b-B）|
+| recovery_worker :192-194/:247-254 + recovery_plan :203-222（verdict） | thread-recovery worker（episode 内）| **需验证**：worker 若在 episode CF(X) 窗口内跑 → LOCK_UNAVAILABLE（hw_remaster 同型）| 先落探针取证，再定（G1b-C）|
+| hw_remaster :477-485 | hw-remaster bgworker（episode 内）| **不可行**（已实测 16× LOCK_UNAVAILABLE）| 保留 registry 读 + 显式降级登记（现状）|
+
+### G1b-A/B 语义映射（registry → canonical root 字段）
+
+- checkpoint_redo_lsn（合并起点 Q5）→ root.checkpoint_lower_lsn（G1a 后
+  每 checkpoint 刷新；起点更早 = 重放更多，绝不跳已提交 WAL，安全）；
+- fpw_was_off（53RA3 门）→ root.FLAG_FPW_WAS_OFF（需先接 FPW_STICKY
+  root 发布——现状无生产调用者，与 G1a 同型的新增接线，列为 G1a-2）；
+- highest_lsn（validated_min）→ root.validated_tail_lsn_exclusive（G1a
+  后随 checkpoint 推进；validated 语义强于 written，fail-closed 更严）；
+- highest_scn（plan verdict 新鲜度）→ root 无 SCN 值字段（仅 bit21
+  conservative 面）——recovery_plan 的 SCN 维度需保留 registry 读
+  （telemetry 化登记）或等 CONSERVATIVE_BOUND 接线（列为独立增量）。
+
+### 实施顺序（DSH 复审路线 1 后）
+
+1. G1b-A（recovery_merge 两处，startup 上下文）：迁移 + 聚焦单测
+   （merge engage gate 的 root 读注入）+ t243 L4/L5 复验；
+2. G1a-2（FPW_STICKY root 发布接线，checkpointer 同型）；
+3. G1b-B（orchestrator 窗口）：迁移 + t243 L4 online 腿复验；
+4. G1b-C（worker/plan）：先探针取证 episode 窗口 CF(S) 可行性，可行则迁，
+   不可行则按 hw_remaster 模式显式降级登记；
+5. G4 census 脚本（G1b 完成后归零）+ G3/G5（R4 接线 + bit22 ACK 门）。
