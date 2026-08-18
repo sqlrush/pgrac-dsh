@@ -834,3 +834,19 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
 - 提醒：G3/G5 实施时，ACK 表消费路径（semantic_activation.c:1202-1226）
   目前"COMPLETE 无人消费"——cutover 驱动是第一个生产消费者，单测要覆盖
   observed==expected 的边界（含成员缺失 ACK 的 fail-closed）。
+
+---
+
+## 复审补记 28（2026-08-18 13:05，G3 step 1 复审：通过）
+
+- c448a57602（R4 cutover create-authority coordinator proof）：四重
+  fail-closed 全部在码——非协调者 fail-fast、ACK COMPLETE 表与 round
+  身份精确绑定（epoch/generation/bitmaps/digest + COMPLETE flag 检查）、
+  未知 feature bit 白名单拒绝、target 缺 bit22 拒绝。DSH 逐项核过 ✓。
+- 单测（补记 27 要求的边界覆盖）：DSH 独立复跑 recovery_duty 24/24、
+  r4_activation_fsm 174/174——含 non-coordinator / incomplete ACK /
+  bit22-missing / unknown-bit / grant 全门 + round-identity 绑定。
+- 提醒（step 2 必须项）：本步不打开 bit22，无风险；后续 activate_prepared
+  （真正开 bit22）必须接入 census strict 强制门（scripts/ci/
+  check-wal-state-correctness-census.sh，当前 5 violation 必须为 0 才可
+  activate），并把该门做成运行时调用而非仅文档承诺。
