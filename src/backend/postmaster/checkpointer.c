@@ -666,9 +666,16 @@ HandleCheckpointerInterrupts(void)
 		 * next boot's THREAD_OPEN on the death-driven CF shard freeze, so
 		 * on a failed handoff the root stays OPEN and the restart takes
 		 * the ordinary crash-rejoin chain (fail-closed, 8.B).
+		 *
+		 * RF-ROOT P7 路线 1 (user adjudication 2026-08-18, DSH review note
+		 * 21): a transient S1 serving-stale refusal is retried with a
+		 * bounded window (re-bind the leaver serving authority, 5s
+		 * deadline, 50ms backoff) so the owner reliably lands CLOSED —
+		 * never blocking the shutdown, and never requiring a coordinator-
+		 * side repair.
 		 */
 		if (clean_handoff_ok)
-			(void)cluster_control_root_thread_clean_close_publish();
+			(void)cluster_control_root_thread_clean_close_publish_retry();
 		else
 			ereport(LOG,
 					(errmsg("cluster clean-leave: shutdown handoff failed; "

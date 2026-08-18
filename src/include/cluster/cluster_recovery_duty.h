@@ -133,6 +133,7 @@ extern ClusterRecoveryOwnerImportResult cluster_recovery_owner_import_read_v1(
 extern bool cluster_recovery_owner_rejoin_v1(int32 node_id,
 									 uint64 admitted_incarnation);
 extern bool cluster_control_root_thread_clean_close_publish(void); /* RF-ROOT P6 */
+extern bool cluster_control_root_thread_clean_close_publish_retry(void); /* RF-ROOT P7 路线 1 */
 extern bool cluster_control_root_thread_open_publish(
 	uint64 boot_incarnation); /* RF-ROOT P6 */
 extern bool cluster_control_root_checkpoint_advance_publish(

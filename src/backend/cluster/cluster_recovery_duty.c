@@ -15,10 +15,20 @@
 #include "cluster/cluster_reconfig.h"
 #include "cluster/cluster_recovery_duty.h"
 #include "cluster_control_root_private.h"
+#include "cluster/cluster_startup_phase.h" /* serving rebind (路线 1 retry) */
 #include "cluster/cluster_wal_thread.h"
 #include "common/cryptohash.h"
 #include "common/sha2.h"
 #include "portability/instr_time.h"
+#include "storage/latch.h"
+#include "miscadmin.h" /* MyLatch / CHECK_FOR_INTERRUPTS */
+#include "utils/timestamp.h"
+#include "utils/wait_event.h" /* WAIT_EVENT_CHECKPOINTER_MAIN */
+
+/* RF-ROOT P7 路线 1: bounded THREAD_CLEAN_CLOSE retry window (never block
+ * the clean shutdown beyond this; the 5.13 drain already bounds the
+ * handoff side). */
+#define CLUSTER_CLEAN_CLOSE_RETRY_MS 5000
 
 typedef struct ClusterControlRootPublishAuthorityV1 {
 	bool active;
@@ -351,12 +361,15 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 			 * forked only after phase-3, whose barrier waits on this very
 			 * commit — running the reopen later deadlocks. */
 			&& snapshot.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
-		/* specs-local STOP-01 increment 21: OPEN + owner == admitted is the
-		 * already-satisfied state; OPEN + owner < admitted is the missed
-		 * clean-close repair (clean-departed evidence, below).  Only a
-		 * STALE process (owner > admitted) is rejected outright. */
+		/* specs-local STOP-01 increment 21 (removed per user adjudication
+		 * 2026-08-18, 路线 1 / DSH review note 21): the coordinator-side
+		 * missed-clean-close repair violated the publisher frozen contract
+		 * — the OWNER (checkpointer) closes its own thread; the fix is the
+		 * checkpointer's bounded THREAD_CLEAN_CLOSE retry
+		 * (cluster_control_root_thread_clean_close_publish_retry).  OPEN
+		 * under any owner other than admitted stays fail-closed here. */
 		|| (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-			&& identity.origin_owner_incarnation > admitted_incarnation)
+			&& identity.origin_owner_incarnation != admitted_incarnation)
 		/* DSH review note 18: split the non-OPEN reject by lifecycle.  The
 		 * RECOVERY_COMPLETE branch keeps the frozen OWNER_REJOIN stale-owner
 		 * reject (owner >= admitted).  The CLOSED branch must NOT reject on
@@ -379,16 +392,6 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 		identity.thread_claim_created_at);
 	if (immutable_claim.crc != identity.thread_claim_crc32c)
 		return false;
-	/* specs-local STOP-01 increment 21: OPEN under an OLDER owner is the
-	 * missed-clean-close repair ONLY when the durable clean-departed
-	 * evidence exists (the L10 serving-stale variant).  Without it — a
-	 * crash-rejoin commit racing the FSM — fail closed BEFORE any JCMK
-	 * read: the survivor's GRD recovery writes RECOVERY_COMPLETE first,
-	 * and the re-vet then takes the frozen OWNER_REJOIN path. */
-	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-		&& identity.origin_owner_incarnation < admitted_incarnation
-		&& !cluster_reconfig_is_clean_departed(node_id))
-		return false;
 	owner_result = cluster_recovery_owner_import_read_v1(
 		node_id, &immutable_claim, 0, 0, &proven_incarnation);
 	if (owner_result != CLUSTER_RECOVERY_OWNER_IMPORT_JCMK
@@ -400,78 +403,6 @@ cluster_recovery_owner_rejoin_v1(int32 node_id, uint64 admitted_incarnation)
 	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
 		&& identity.origin_owner_incarnation == admitted_incarnation)
 		return true;
-
-	/*
-	 * RF-ROOT P6 (specs-local STOP-01 increment 21):  a CLEAN-DEPARTED node
-	 * whose previous clean stop's THREAD_CLEAN_CLOSE was DENIED in a
-	 * serving-stale window (the shutdown checkpoint's CF(X) failed S1)
-	 * restarts with the root still OPEN under the OLD incarnation — the L10
-	 * serving-stale variant (run-54 wedge).  Neither frozen path covers it:
-	 * THREAD_OPEN only accepts CLOSED, OWNER_REJOIN only RECOVERY_COMPLETE.
-	 * Repair it with the two FROZEN CAS shapes in sequence, executed here
-	 * (commit-time re-vet, serving phase — same executor scope as the
-	 * CLOSED routing, increment 20):
-	 *   CAS1 THREAD_CLEAN_CLOSE (0x39: OPEN -> CLOSED, owner lineage
-	 *        unchanged, checkpoint/tail/progress from the snapshot — the
-	 *        durable shutdown-checkpoint data);
-	 *   CAS2 THREAD_OPEN (0x3b: CLOSED -> OPEN, owner = admitted,
-	 *        lineage+1).
-	 * Non-clean-departed OPEN+owner<admitted (a crash-rejoin commit racing
-	 * the FSM) stays rejected — the FSM writes RECOVERY_COMPLETE first.
-	 */
-	if (snapshot.lifecycle == CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN
-		&& identity.origin_owner_incarnation < admitted_incarnation
-		&& cluster_reconfig_is_clean_departed(node_id)) {
-		ClusterControlRootPatch close_patch;
-
-		memset(&close_patch, 0, sizeof(close_patch));
-		close_patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
-						   | CLUSTER_CONTROL_ROOT_PATCH_CHECKPOINT
-						   | CLUSTER_CONTROL_ROOT_PATCH_TAIL
-						   | CLUSTER_CONTROL_ROOT_PATCH_RECOVERY_PROGRESS;
-		close_patch.expected_lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
-		close_patch.desired.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
-		close_patch.desired.root_flags = snapshot.root_flags;
-		close_patch.desired.checkpoint_tli = snapshot.checkpoint_tli;
-		close_patch.desired.checkpoint_source_kind = snapshot.checkpoint_source_kind;
-		close_patch.desired.checkpoint_lower_lsn = snapshot.checkpoint_lower_lsn;
-		close_patch.desired.checkpoint_record_crc32c =
-			snapshot.checkpoint_record_crc32c;
-		close_patch.desired.tail_tli = snapshot.tail_tli;
-		close_patch.desired.tail_validation_kind = snapshot.tail_validation_kind;
-		close_patch.desired.validated_tail_lsn_exclusive =
-			snapshot.validated_tail_lsn_exclusive;
-		close_patch.desired.tail_last_record_lsn = snapshot.tail_last_record_lsn;
-		close_patch.desired.tail_last_record_crc32c =
-			snapshot.tail_last_record_crc32c;
-		close_patch.desired.recovered_tli = snapshot.recovered_tli;
-		close_patch.desired.recovered_through_lsn_exclusive =
-			snapshot.recovered_through_lsn_exclusive;
-		close_patch.desired.recovered_last_record_lsn =
-			snapshot.recovered_last_record_lsn;
-		close_patch.desired.recovered_last_record_crc32c =
-			snapshot.recovered_last_record_crc32c;
-
-		if (!cluster_control_root_publish_authority_bind_v1(
-				&token, &close_patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE))
-			return false;
-		root_result = cluster_control_root_compare_and_publish(
-			&token, &close_patch, CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_CLEAN_CLOSE,
-			&published, &published_token);
-		cluster_control_root_publish_authority_clear_v1();
-		if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
-			|| published.lifecycle != CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED)
-			return false;
-
-		ereport(LOG,
-				(errmsg("cluster control root: thread %u missed clean-close repaired by "
-						"node %d (THREAD_CLEAN_CLOSE, owner " UINT64_FORMAT " -> CLOSED)",
-						identity.origin_thread_id, node_id,
-						identity.origin_owner_incarnation)));
-		/* CAS2 reuses the CLOSED routing below: snapshot = the published
-		 * CLOSED root (owner lineage unchanged). */
-		snapshot = published;
-	}
 
 	memset(&patch, 0, sizeof(patch));
 	patch.mask = CLUSTER_CONTROL_ROOT_PATCH_LIFECYCLE
@@ -827,6 +758,52 @@ cluster_control_root_checkpoint_advance_publish(XLogRecPtr redo,
 					"(result %d); the next checkpoint will retry",
 					identity.origin_thread_id, (int) root_result)));
 	return false;
+}
+
+/*
+ * cluster_control_root_thread_clean_close_publish_retry -- RF-ROOT P7
+ * 路线 1 (user adjudication 2026-08-18, DSH review note 21).
+ *
+ *	The OWNER (checkpointer, clean-shutdown mainline) publishes its own
+ *	THREAD_CLEAN_CLOSE.  A transient S1 serving-stale refusal (the local
+ *	serving authority went stale inside the shutdown window) is retried
+ *	with a BOUNDED window: re-validate / re-bind the leaver serving
+ *	authority, then retry, 50ms backoff — the shutdown never blocks beyond
+ *	the fixed deadline.  On expiry the root stays OPEN and the restart
+ *	takes the ordinary crash-rejoin chain (fail-closed, no fake
+ *	clean-leave).  This is the frozen-publisher mainline: the checkpointer
+ *	(owner) closes its own thread; no coordinator-side repair (the
+ *	increment-21 two-CAS rewrite was removed per the adjudication).
+ */
+bool
+cluster_control_root_thread_clean_close_publish_retry(void)
+{
+	TimestampTz deadline = TimestampTzPlusMilliseconds(
+		GetCurrentTimestamp(), CLUSTER_CLEAN_CLOSE_RETRY_MS);
+	bool		closed_ok = false;
+
+	for (;;) {
+		closed_ok = cluster_control_root_thread_clean_close_publish();
+		if (closed_ok)
+			break;
+		/* Re-validate / re-bind the leaver serving authority (the LMON-tick
+		 * rebind may not have landed inside this shutdown window) before
+		 * the next attempt. */
+		(void) cluster_authority_serving_rebind_leaver();
+		if (GetCurrentTimestamp() >= deadline)
+			break;
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 50, WAIT_EVENT_CHECKPOINTER_MAIN);
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+	if (!closed_ok)
+		ereport(LOG,
+				(errmsg("cluster control root: THREAD_CLEAN_CLOSE could not be published "
+						"within the bounded shutdown window; the root stays OPEN and the "
+						"restart takes the ordinary crash-rejoin chain (fail-closed)")));
+	return closed_ok;
 }
 
 static bool

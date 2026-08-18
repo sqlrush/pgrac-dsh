@@ -47,6 +47,63 @@ static bool ut_root_publish_mutate_token;
  * (OPEN root under the old owner, clean-departed) from a crash-rejoin
  * commit racing the FSM (stays fail-closed). */
 static bool ut_clean_departed = false;
+/* 路线 1: fail the next compare_and_publish once (transient refusal). */
+static bool ut_publish_fail_once = false;
+
+/* RF-ROOT P7 路线 1: the checkpointer's bounded THREAD_CLEAN_CLOSE retry
+ * stubs — an advancing fake clock, an immediate latch, and a controllable
+ * leaver serving rebind. */
+#include "storage/latch.h"
+static Latch ut_retry_latch;
+Latch *MyLatch = &ut_retry_latch;
+static TimestampTz ut_now_us = 1700000000000000LL;
+static int ut_waitlatch_calls = 0;
+static bool ut_serving_rebind_ok = false;
+
+TimestampTz
+GetCurrentTimestamp(void)
+{
+	return ut_now_us;
+}
+
+TimestampTz
+TimestampTzPlusMilliseconds(TimestampTz t, int64 ms)
+{
+	return t + (TimestampTz) ms * 1000;
+}
+
+int
+WaitLatch(Latch *latch, int wakeEvents, long timeout, uint32 wait_event_info)
+{
+	(void) latch;
+	(void) wakeEvents;
+	(void) timeout;
+	(void) wait_event_info;
+	ut_waitlatch_calls++;
+	/* Advance the fake clock 100ms per backoff so the bounded-retry
+	 * deadline tests complete quickly. */
+	ut_now_us += 100000;
+	return WL_TIMEOUT;
+}
+
+void
+ResetLatch(Latch *latch)
+{
+	(void) latch;
+}
+
+volatile sig_atomic_t InterruptPending = 0;
+
+void
+ProcessInterrupts(void)
+{
+}
+
+bool
+cluster_authority_serving_rebind_leaver(void)
+{
+	return ut_serving_rebind_ok;
+}
 
 ClusterControlRootResult
 cluster_control_root_lookup_owner_by_node_runtime(
@@ -87,6 +144,12 @@ cluster_control_root_compare_and_publish(
 	ClusterControlRootReadToken observed_token = *expected_token;
 
 	ut_root_publish_calls++;
+	/* 路线 1 retry test: fail the NEXT publish attempt once (transient S1
+	 * serving-stale refusal), then behave normally. */
+	if (ut_publish_fail_once) {
+		ut_publish_fail_once = false;
+		return CLUSTER_CONTROL_ROOT_LOCK_UNAVAILABLE;
+	}
 	ut_root_published_patch = *patch;
 	ut_root_published_reason = reason;
 	if (ut_root_publish_mutate_token)
@@ -369,6 +432,7 @@ setup_owner_rejoin(uint64 old_incarnation, uint64 new_incarnation)
 	ut_root_publish_context_authorized = false;
 	ut_root_publish_mutate_token = false;
 	ut_clean_departed = false;
+	ut_publish_fail_once = false;
 	memset(&ut_root_published_patch, 0, sizeof(ut_root_published_patch));
 }
 
@@ -470,41 +534,61 @@ UT_TEST(test_owner_rejoin_publication_context_rejects_token_drift)
 		CLUSTER_CONTROL_ROOT_PUBLISH_OWNER_REJOIN));
 }
 
-UT_TEST(test_owner_rejoin_repairs_missed_clean_close_open_stale_owner)
+UT_TEST(test_owner_rejoin_rejects_open_stale_owner_frozen)
 {
-	/* specs-local STOP-01 increment 21: an OPEN root under the OLD owner
-	 * with durable clean-departed evidence = the L10 serving-stale missed
-	 * clean-close (THREAD_CLEAN_CLOSE was denied, root never became CLOSED).
-	 * The commit-time re-vet repairs it with the two FROZEN CAS shapes:
-	 * THREAD_CLEAN_CLOSE (OPEN -> CLOSED, owner lineage unchanged) then
-	 * THREAD_OPEN (CLOSED -> OPEN, owner = admitted, lineage+1). */
+	/* User adjudication 2026-08-18 (路线 1, DSH review note 21): the
+	 * increment-21 coordinator-side missed-clean-close repair is removed —
+	 * the OWNER (checkpointer) closes its own thread with a bounded retry.
+	 * OPEN under any owner other than admitted stays fail-closed (the
+	 * frozen OWNER_REJOIN shape), clean-departed or not. */
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
 	ut_clean_departed = true;
-	UT_ASSERT(cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
-	UT_ASSERT_EQ(ut_root_publish_calls, 2); /* close CAS + open CAS */
-	UT_ASSERT(ut_root_publish_context_authorized);
-	UT_ASSERT_EQ((int)ut_root_published_reason,
-				 (int)CLUSTER_CONTROL_ROOT_PUBLISH_THREAD_OPEN);
-	UT_ASSERT_EQ(ut_root_published_patch.expected_lifecycle,
-				 CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED);
-	UT_ASSERT_EQ(ut_root_published_patch.desired.lifecycle,
-				 CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN);
-	UT_ASSERT_EQ(
-		ut_root_published_patch.desired.identity.origin_owner_incarnation,
-		UINT64_C(77));
-	UT_ASSERT_EQ(ut_root_published_patch.desired.identity.root_lineage_seq,
-				 ut_root_identity.root_lineage_seq + 1);
+	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
+	UT_ASSERT_EQ(ut_root_publish_calls, 0);
+	UT_ASSERT_EQ(ut_owner_read_calls, 0);
 
-	/* A crash-rejoin commit racing the FSM (OPEN old owner, NOT
-	 * clean-departed) stays fail-closed: zero publishes — the FSM writes
-	 * RECOVERY_COMPLETE first, then the frozen OWNER_REJOIN path. */
 	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
 	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
 	ut_clean_departed = false;
 	UT_ASSERT(!cluster_recovery_owner_rejoin_v1(3, UINT64_C(77)));
 	UT_ASSERT_EQ(ut_root_publish_calls, 0);
 	ut_clean_departed = false;
+}
+
+UT_TEST(test_clean_close_retry_transient_refusal_then_success)
+{
+	/* 路线 1: a transient S1 serving-stale refusal of THREAD_CLEAN_CLOSE
+	 * is retried (with the leaver serving rebind + backoff) until it lands,
+	 * bounded by the 5s deadline. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	ut_publish_fail_once = true;
+	ut_serving_rebind_ok = true;
+	ut_now_us = 1700000000000000LL;
+	ut_waitlatch_calls = 0;
+	UT_ASSERT(cluster_control_root_thread_clean_close_publish_retry());
+	UT_ASSERT_EQ(ut_root_publish_calls, 2); /* refused attempt + retry */
+	UT_ASSERT_EQ(ut_waitlatch_calls, 1);	/* one backoff between attempts */
+	ut_publish_fail_once = false;
+}
+
+UT_TEST(test_clean_close_retry_deadline_gives_up_fail_closed)
+{
+	/* 路线 1: a persistent refusal expires at the bounded deadline — the
+	 * retry gives up, the root stays OPEN and the shutdown proceeds
+	 * (fail-closed).  The fake latch advances the fake clock 100ms per
+	 * wait, so the 5s window is ~50 backoffs. */
+	setup_owner_rejoin(UINT64_C(70), UINT64_C(77));
+	ut_root_snapshot.lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_OPEN;
+	ut_root_publish_result = CLUSTER_CONTROL_ROOT_LOCK_UNAVAILABLE;
+	ut_serving_rebind_ok = true;
+	ut_now_us = 1700000000000000LL;
+	ut_waitlatch_calls = 0;
+	UT_ASSERT(!cluster_control_root_thread_clean_close_publish_retry());
+	UT_ASSERT(ut_root_publish_calls > 1);	/* multiple attempts */
+	UT_ASSERT(ut_waitlatch_calls >= 40);	/* bounded: ~50 backoffs, never unbounded */
+	ut_root_publish_result = CLUSTER_CONTROL_ROOT_OK_PRIMARY;
 }
 
 UT_TEST(test_owner_rejoin_closed_lifecycle_routes_to_thread_open)
@@ -965,7 +1049,7 @@ UT_TEST(test_formation_pending_owner_and_full_outage_fail_closed)
 int
 main(void)
 {
-	UT_PLAN(20);
+	UT_PLAN(22);
 	UT_RUN(test_exact_74_byte_encoding);
 	UT_RUN(test_domain_separated_digest);
 	UT_RUN(test_full_key_compare_has_no_numeric_order);
@@ -978,7 +1062,9 @@ main(void)
 	UT_RUN(test_owner_import_cannot_prove_jcmk_absence_with_unreadable_disk);
 	UT_RUN(test_checkpoint_advance_publishes_canonical_bound);
 	UT_RUN(test_owner_rejoin_requires_jcmk_and_publishes_exact_root_cas);
-	UT_RUN(test_owner_rejoin_repairs_missed_clean_close_open_stale_owner);
+	UT_RUN(test_owner_rejoin_rejects_open_stale_owner_frozen);
+	UT_RUN(test_clean_close_retry_transient_refusal_then_success);
+	UT_RUN(test_clean_close_retry_deadline_gives_up_fail_closed);
 	UT_RUN(test_owner_rejoin_closed_lifecycle_routes_to_thread_open);
 	UT_RUN(test_owner_rejoin_publication_context_rejects_token_drift);
 	UT_RUN(test_owner_rejoin_fails_closed_on_non_jcmk_drift_or_exhaustion);
