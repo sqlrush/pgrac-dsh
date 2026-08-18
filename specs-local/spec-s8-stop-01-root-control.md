@@ -3143,3 +3143,66 @@ t243 的正常流程；生产首次 root mint 前同理）——不能把 ABSENT
    （降级 validated_min=0 无下界？或 hw_remaster 对 ABSENT 跳过/重试？）
 2. t243 是否需要 setup 调整（冻结裁决 RFROOT-P04-A2 范围内）。
 3. 17:04 run 失败归因（P5 回归 or 偶发）——复跑证据。
+
+## 增量 37：④ ABSENT 语义二分设计 —— never-minted vs minted-lost
+## （2026-08-18，补记 42 裁定落地；文档先行，交 DSH 复审后再动码）
+
+### 裁定来源
+
+- 复审补记 42（2026-08-18 17:25）：增量 36 勘误核验通过；17:04 失败结案
+  为环境/构建态波动（17:17 同树复跑 33/33 GREEN，DSH 独立核验）；
+  Q2 裁定 t243 禁止改动（fixture 从未出错，修复全在产品侧）；
+  Q1 裁定 ABSENT 语义二分 + 判别器 + 不持 gate 约束。
+
+### 语义二分（补记 42 Q1 裁定原文）
+
+1. **never-minted（ABSENT-expected）**：root 从未 mint —— registry 无该
+   tid 的发布记录 / producer 未跑 THREAD_OPEN。ABSENT 是**正常期望状态**
+   （t243 cast 前的 clean stop、cluster 生命周期早期、首次 remaster）。
+   → hw_remaster 按无 canonical 数据**降级完成**（= ③ registry 现行
+   行为，实测 17:04 run "2048 adopted shards rebuilt -> done"）；
+   **不得 BLOCKED、不得持 hw_gate**。
+2. **minted-lost（ABSENT-lost）**：root 已 mint 但 STRONG 读失败 ——
+   registry 有发布记录（LSN X）但文件缺。矛盾 = 危险态。
+   → 保持 fail-closed（53RA2 语义）。
+
+### 判别器
+
+- 判别器 = **root registry 发布记录**（生产已存在；即 ③ 现行读取源
+  cluster_wal_state_read_slot 的 slot 记录，highest_lsn != 0 表示该 tid
+  有发布记录）。
+- **pin ABSENT 必须对照 registry 解释，不能单独判 BLOCKED**：
+  - registry 有发布记录（highest_lsn != 0）→ 期望 root 已 mint →
+    ABSENT = minted-lost → fail-closed；
+  - registry 无发布记录（slot 空 / highest_lsn == 0）→ never-minted →
+    ABSENT 正常 → 降级完成。
+- census 处理待 DSH 复审确认：判别器读 registry 是否计入 correctness
+  违规（建议：判别器是"解释 ABSENT 的元数据判读"，非 correctness 读；
+  但 C 表/脚本的 exactly-zero 定义需 DSH 明确边界）。
+
+### 不持 gate 约束（补记 42 硬性条款）
+
+- fail-closed **不得以"永持 hw_gate"形式实现**（16:41 wedge 即此病：
+  永持 gate → CF 全卡 → PCM-X fail-closed → 集群整体锁死）。
+- 危险态（minted-lost）应 **fail-stop / 显式退出**（该 worker 终止、
+  不留永续 gate），由 grd 的正常 fail-stop 路径接管；BLOCKED 仅允许
+  作为**有限重试**的中间态（沿用现有 16 次 backoff 上限），耗尽后
+  显式终止而非无限期 hold。
+
+### 落地顺序（补记 42 待办更新）
+
+1. ✅ 增量 36（勘误已提交 758b713827）
+2. ✅ P5 后复跑：t243 33/33（17:17 绿跑 + 本会话复跑）、cluster_regress
+   13/13（本会话 bash-283，17:2x PASS）——补记 42 记"仍欠 regress"，
+   此处补记：已跑 13/13 绿。
+3. ✅ t243 TEMP note 检查：当前树无残留（grep probe/G1b/TEMP 零命中；
+   补记 36/42 所指为 stash 内改动，stash 已不存在，无残留风险）。
+4. 本增量 37（语义契约文档）→ 交 DSH 复审。
+5. 复审通过后：site-4（hw_remaster.c:487）按二分语义迁移 →
+   census 双处归零 → bit22 首开。
+
+### 验收
+
+- 增量 37 复审通过；
+- site-4 迁移后 t243 33/33 + regress 13/13 + 聚焦单测绿；
+- census GREEN（0 violation，判别器读的 census 边界经 DSH 确认）。
