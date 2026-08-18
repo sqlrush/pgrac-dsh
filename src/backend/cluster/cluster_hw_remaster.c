@@ -473,6 +473,16 @@ cluster_hw_remaster_rebuild_origin(int dead_node_id, uint64 episode_epoch)
 	 * registry durable watermark (a decode that stops below it is mid-stream
 	 * corruption, not a torn tail); validated_end derives the boundary and fails
 	 * closed otherwise (mirrors the spec-4.11 replay_one window contract).
+	 *
+	 * RF-ROOT P7 G1b note (2026-08-18): the canonical control-root tail
+	 * (validated_tail_lsn_exclusive, refreshed per checkpoint by
+	 * CHECKPOINT_ADVANCE) is the frozen migration target, but its STRONG read
+	 * requires CF(S) — which the hw-remaster worker cannot obtain inside the
+	 * L4 crash-rejoin episode window (LOCK_UNAVAILABLE: the survivor's own
+	 * recovery-episode CF(X) hold blocks its S request, observed t243 bail).
+	 * The registry watermark (no CF dependency) stays authoritative here
+	 * until the lock-ordering design lands (specs-local increment 22
+	 * supplement); the registry is telemetry everywhere else.
 	 */
 	if (cluster_wal_state_read_slot(dead_tid, &slot) != CLUSTER_WAL_SLOT_OK
 		|| slot.highest_lsn == 0) {

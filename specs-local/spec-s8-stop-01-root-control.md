@@ -2346,3 +2346,25 @@ head gate 的 non-OPEN 分支按 lifecycle 拆分：RECOVERY_COMPLETE 保持
 - 在线路径"不写 merge_recovered_lsn"断言：随 G2/G3 的 SOURCE_CLOSED
   包装器接线（transition 模式零 pwrite）一并落地（t/248 或 orchestrator
   单测），本增量登记。
+
+---
+
+## 增量 22 补记 2：G1b 锁序发现（2026-08-18，hw_remaster 迁移实证）
+
+### 事实
+
+- G1a（CHECKPOINT_ADVANCE，checkpointer 上下文）CF(S) 获取成功；但把
+  hw_remaster 的 validated_min 源迁到 canonical root（STRONG 读需 CF(S)）
+  后，L4 crash-rejoin 的 hw-remaster worker 全部 CF(S) 失败
+  （LOCK_UNAVAILABLE=17，16 次重试全败 → t243 bail at ok 2）。
+- 机制：recovery-episode 的 CF(X) 持锁（幸存者自己的控制文件写面）与
+  CF(S) 同资源（0xF1）互斥；hw worker 的 S 请求在 episode 窗口内被自身
+  的 X 持锁挡住（有界等待超时）。registry 读（W1 面）无 CF 依赖，旧路径
+  工作正常。
+- 结论：G1b 的 reader 迁移不能简单替换读源——每个 site 的上下文必须能
+  满足 canonical STRONG 读的 CF(S) 准入/锁序（checkpointer/coordinator
+  上下文可行；episode 内 worker 上下文不可行）。需要锁序设计评审
+  （CF(S) 与 episode CF(X) 的窗口调度，或按 site 分阶段迁移）。
+- 处置：hw_remaster 回退到 registry 源（注释标注 G1b 挂起 + 原因）；
+  G1a（checkpoint 发布）保留（正确且独立验证）。G1b 剩余迁移待 DSH/
+  设计评审后按锁序可行的上下文逐个落地。
