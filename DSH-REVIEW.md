@@ -987,3 +987,20 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   迁移引入的行为面，加 2 例断言即可。
 - 剩余 3 站：worker.c:247/309、orchestrator.c:572、hw_remaster.c:487
   （episode-bgworker 站，等 episode-pinned projection 设计）。
+
+---
+
+## 复审补记 35（2026-08-18 15:35，增量 30 投影设计复审：批准 + 一个验证点）
+
+- 增量 30（episode-bgworker 3 站设计）严格按 C 形状：pre-IR STRONG
+  read 一次 pin {identity, token, 字段} → bgworker 只消费 projection、
+  IR 内仅比 token、episode/重启即丢弃。§1.3 合规（shmem 载体随进程
+  生命周期，无落盘/WAL/跨重启 cache）✓。
+- 字段映射三站一致（classify 复用站点 1、validate 复用站点 2、validated
+  界作 validated_min 更严 fail-closed）✓；实施顺序 ①→⑤ 含逐站 census
+  双处移除 ✓。
+- **一个验证点（实施①时答）**：pin 点 = workers_launch（LMON serving
+  tick）必须处于**零资源锁**（episode CF(X) 获取之前）；补记 24 的
+  LOCK_UNAVAILABLE 历史正说明 launch 上下文锁态敏感——请在代码里证明
+  pin 读发生在 episode freeze 之前（或把 pin 前移到更早的零锁点）。
+- 批准。开工顺序按增量 30 的 ①→⑤。
