@@ -2806,3 +2806,60 @@ published_at 阈值边界 + 崩溃/活 peer 双向）**。待 DSH 复审后实�
   UNKNOWN"处理并 LOG，plan.failed=false？——待实施时以 t243 实测为准，
   倾向：root ABSENT → plan.failed=true（同现 registry_ready false 语义，
   WARNING fail-open）。
+
+---
+
+## 增量 29：站点 worker.c:192 revalidate 设计（写位置锚保守化）（2026-08-18，设计稿，待 DSH 复审）
+
+### 现状
+
+- `cluster_recovery_worker_revalidate`（worker.c:188-194）在 **startup 进程**
+  串行重跑流验证（merge project_readonly :967 调用，worker 池 NONE/FAILED
+  时兜底）——上下文 = pre-IR，可 STRONG read root（与 plan/merge 同准入）；
+- `validate_stream` 用 `slot->highest_lsn`（registry **写位置 watermark**）
+  经 `cluster_recovery_worker_target_page`（header 内联 :169）定位"最后写
+  页"（target = highest_lsn - 1，segment 边界安全），再 pread 该页 +
+  段首页验证；
+- **canonical root 无写位置字段**（只有 checkpoint_lower_lsn /
+  validated_tail_lsn_exclusive / recovered_through / tail_last_record 等
+  checkpoint 粒度界）。
+
+### 锚替代选项（C 路线框架内，补记 31 项 4"改保守 root 判定"）
+
+A. **validated_tail_lsn_exclusive 作 target 锚**：验证到 checkpoint 验证界
+   为止的页。语义差异：validated_tail 是 CHECKPOINT_ADVANCE 每 checkpoint
+   推进的 VALIDATED 界（≤ 真实写位置）。用其 -1 定位最后一页 = 只验证
+   checkpoint 界内的页；checkpoint 后崩溃前新写的段不在验证范围。
+   风险：**漏检 checkpoint 之后写的坏页**？——不：merge 的最终完整性由
+   replay 侧 `cluster_thread_recovery_validated_end`（扫描到 validated_min
+   解码）兜底（orchestrator 窗口路径），validate_stream 只是候选预检
+   （"stream readable"证据），非最终 gate。用 validated_tail 锚 =
+   预检范围收窄但方向 fail-closed（预检 SUSPECT→merge blockers；预检 OK
+   但界后损坏 → replay validated_end 捕获）。**结论：语义等价可接受**。
+B. **checkpoint_lower_lsn 作下界 + tail_last_record_lsn 作上界**：区间
+   验证，比 A 更精确但字段语义（tail_last_record 是 checkpoint 时最后
+   完整记录）非写位置，收益有限。
+C. **保持 BLOCKED**：root 无写位置期间 revalidate 返回 UNREADABLE →
+   merge blockers "stream not OK" → FATAL 53RA3——过度保守，破坏冷恢复
+   merge 可用性，否决。
+
+### 建议
+
+**A + 聚焦单测**（target_page 锚在 validated_tail 边界 ±ε 的定位 +
+   segment 边界安全，复用现有 header 内联测试模式）。tli 用
+   root.checkpoint_tli / tail_tli（validate_stream 构造文件名需要）。
+
+### 实施范围（待复审后）
+
+- revalidate 改 STRONG read root → snapshot；target 锚 =
+   snapshot.validated_tail_lsn_exclusive（0 → UNREADABLE 同现语义）；
+   tli = snapshot.tail_tli ? : checkpoint_tli；
+- registry read 移除 → census 站点 worker.c:192 关闭（DEFERRED 双处
+   移除，但 :247 仍在 → 按 file:line 粒度需先拆脚本 APIS 匹配或按文件
+   登记注释拆分——脚本按文件匹配，worker.c 剩余 :247 仍 deferred；
+   实施时评估脚本是否需 file:line 精确化）。
+
+### 待背书项
+
+- A 的"预检范围收窄由 replay validated_end 兜底"论证；
+- tli 字段选择（tail_tli vs checkpoint_tli）。
