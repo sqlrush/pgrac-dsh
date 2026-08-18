@@ -1259,6 +1259,25 @@ UT_TEST(test_bootstrap_read_never_returns_authority_token)
  * STRONG read with expected_identity == NULL must stay INVALID_ARGUMENT=23
  * (the G1b step-4 sites' inertness signature).  The legal no-prior-identity
  * path is the two-step discovered read below. */
+UT_TEST(test_round_sha256_is_deterministic_and_matches_create)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken token;
+	uint8 sha_a[PG_SHA256_DIGEST_LENGTH];
+	uint8 sha_b[PG_SHA256_DIGEST_LENGTH];
+
+	wipe_root_files();
+	build_migration(&image, &round);
+	UT_ASSERT(cluster_control_root_round_sha256(&round, sha_a));
+	UT_ASSERT(cluster_control_root_round_sha256(&round, sha_b));
+	UT_ASSERT(memcmp(sha_a, sha_b, sizeof(sha_a)) == 0);
+	/* create_prepared must succeed with the same round (its header stores
+	 * the same wire-encoded sha). */
+	UT_ASSERT_EQ(create_prepared(&image, &round, &token),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+}
+
 UT_TEST(test_strong_read_null_identity_stays_invalid_argument)
 {
 	ClusterControlRootMigrationImage image;
@@ -2052,12 +2071,13 @@ main(int argc, char **argv)
 		return fixture_root_main(argc, argv);
 	setup_fixture();
 
-	UT_PLAN(29);
+	UT_PLAN(30);
 	UT_RUN(test_abi_identity_and_features);
 	UT_RUN(test_invalid_argument_precedes_authority_io);
 	UT_RUN(test_external_fence_bit24_activation_is_forbidden_without_provider);
 	UT_RUN(test_create_and_read_primary);
 	UT_RUN(test_bootstrap_read_never_returns_authority_token);
+	UT_RUN(test_round_sha256_is_deterministic_and_matches_create);
 	UT_RUN(test_strong_read_null_identity_stays_invalid_argument);
 	UT_RUN(test_discovered_read_binds_identity_and_mints_token);
 	UT_RUN(test_discovered_read_absent_thread_fails_closed);

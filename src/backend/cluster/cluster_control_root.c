@@ -1894,6 +1894,24 @@ cluster_control_root_revalidate(const ClusterControlRootReadToken *token,
 	return result;
 }
 
+/*
+ * cluster_control_root_round_sha256 -- RF-ROOT P7 (增量 46/47): the round
+ * wire-encoded sha256 (same bytes create_prepared stores in the root header
+ * migration_round_sha256).  The cutover driver needs it to stage the seam.
+ */
+bool
+cluster_control_root_round_sha256(
+	const ClusterControlRootMigrationRoundV1 *round,
+	uint8 out_sha[PG_SHA256_DIGEST_LENGTH])
+{
+	uint8 round_bytes[80];
+
+	if (round == NULL || out_sha == NULL
+		|| !encode_round(round, round_bytes))
+		return false;
+	return control_root_sha256(round_bytes, sizeof(round_bytes), out_sha);
+}
+
 ClusterControlRootResult
 cluster_control_root_discard_inactive(const ClusterControlRootFileToken *expected_token,
 									  const uint8 expected_round_sha256[32])

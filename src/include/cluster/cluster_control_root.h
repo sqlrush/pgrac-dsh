@@ -9,6 +9,7 @@
 #define CLUSTER_CONTROL_ROOT_H
 
 #include "c.h"
+#include "common/sha2.h" /* PG_SHA256_DIGEST_LENGTH (增量 46/47) */
 
 #define CLUSTER_CONTROL_ROOT_REL_PATH "global/pgrac_control_root"
 #define CLUSTER_CONTROL_ROOT_BAK_REL_PATH "global/pgrac_control_root.bak"
@@ -454,6 +455,9 @@ extern ClusterControlRootResult cluster_control_root_activate_prepared(
 	const uint8 expected_round_sha256[32],
 	const ClusterControlRootMigrationRoundV1 *round,
 	ClusterControlRootFileToken *out_token);
+extern bool cluster_control_root_round_sha256(
+	const ClusterControlRootMigrationRoundV1 *round,
+	uint8 out_sha[PG_SHA256_DIGEST_LENGTH]);
 extern ClusterControlRootResult cluster_control_root_discard_inactive(
 	const ClusterControlRootFileToken *expected_token,
 	const uint8 expected_round_sha256[32]);
