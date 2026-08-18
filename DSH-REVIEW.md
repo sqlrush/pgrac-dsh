@@ -1004,3 +1004,19 @@ census GREEN（0 violation）→ bit22 可开；全程 t243 33/33 + regress
   LOCK_UNAVAILABLE 历史正说明 launch 上下文锁态敏感——请在代码里证明
   pin 读发生在 episode freeze 之前（或把 pin 前移到更早的零锁点）。
 - 批准。开工顺序按增量 30 的 ①→⑤。
+
+---
+🔴 [DSH-WATCH 08-18 16:06] t243 回归：上一轮完成 33 ok，新一轮完成仅 2 ok（reglog ��。
+   DSH 建议：先 diff 本轮相对上一绿轮的源码改动（git diff / 最近 uncommitted 变更），二分定位回归提交，
+   优先恢复上轮绿态（20:19 run-30 的 21ok）再继续；不要把回归归因为环境问题。
+
+---
+
+## 复审补记 36（2026-08-18 16:00，t243 改动红线核查：TEMP note 豁免登记）
+
+- 会话在 t243 L4 前加了 2 行 `note('G1b probe: root file ...')`——属于
+  **TEMP 诊断输出**（不碰 workload/judge/断言/顺序/超时，五类红线未踩）。
+- 按 TEMP 纪律登记：**push 前必须删除**；任何保留 t243 改动的意图 =
+  硬违规。G1b 迁移验证完成后随 TEMP 清理批一并移除。
+- 提醒：若只是确认 root 文件存在，用 t243 现有日志 grep（node 日志已
+  打 "cluster control root: ..."）即可，不必改测试文件。
