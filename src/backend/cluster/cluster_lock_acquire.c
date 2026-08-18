@@ -995,7 +995,7 @@ cluster_relation_is_persistent_or_unlogged(Oid relid)
 		char persistence = rel->relpersistence;
 
 		/* RELPERSISTENCE_PERMANENT 'p' + RELPERSISTENCE_UNLOGGED 'u' route
-		 * through cluster;  RELPERSISTENCE_TEMP 't' skips. */
+		 * through cluster;  the temp-rel persistence 't' skips. */
 		eligible = (persistence != RELPERSISTENCE_TEMP);
 	}
 
