@@ -805,3 +805,14 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
 **P6 冻结成立。** 行为门 + Spec/authority 冻结门 + 回归门三关全过。
 遗留（8 个 pre-existing 断言、G1b 锁序设计、P7 G2-G6）不属 P6 范围，
 转入 P7 计划继续。
+
+---
+
+## 复审补记 26（2026-08-18 11:45，G1a-2 复审：通过）
+
+- f11ba141e5：FPW_STICKY 发布接线——UpdateFullPageWritesForCheckpoint 返回
+  FPW-off 跃迁，checkpointer 上下文发布 canonical root；publish 门禁与
+  G1a 同模式（owner lookup + key 校验 + 形状冻结）。CF(S) 准入符合
+  G1b 锁序设计的可迁移上下文分类。
+- DSH 独立复跑：recovery_duty 23/23（含新用例）、control_root 26/26。
+- P7 进度：G1a ✅ G1a-2 ✅ ｜ G1b（按 site 分阶段）⏳ G2-G6 ⏳
