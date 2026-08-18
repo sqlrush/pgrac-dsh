@@ -500,3 +500,20 @@ A → 裁决(B) → C → D → 双绿 → 重新申请 P6 冻结。中途任何
   fail-closed 意图），但"75/76 转绿"的宣称必须用 reconfig 单测二进制
   复跑实锤后再写进文档；若 75/76 转绿，P6-RESUME 的"10 个 pre-existing"
   数字要同步更正为 8（77/92 保留）。
+
+---
+
+## 复审补记 15（2026-08-18 09:25，B 项增量 13 摘除 + THREAD_OPEN 主线接通复审）
+
+- THREAD_OPEN 调用点：xlog.c:5847，在 `StartupXLOG()` 内 = startup 进程
+  （AD-023 §4 冻结的 CF(S) 执行者）✓；phase-3 旧调用点已拆（startup_phase.c）✓。
+- OWNER_REJOIN 的 CLOSED 路由三处全摘：head gate（recovery_duty.c 只认
+  RECOVERY_COMPLETE/OPEN）、patch.expected 硬编码 RECOVERY_COMPLETE、
+  patch_shape_valid allowlist 收窄 ✓——与 STOP-02 §17.4 冻结形态一致。
+- 单测翻转正确：CLOSED 重开用例改为断言拒绝（0 发布 0 读），命名同步
+  test_owner_rejoin_rejects_closed_lifecycle_frozen_shape ✓。
+- 顺序提示：本次把①接新路+③拆旧路合成一波（未做双路并存中间验证）。
+  若 t243 变红，二分法 = 临时恢复 CLOSED 两行 allowlist 验证是否为
+  THREAD_OPEN 侧问题；修好后必拆回。
+- 验收清单：① t243 33/33 + 日志出现 "reopened by owner"；② recovery_duty
+  单测全绿；③ 增量 19 的 C 端到端测试随后落地；④ cluster_regress 13/13。
