@@ -2698,6 +2698,15 @@ semantic_activation_ack_lmon_open_applied_advance(
 			&after.expected[cluster_node_id], &self))
 		return true;
 
+	/* RF-ROOT P9 审计 #3 (增量 57 / 补记 61-63): the coordinator's latch
+	 * MUST flip (and the return be checked) BEFORE its observed bit is
+	 * published — a refused latch (census RED regression / round invalid)
+	 * leaves the round fail-closed (no observed, no publish, no REQUEST)
+	 * instead of publishing a half-switched coordinator. */
+	if (!cluster_r4_bit22_cutover_latch_apply(
+			after.transition_epoch, after.record_generation))
+		return true;
+
 	self_bit = UINT64_C(1) << cluster_node_id;
 	next = after;
 	next.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED;
@@ -2706,10 +2715,6 @@ semantic_activation_ack_lmon_open_applied_advance(
 	next.observed[cluster_node_id] = self;
 	if (!semantic_activation_ack_table_publish(&next))
 		return true;
-
-	/* The coordinator is a reader too — its latch flips now. */
-	(void) cluster_r4_bit22_cutover_latch_apply(
-		next.transition_epoch, next.record_generation);
 
 	memset(&request, 0, sizeof(request));
 	request.kind = CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;

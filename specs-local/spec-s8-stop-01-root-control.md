@@ -4256,3 +4256,29 @@ cluster_wal_retention.c:819 `walr_share_request_init` 的
 
 - 现有 wal_retention 36/36 复跑；
 - release build（--disable-cassert）至少编译通过。
+
+---
+
+## 增量 57：外部审计 #3 修复 —— coordinator observed-then-latch 排序
+## （2026-08-18，补记 61 MUST-FIX / 62 #3 / 63 顺序第 2 项）
+
+### 发现
+
+open_applied_advance（步骤 ②）当前顺序：publish（observed |= self_bit）
+→ latch_apply（**忽略返回值**）→ REQUEST。问题：latch 置位失败（census
+RED 回归 / round 无效）时 observed 已发布（轮看似推进）但协调者 reader
+未切换——**协调者成为唯一未切换成员**，且轮状态与实际不一致。
+
+### 修法（两行交换 + 返回值检查）
+
+1. 先 `cluster_r4_bit22_cutover_latch_apply(transition_epoch,
+   record_generation)` 并**检查返回**；
+2. 成功 → 才 `next.observed |= self_bit` + publish + REQUEST；
+3. 失败 → 不置 observed、不 publish、不 REQUEST（轮 fail-closed——成员
+   侧同语义：latch 拒 → 不 observed）。
+
+### 验收
+
+- r4fsm：open_applied_advance 的 census-RED 路径（stub）→ observed 不置
+  位 + 表 stage 保持 PREPARED（新增断言，原 test_138 扩展或新用例）；
+- t243/regress 复跑。

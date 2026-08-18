@@ -281,6 +281,23 @@ cluster_control_root_create_prepared(
 	return ut_create_result;
 }
 
+/* RF-ROOT P9 审计 #8 (补记 62): the SQL entry (step ④e) references
+ * superuser(); this binary does not link the backend superuser machinery. */
+bool
+superuser(void)
+{
+	return true;
+}
+
+ClusterControlRootResult
+cluster_control_root_build_migration_image(
+	ClusterControlRootMigrationImage *out)
+{
+	if (out != NULL)
+		memset(out, 0, sizeof(*out));
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 bool
 cluster_control_root_round_sha256(
 	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
@@ -4928,6 +4945,39 @@ UT_TEST(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failur
 	test_gate_reset();
 }
 
+UT_TEST(test_145_coordinator_latch_refused_leaves_round_prepared)
+{
+	ClusterControlRootFileToken token;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootMigrationRoundV1 round;
+
+	/* RF-ROOT P9 审计 #3 (增量 57): the coordinator's latch must flip
+	 * BEFORE its observed bit is published — a refused latch (here a
+	 * census-RED regression) leaves the round PREPARED with no observed
+	 * bit and no REQUEST. */
+	ut_open_applied_env_setup_coordinator();
+	ut_open_applied_prepared_table_setup();
+	memset(&token, 0, sizeof(token));
+	token.file_txn_seq = 1;
+	memset(sha, 0x11, sizeof(sha));
+	memset(&round, 0, sizeof(round));
+	round.transition_epoch = 7;
+	round.prepare_generation = 5;
+	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
+	ut_r4fsm_census_ok = false; /* latch apply refuses (census RED) */
+	ut_activate_calls = 0;
+	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
+		test_local_capability_word));
+	UT_ASSERT_EQ(ut_activate_calls, 1);
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo,
+				 UINT64_C(0x03)); /* the PREPARED all-member ACK, no new bit */
+	test_gate_reset();
+}
+
 UT_TEST(test_139_coordinator_open_applied_advance_rejects_mismatched_seam)
 {
 	ClusterControlRootFileToken token;
@@ -5065,7 +5115,7 @@ UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
 int
 main(void)
 {
-	UT_PLAN(193);
+	UT_PLAN(194);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -5254,6 +5304,7 @@ main(void)
 	UT_RUN(test_137_coordinator_open_applied_advance_waits_for_seam);
 	UT_RUN(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failure);
 	UT_RUN(test_139_coordinator_open_applied_advance_rejects_mismatched_seam);
+	UT_RUN(test_145_coordinator_latch_refused_leaves_round_prepared);
 	UT_RUN(test_140_member_prepared_bit22_round_parameterized);
 	UT_RUN(test_141_member_prepared_r4_round_keeps_four_member_shape);
 	UT_RUN(test_142_cutover_begin_stages_seam_and_publishes_prepared);
