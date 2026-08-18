@@ -738,3 +738,16 @@ specs-local/README.md 已改为实际政策（公开授权记录）。恢复 pus
 ---
 🔴 [DSH-WATCH 08-18 10:43] t243 启动级失败：跑批 bail 且仅 0 ok（reglog ��——节点启动/bootstrap 层被打断。
    DSH 建议：查 tmp_check/log 两节点日志尾部的第一个 FATAL/PANIC；这类回归通常来自最新改动，先回退再修。
+
+---
+
+## 复审补记 22（2026-08-18 11:05，G1a 提交复审：通过）
+
+- 4686c73994：checkpointer 稳态 checkpoint 路径发布 CHECKPOINT_ADVANCE，
+  位置在 CF(X) 释放之后、guarded recycle 之前（锁序合规，注释已论证）；
+  end-of-recovery checkpoint 豁免（冻结 fence-deferral 例外）；非致命
+  （下个 checkpoint 自愈）。
+- DSH 独立复跑聚焦单测：recovery_duty 20/20（含新 publish 测试）、
+  control_root 26/26——bind→CAS→shape 全链绿。
+- G1a 完成。按补记 21 派单，**下一步立即切路线 1**（checkpointer
+  THREAD_CLEAN_CLOSE 有界重试），验收顺序见补记 21。
