@@ -4035,3 +4035,51 @@ P8：recoverer crash 后同 episode 无 replacement 接管（BLOCKED 或 episode
   kill/断连/文件破坏——2-node 可行性评估）；
 - RU-01..12：§9.1 单元 RED matrix——逐条对照现有 unit 面；
 - §8.1 观测性：counter 语义 G2 分级。
+
+---
+
+## 增量 51：P9 合同映射与可行性评估（2026-08-18，逐腿对照）
+
+### RU-01..12（单元 RED matrix）对照
+
+| RU | 场景 | 现状 |
+|---|---|---|
+| RU-01 node-local anchor 冒充 control root | classifier 拒绝，只留 local restart hint | 既有：classify/control_root 单测面——需确认覆盖点 |
+| RU-02 local dead_generation 跨节点当 canonical | STOP-ROOT-GENERATION/authority false | 既有：fence/grd 单测面 |
+| RU-03 IR owner node id 单独授 mutation | authority conjunction false | 既有：IR 单测面 |
+| RU-04 cooperative fence/provider reply 单独授 I/O | external fence 仍 unproven | 既有：external_fence 单测面 |
+| RU-05 control-root mismatch 后 page write | stale check mutation 前失败 | 既有：control_root stale/token 单测面 |
+| RU-06 KeepLogSeg 忽略 recovery interval | reuse denied | 既有：wal_retention 单测面 |
+| RU-07 wal-state watermark 允许 skip/replay/HWM | 三 caller 迁移 fail closed | **批 1-4 已实现**（双路径 fail-closed）——补断言 |
+| RU-08 invalid old artifact 当 progress | artifact ignored，canonical rebuild | 既有：claim/artifact 单测面 |
+| RU-09 one resource post-read 允许 whole-interval retire | retirement denied | 既有：retention 单测面 |
+| RU-10..12 | （§9.1 表尾未截全，实施时读原文） | 待读 |
+
+### RL-01..12（TAP fault legs）可行性
+
+- **RL-01 first-recoverer**：可行——node1 崩 → node0 recovery 流程（hw_remaster
+  完成 + thread recovery 在 fence 门 BLOCKED）+ 断言 fresh（无 private
+  adoption）；
+- **RL-02/03/04 death legs**：**honest SKIP-with-reason**——replay actor 在
+  fence provider-0 下不执行（NeedSet/admit BLOCKED，线程恢复 worker 不
+  达 mutation），无 recoverer 可 kill；合同明示"环境不可用时 honest
+  BLOCKED/SKIP-with-reason 不能 mock PASS"；
+- **RL-05 stale-owner-I/O**：观测型——旧 owner 写（SQL/文件）→ gate 拒绝
+  断言（可做）；
+- **RL-06 membership-change**：观测型（reconfig 事件）——可做（受 §A
+  限制的时序标注）；
+- **RL-07 control-root-mismatch**：可做（文件篡改 → 读拒）——unit 面
+  已有（valid_bak_blocks_corrupt_primary 等），TAP 腿做集成版；
+- **RL-08 invalid-optimization**：unit 面已有（claim CRC 校验）——TAP
+  集成版；
+- **RL-09 source-loss**：文件删 → BLOCKED 断言（可做）；
+- **RL-10 retirement-denial**：unit/观测；
+- **RL-11 resource-scoped-open**：观测型（BLOCKED 不扩散）——unit 面；
+- **RL-12 wait-graph**：静态/unit（锁序无环）——单元面。
+
+### 实施顺序
+
+1. RU 对照补强（unit 最快）：RU-07 断言补强 + 缺失项；
+2. RL-01/05/07/09 TAP 腿（2-node 可行集）；
+3. RL-02/03/04/06/08/10/11/12：honest SKIP-with-reason 或 unit 覆盖；
+4. §8.1 观测性（counter G2 分级）。
