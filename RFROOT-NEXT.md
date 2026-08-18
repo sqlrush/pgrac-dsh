@@ -160,6 +160,26 @@
       项：validate_stream target-page 锚语义、plan verdict truth table）。
       实施顺序：READ_SNAPSHOT → orchestrator+hw_remaster → worker+plan →
       census 归零 → bit22 可开。
+- [ ] **【补记 31 执行指令已收到】**（2026-08-18 14:40）：C 形状定稿 =
+      **pre-IR pinned canonical projection**（STOP-02 §15：零资源锁 →
+      STRONG read/revalidate → pin root identity+token+snapshot 字段 →
+      进入 episode/CF(X) → bgworker 只消费本 episode immutable projection，
+      IR 内禁止自行 CF(S) → episode 结束丢弃）。**撤回 READ_SNAPSHOT 方向**
+      （撞 §17.7 no-mirror + §1.3 投影纪律）。五站点逐站提交等复审：
+      ① startup（plan.c:203 + worker.c:192）pre-IR 直接 STRONG read；
+      ② episode bgworker（worker:247 / orchestrator:572 / hw_remaster:487）
+      消费 episode 前固定投影（构造者=同站 startup/coordinator）；
+      ③ max_highest_scn 删除（无消费者）；④ registry 独有字段禁止镜像 →
+      保守 root 判定或 BLOCKED；⑤ census 逐站双处移除。
+- [ ] **【增量 27 站点 1 设计已提交】**（2026-08-18，dbd7e4d32c）：plan
+      verdict 活性判定障碍——registry last_updated 由 cluster_stats 每
+      1s tick 刷新（cluster_stats.c:672，interval=1000ms），root
+      published_at 仅 checkpoint 粒度（THREAD_OPEN/CLOSE/
+      CHECKPOINT_ADVANCE/OWNER_REJOIN 发布点）→ 10s stale 阈值不可直接
+      迁移（活 peer 误判 CRASHED → merge NOT_COLD 门失效 → FATAL 53RA3）。
+      选项 A 保守放大阈值（唯一 exactly-zero 合规）/ B plan 活性留
+      registry（再踩 §17.9）/ C BLOCKED。推荐 A + truth-table 单测。
+      **待 DSH 复审**。
 - [ ] 8 个 pre-existing 单测失败（reconfig 77/92 + r4_static_model 9-13 +
       r4_activation_record 50；P6-RESUME 原记 10 个，其中 reconfig 75/76
       系 test 55 泄漏污染、55 系掩盖性 stale，均随 P1 消解）
