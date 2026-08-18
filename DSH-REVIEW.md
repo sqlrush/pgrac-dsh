@@ -1950,3 +1950,22 @@ t243 33/33 + regress 13/13。与补记 59 核准的未提交 diff 一致。
 
 **时间窗**：1-2 立即；3-6 本周内；7 随 3 同批。任何一步偏离上述方向先交
 DSH 复审，不得自行改方案。
+
+---
+
+## 复审补记 64（2026-08-18 23:00，审计修复 #1 未提交代码核准 + 一处 TEMP 必删）
+
+### 修复 #1（release WALR resid）：方向正确 ✅
+
+- `walr_share_request_init` 返回 bool；resid 编码移出 Assert，显式检查；
+  唯一调用者（root_publish_begin_exact:899）失败时 pfree + 返回
+  CLUSTER_WAL_PIN_UNAVAILABLE（fail-closed 方向正确）。
+- **TEMP 必删**：826 行 `fprintf(stderr, "TEMP share_init: ...")`——TEMP
+  诊断不得推送。合法 thread_id 下 encode 不会失败（范围检查），该分支
+  只需静默 return false（调用者已 fail-closed）；若要观测用 ereport(LOG)
+  而非 fprintf stderr。
+
+### 验收
+
+- 删 TEMP 后：wal_retention 36/36 复跑 + t243 33/33 + regress 13/13 +
+  commit（引用补记 62 #4）。
