@@ -1751,3 +1751,34 @@ target=R4_SYNC_CR_V1）。2-node t243 无法通过。
 - ✅ 任务 3：闭合（惰性单测 + t243 证据）
 - ✅ 增量 40-44：设计文档全部落地
 - ⬜ 任务 4 实施：按增量 44 裁决 A + 增量 42/43 设计，实施步骤 ①-④
+
+---
+
+## 复审补记 59（2026-08-18 22:15，任务 4 步骤 ①+② 未提交代码核准：成员 OPEN_APPLIED 段实现精良）
+
+### 步骤 ① 成员 OPEN_APPLIED 应用（semantic_activation.c +239）
+
+- **分派**：LMON tick 在 progress_member 路由 OPEN_APPLIED → 新函数 ✅
+- **校验**（round 参数化，不硬编码四成员）：stage=OPEN_APPLIED、coordinator
+  跳过、bit22 target、round_nonce/epoch/generation 非零、expected 非空、
+  observed ⊆ expected、self tuple 匹配 ✅
+- **幂等**：observed 已含 self → 直接返回 true（latch 单调）✅
+- **应用**：`latch_apply(transition_epoch, record_generation)` — census 自检
+  内置，失败 → 不置 observed → 轮永不 COMPLETE → fail-closed ✅
+- **finish**：observed 置位 + ACK 表 publish + COMPLETE flag（全成员时）✅
+- **锁序**：latch apply 无锁（shmem atomic），LMON tick 无 CF——合法 ✅
+
+### 字段修正
+
+`prepare_generation` → `round_generation`：ACK 表是 frozen shmem（无
+prepare_generation 字段），只有 record_generation。{transition_epoch,
+record_generation} 唯一且可得。全部引用点同步更新（latch struct、函数签名、
+shmem init、单测断言），无遗漏。✅
+
+### 增量 45（设计文档）：与实现一致，核准 ✅
+
+### 待续
+
+- 步骤 ②：coordinator OPEN_APPLIED 推进（PREPARED→OPEN_APPLIED 转换）
+- 步骤 ③：backend activate 接线（mailbox 第二段）
+- 单测：r4fsm OPEN_APPLIED 段覆盖（增量 45 列出的测试场景）
