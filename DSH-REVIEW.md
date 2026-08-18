@@ -1997,3 +1997,29 @@ build_migration_image 的集成测试随 #1（首开可达）修复落地，当�
 - ✅ #4（resid）、✅ #3（排序）、✅ #8（链接）
 - ⬜ #1（首开可达：PCRM 字段 + lineage + SAMPLE-ACK 循环）——最大项
 - ⬜ #2（latch 跨重启）、#5（幂等窗口）、#7（P4/P9 标 BLOCKED）
+
+---
+
+## 复审补记 66（2026-08-19 07:35，审计 #1 partial 复审：1a/1b-step1/1c 核准；step-2 剩余，#1 保持 OPEN）
+
+### 0f8bcae68c 三部分逐项
+
+- **#1a round 字段** ✅：magic/version/bytes/coordinator_incarnation/
+  coordinator_node_id 全填，encode_round 拒绝面消除。
+- **#1c create-proof 豁免（补记 63 选项 b）** ✅ 有条件背书：方向已由补记 63
+  预授权；论证到位——create 只铸 PREPARED root（§17.8：PREPARED 非 authority），
+  权威授予在 activate（activate proof 仍要求 PREPARED-stage 全成员 COMPLETE
+  = W6 条款 3 CLOSED 绑定，未削弱）；R4 轮（无 bit22）保留冻结前置。**记录
+  在案**：此为 G3 核准设计（create=SAMPLE minimum_stage）的偏离，若后续用户
+  要求全轮保留 SAMPLE，可切换选项 (a)。
+- **#1b step 1 backing 字段** ✅：lineage/publish_seq/source kind/tail kind/
+  recovered bounds 全填。**step-2（CRCs）剩余**——DSH 复核 snapshot_validate：
+  `checkpoint_record_crc32c == 0` 仍会拒（step-2 未填），"honest un-beginable"
+  属实。**#1 保持 OPEN**，直至 step-2（WAL stream CRC 扫描）+ 端到端 operator
+  单测 + t243/regress 复跑。
+
+### 审计修复进度
+
+- ✅ #4、#3、#8
+- 🔶 #1 partial（1a/1b-step1/1c 已落；step-2 CRC 剩余 → 仍 OPEN）
+- ⬜ #2、#5、#7
