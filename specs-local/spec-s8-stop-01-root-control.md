@@ -3053,3 +3053,37 @@ episode 结束/重启即丢弃 → 下一 episode 重新 fresh read。
 
 - t243 33/33 + regress 13/13 + 全量单测无回归；
 - ④ 恢复后（pin 前移）不再 PANIC（fence 刷新时序变化被预检吸收）。
+
+---
+
+## 增量 35：root 文件在 node 重启后消失 —— 决定性证据（2026-08-18，交 DSH）
+
+### 实测证据（16:41 run，tmp_check 保留）
+
+- node 0/1 attached shared root = `tmp_test_XDjz`；cast 断言
+  `-f $shared_root/global/pgrac_control_root` 通过（cast 时文件存在）；
+- **L4 崩溃时（pin 时刻）`tmp_test_XDjz/global/` 无 pgrac_control_root**
+  （仅 pg_control/pg_hw_snapshot/pgrac_cf_p2）——root 文件在 cast 后、
+  node 重启（start_pair）期间消失；
+- 佐证：node 0 启动日志 "recovery plan: ... 127 unknown"（站点 1 的
+  STRONG 读也全失败 = root 文件不存在）；
+- 生产代码无 root 删除路径（仅 temp unlink）；ClusterPair 的
+  shared_control_root 单实例不变（:220 tempdir 一次）。
+
+### 推论
+
+- **cast fixture 写 root 后，node 重启（clean rejoin）时 root 文件被
+  移除**——机制不明（无删除代码）。可能：node 启动时对 shared 目录的
+  某清理（pg_basebackup？:32 日志显示 BASE_BACKUP 跑过——backup 可能
+  重建 global 目录！）。
+- **BASE_BACKUP 假设**：node 0 启动时对 node1 做 base backup（:32），
+  backup 目标可能覆盖 shared root 的 global/（删掉 cast 的 root 文件）。
+  这解释了"cast 后消失"。
+
+### 待 DSH 指导
+
+- 验证 BASE_BACKUP 是否清理 shared root global/；若是，④ 的 pin 点
+  必须移到 backup 之后（或 t243 流程调整，但受冻结裁决约束：
+  RFROOT-P04-A2 禁 workload/judge 改动，setup-only 经生产 producer）。
+- ④ 现状：BOOTSTRAP pin（正确）+ hw_remaster 投影迁移（正确）+ census
+  双处归零（GREEN）；唯一阻塞 = pin 时 root 不存在。
