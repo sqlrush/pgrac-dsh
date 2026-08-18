@@ -1324,6 +1324,190 @@ file_token_equal(const ClusterControlRootFileToken *left,
 	return left != NULL && right != NULL && memcmp(left, right, sizeof(*left)) == 0;
 }
 
+/*
+ * read_thread_claim_fields -- RF-ROOT P7 (增量 48, step ④d): read the
+ * thread claim file (40-byte v1 layout) and extract the identity fields
+ * (created_at / crc) for a migration-image record.  The claim is
+ * write-once (spec-4.1), so this is the durable origin evidence.
+ */
+static bool
+read_thread_claim_fields(uint16 thread_id, int32 node_id,
+						 ClusterControlRootIdentity *identity)
+{
+	ClusterWalThreadClaim claim;
+	char dirname[MAXPGPATH];
+	char dirpath[MAXPGPATH];
+	char path[MAXPGPATH];
+	struct stat st;
+	size_t done = 0;
+	int fd;
+
+	if (identity == NULL)
+		return false;
+	cluster_wal_thread_dir_name(thread_id, dirname, sizeof(dirname));
+	if (dirname[0] == '\0'
+		|| snprintf(dirpath, sizeof(dirpath), "%s/%s",
+					cluster_wal_threads_dir, dirname) <= 0
+		|| (size_t)snprintf(dirpath, sizeof(dirpath), "%s/%s",
+							cluster_wal_threads_dir, dirname)
+		   >= sizeof(dirpath)
+		|| lstat(dirpath, &st) != 0 || !S_ISDIR(st.st_mode))
+		return false;
+	if (snprintf(path, sizeof(path), "%s/%s", dirpath,
+				 CLUSTER_WAL_THREAD_CLAIM_FILENAME) <= 0
+		|| (size_t)snprintf(path, sizeof(path), "%s/%s", dirpath,
+							CLUSTER_WAL_THREAD_CLAIM_FILENAME)
+		   >= sizeof(path))
+		return false;
+	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)
+		|| st.st_size != sizeof(claim)) {
+		if (fd >= 0)
+			CloseTransientFile(fd);
+		return false;
+	}
+	while (done < sizeof(claim)) {
+		ssize_t n = read(fd, (uint8 *)&claim + done, sizeof(claim) - done);
+
+		if (n <= 0) {
+			CloseTransientFile(fd);
+			return false;
+		}
+		done += (size_t)n;
+	}
+	if (CloseTransientFile(fd) != 0
+		|| !cluster_wal_thread_claim_validate(&claim, thread_id, node_id, NULL))
+		return false;
+	identity->thread_claim_created_at = claim.created_at;
+	identity->thread_claim_crc32c = claim.crc;
+	return true;
+}
+
+/*
+ * cluster_control_root_build_migration_image -- RF-ROOT P7 (增量 48, step
+ * ④d): construct the create_prepared migration image from the live shared
+ * state: wal-state registry slots (checkpoint/tail bounds), thread claim
+ * files (origin evidence), membership incarnations (owner binding) and the
+ * local storage identity.  Fail-closed: every non-empty slot must be
+ * STOPPED with a valid checkpoint and zero merge-recovered bytes (the W6
+ * clause-3 CLOSED-ACK precondition of the cutover round); anything else
+ * refuses the round before any file is touched.
+ */
+ClusterControlRootResult
+cluster_control_root_build_migration_image(
+	ClusterControlRootMigrationImage *out)
+{
+	ClusterControlRootMigrationImage image;
+	uint8 current_uuid[16];
+	uint8 *first;
+	uint8 *second;
+	char path[MAXPGPATH];
+	struct stat st;
+	uint32 assigned = 0;
+	uint16 i;
+	int fd;
+
+	if (out == NULL)
+		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
+	memset(out, 0, sizeof(*out));
+	if (cluster_wal_threads_dir == NULL || cluster_wal_threads_dir[0] == '\0'
+		|| lstat(cluster_wal_threads_dir, &st) != 0 || !S_ISDIR(st.st_mode)
+		|| snprintf(path, sizeof(path), "%s/%s", cluster_wal_threads_dir,
+					CLUSTER_WAL_STATE_FILENAME) <= 0
+		|| !regular_or_absent_nosymlink(path, false))
+		return CLUSTER_CONTROL_ROOT_IO_ERROR;
+	first = palloc(CLUSTER_WAL_STATE_FILE_SIZE);
+	second = palloc(CLUSTER_WAL_STATE_FILE_SIZE);
+	/* Read the registry once and validate the image (its embedded checksum
+	 * rejects a torn read — the same guarantee the double-read in
+	 * read_source_wal_state provides, without re-reading per slot). */
+	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
+	if (fd < 0 || fstat(fd, &st) != 0
+		|| st.st_size != CLUSTER_WAL_STATE_FILE_SIZE) {
+		if (fd >= 0)
+			CloseTransientFile(fd);
+		pfree(second);
+		pfree(first);
+		return CLUSTER_CONTROL_ROOT_BAD_SIZE;
+	}
+	if (pg_pread(fd, first, CLUSTER_WAL_STATE_FILE_SIZE, 0)
+			!= CLUSTER_WAL_STATE_FILE_SIZE
+		|| CloseTransientFile(fd) != 0
+		|| !cluster_wal_state_image_validate(
+			first, CLUSTER_WAL_STATE_FILE_SIZE, NULL, NULL)) {
+		pfree(second);
+		pfree(first);
+		return CLUSTER_CONTROL_ROOT_HASH_MISMATCH;
+	}
+	memcpy(second, first, CLUSTER_WAL_STATE_FILE_SIZE);
+	image.system_identifier = GetSystemIdentifier();
+	if (!current_storage_uuid(current_uuid)) {
+		pfree(second);
+		pfree(first);
+		return CLUSTER_CONTROL_ROOT_STORAGE_CONTRACT_UNVERIFIED;
+	}
+	memcpy(image.storage_uuid, current_uuid, 16);
+	if (!pg_strong_random(image.authority_uuid, 16)) {
+		pfree(second);
+		pfree(first);
+		return CLUSTER_CONTROL_ROOT_IO_ERROR;
+	}
+	image.created_at_usec = GetCurrentTimestamp();
+	for (i = 0; i < CLUSTER_WAL_STATE_SLOT_COUNT; i++) {
+		ClusterWalStateSlot slot;
+		ClusterWalSlotVerdict verdict;
+		ClusterControlRootSnapshot *record;
+
+		memcpy(&slot, first + CLUSTER_WAL_STATE_SLOT_OFFSET(i + 1),
+			   sizeof(slot));
+		verdict = cluster_wal_state_slot_classify(&slot, (uint16)(i + 1),
+												  -1, NULL);
+		if (verdict == CLUSTER_WAL_SLOT_EMPTY)
+			continue;
+		if (verdict != CLUSTER_WAL_SLOT_OK
+			|| slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
+			|| slot.checkpoint_redo_lsn == 0
+			|| slot.merge_recovered_lsn != 0) {
+			pfree(second);
+			pfree(first);
+			return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
+		}
+		record = &image.records[i];
+		record->identity.system_identifier = image.system_identifier;
+		memcpy(record->identity.storage_uuid, image.storage_uuid, 16);
+		memcpy(record->identity.authority_uuid, image.authority_uuid, 16);
+		record->identity.origin_thread_id = (uint16)(i + 1);
+		record->identity.origin_node_id = slot.node_id;
+		record->identity.origin_owner_incarnation
+			= cluster_membership_get_last_admitted_incarnation(slot.node_id);
+		if (record->identity.origin_owner_incarnation == 0
+			|| !read_thread_claim_fields((uint16)(i + 1), slot.node_id,
+										 &record->identity)) {
+			pfree(second);
+			pfree(first);
+			return CLUSTER_CONTROL_ROOT_IO_ERROR;
+		}
+		record->lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED;
+		record->root_flags = CLUSTER_CONTROL_ROOT_FLAG_CLAIM_VALID
+							 | CLUSTER_CONTROL_ROOT_FLAG_CHECKPOINT_VALID
+							 | CLUSTER_CONTROL_ROOT_FLAG_TAIL_VALID
+							 | CLUSTER_CONTROL_ROOT_FLAG_RECOVERED_VALID;
+		record->checkpoint_lower_lsn = slot.checkpoint_redo_lsn;
+		record->checkpoint_tli = slot.tli;
+		record->validated_tail_lsn_exclusive = slot.highest_lsn;
+		record->tail_tli = slot.tli;
+		record->published_at_usec = image.created_at_usec;
+		record->lifecycle_reason
+			= CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT;
+		assigned++;
+	}
+	image.assigned_record_count = assigned;
+	pfree(second);
+	pfree(first);
+	*out = image;
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 ClusterControlRootResult
 cluster_control_root_create_prepared(const ClusterControlRootMigrationImage *image,
 									 const ClusterControlRootMigrationRoundV1 *round,

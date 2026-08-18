@@ -163,6 +163,15 @@ GetCurrentTimestamp(void)
 	return ++test_now;
 }
 
+static uint64 test_membership_incarnation = UINT64_C(0x1020304050607080);
+
+uint64
+cluster_membership_get_last_admitted_incarnation(int32 node_id)
+{
+	(void) node_id;
+	return test_membership_incarnation;
+}
+
 uint64
 GetSystemIdentifier(void)
 {
@@ -1278,6 +1287,69 @@ UT_TEST(test_round_sha256_is_deterministic_and_matches_create)
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 }
 
+UT_TEST(test_build_migration_image_maps_registry_and_claims)
+{
+	ClusterControlRootMigrationImage image;
+
+	wipe_root_files();
+	build_source_wal_state(); /* registry slot 1 STOPPED + thread_1 claim */
+	test_membership_incarnation = UINT64_C(0x1020304050607080);
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&image),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(image.assigned_record_count, 1);
+	UT_ASSERT_EQ(image.records[0].identity.origin_thread_id, 1);
+	UT_ASSERT_EQ(image.records[0].identity.origin_node_id, 0);
+	UT_ASSERT_EQ(image.records[0].identity.origin_owner_incarnation,
+				 UINT64_C(0x1020304050607080));
+	UT_ASSERT_EQ(image.records[0].identity.thread_claim_created_at,
+				 INT64_C(1699999999000001));
+	UT_ASSERT_EQ(image.records[0].lifecycle,
+				 CLUSTER_CONTROL_ROOT_LIFECYCLE_CLOSED);
+	UT_ASSERT_EQ(image.records[0].checkpoint_lower_lsn,
+				 UINT64_C(0x1000000));
+	UT_ASSERT_EQ(image.records[0].validated_tail_lsn_exclusive,
+				 UINT64_C(0x1000000));
+	UT_ASSERT((image.records[0].root_flags
+			   & CLUSTER_CONTROL_ROOT_FLAG_CLAIM_VALID) != 0);
+	UT_ASSERT(memcmp(image.storage_uuid, image.records[0].identity.storage_uuid,
+					 16) == 0);
+	build_source_wal_state(); /* restore the shared fixture for later tests */
+}
+
+UT_TEST(test_build_migration_image_rejects_non_stopped_slot)
+{
+	ClusterControlRootMigrationImage image;
+	ClusterWalStateSlot slot;
+	char path[MAXPGPATH];
+	int fd;
+
+	wipe_root_files();
+	build_source_wal_state();
+	/* flip slot 1 to ACTIVE — the W6 CLOSED precondition is violated */
+	path_for(path, sizeof(path), ""); /* reuse: write into the wal root */
+	snprintf(path, sizeof(path), "%s/%s", test_wal_root,
+			 CLUSTER_WAL_STATE_FILENAME);
+	fd = open(path, O_RDWR);
+	UT_ASSERT(fd >= 0);
+	memcpy(&slot, (void *)0, 0); /* noop to keep compiler quiet */
+	{
+		ClusterWalStateSlot s;
+
+		if (pread(fd, &s, sizeof(s), CLUSTER_WAL_STATE_SLOT_OFFSET(1))
+			!= (ssize_t) sizeof(s))
+			abort();
+		s.state = CLUSTER_WAL_SLOT_STATE_ACTIVE;
+		s.crc = cluster_wal_state_block_crc(&s);
+		if (pwrite(fd, &s, sizeof(s), CLUSTER_WAL_STATE_SLOT_OFFSET(1))
+			!= (ssize_t) sizeof(s))
+			abort();
+	}
+	close(fd);
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&image),
+				 CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
+	build_source_wal_state(); /* restore the STOPPED fixture */
+}
+
 UT_TEST(test_strong_read_null_identity_stays_invalid_argument)
 {
 	ClusterControlRootMigrationImage image;
@@ -2071,13 +2143,15 @@ main(int argc, char **argv)
 		return fixture_root_main(argc, argv);
 	setup_fixture();
 
-	UT_PLAN(30);
+	UT_PLAN(32);
 	UT_RUN(test_abi_identity_and_features);
 	UT_RUN(test_invalid_argument_precedes_authority_io);
 	UT_RUN(test_external_fence_bit24_activation_is_forbidden_without_provider);
 	UT_RUN(test_create_and_read_primary);
 	UT_RUN(test_bootstrap_read_never_returns_authority_token);
 	UT_RUN(test_round_sha256_is_deterministic_and_matches_create);
+	UT_RUN(test_build_migration_image_maps_registry_and_claims);
+	UT_RUN(test_build_migration_image_rejects_non_stopped_slot);
 	UT_RUN(test_strong_read_null_identity_stays_invalid_argument);
 	UT_RUN(test_discovered_read_binds_identity_and_mints_token);
 	UT_RUN(test_discovered_read_absent_thread_fails_closed);
