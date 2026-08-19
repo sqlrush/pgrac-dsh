@@ -1149,3 +1149,27 @@ canonical post-read；carrier STOP 不绕过）：
 - `src/test/cluster_unit/test_cluster_page_apply.c`：5 个 RED 单测全绿
   （admission 合取逐条、sequence 步进/失败归属、mid-write 恒 STOP、
   crash matrix 全表、proof 字段契约）。
+
+---
+
+## 工作区本地增量 7：PGDEL-07 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-07：per-resource proof handoff 给 RF-ROOT/
+SIDE；不创建 global barrier）：
+
+- `src/include/cluster/cluster_page_handoff.h` + `src/backend/cluster/
+  cluster_page_handoff.c`：
+  - `cluster_page_handoff_ready`：§7.4 FND-10 合取（单 resource）——
+    §7.3 typed page proof 完整（contributor coverage + durability +
+    post-read + authority revalidated）+ RF-SIDE page-dependency proof +
+    failed-origin interval 仍 pinned + 无 consumer。保留 redo 只解决
+    retirement，永不等于 torn target 的 stable base（§7.4 末句）。
+  - `cluster_page_handoff_retention_denied`：PL-12——PAGE proof 之前
+    的 retire 请求恒拒绝（fail-closed；not-ready 是 retry，不是移除
+    依据）。
+  - per-resource 判定：无任何 global barrier 状态（§6.4：一个 block
+    ready 不证明 relation/thread/instance/WAL interval ready）。
+- 边界：proof 到 RF-ROOT/SIDE 的生产投递与 §10.3 production-caller
+  测试归 PGDEL-09/10；本层零 mutation/零持久状态。
+- `src/test/cluster_unit/test_cluster_page_handoff.c`：3 个 RED 单测
+  全绿（FND-10 合取逐项、PL-12 拒绝、per-resource 隔离）。

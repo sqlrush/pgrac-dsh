@@ -57,6 +57,7 @@ OBJS = \
 	cluster_page_source.o \
 	cluster_page_set.o \
 	cluster_page_apply.o \
+	cluster_page_handoff.o \
 	cluster_recovery_duty.o \
 	cluster_cf_enqueue.o \
 	cluster_cf_phase2.o \

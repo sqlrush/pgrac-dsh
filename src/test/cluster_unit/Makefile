@@ -606,6 +606,16 @@ test_cluster_page_apply: test_cluster_page_apply.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_RECOVERY_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-07: §7.4 FND-10 per-resource handoff judgement + PL-12
+# retention denial.  Judgement-only; links the apply layer for the
+# ClusterPageProof type.
+CLUSTER_PAGE_HANDOFF_O = $(top_builddir)/src/backend/cluster/cluster_page_handoff.o
+test_cluster_page_handoff: test_cluster_page_handoff.c unit_test.h \
+		$(CLUSTER_PAGE_HANDOFF_O) $(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_RECOVERY_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_HANDOFF_O) $(CLUSTER_PAGE_APPLY_O) \
+		$(CLUSTER_PAGE_RECOVERY_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
