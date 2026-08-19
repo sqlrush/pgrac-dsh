@@ -71,10 +71,16 @@ cluster_page_contributor_closure(const ClusterBlockRecoverySet *set)
 	for (i = 0; i < set->n_contributors; i++) {
 		const ClusterPageRedoChange *c = &set->contributors[i];
 
-		/* Same-block, classified, valid versions: a contributor that is
-		 * not classifiable or whose versions are unknown cannot join. */
+		/* Same-block, same-origin, classified, valid versions: a
+		 * contributor that is not classifiable or whose versions are
+		 * unknown cannot join, and a contributor of ANOTHER failed origin
+		 * is never part of this block's chain (spec §6.3: raw cross-thread
+		 * LSN has no global ordering — PU-27; sequential failures bind each
+		 * origin to its own root per §6.2-6). */
 		if (!cluster_page_identity_equal(&c->identity, &set->identity))
 			return CLUSTER_PAGE_CLOSURE_GAP;
+		if (c->failed_origin_thread != set->failed_origin_thread)
+			return CLUSTER_PAGE_CLOSURE_THREAD_MISMATCH;
 		if (c->page_class == CLUSTER_PAGE_CLASS_UNKNOWN
 			|| c->page_class == CLUSTER_PAGE_CLASS_UNCLASSIFIED)
 			return CLUSTER_PAGE_CLOSURE_UNKNOWN_CLASS;

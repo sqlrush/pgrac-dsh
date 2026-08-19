@@ -1207,3 +1207,34 @@ producer-consumer 必查）：
 - `src/test/cluster_unit/test_cluster_page_stats.c`：4 个 RED 单测全绿
   （G2 语义表逐项、event producer 值、gauge/timestamp producer、dump
   全字段 + 截断 + STOP reason）。
+
+---
+
+## 工作区本地增量 9：PGDEL-09 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-09：unit/TAP/fault/acceptance tests；
+repeated-recoverer target-write 保持 STOP）：
+
+- **单元 RED 矩阵补全**（§10.1 剩余行，组合已交付的 PGDEL-01..08
+  语义层）：
+  - `test_cluster_page_recovery_matrix.c` 7 组全绿：PU-09/10（NEW +
+    UNFORMATTED before-state 精确匹配 → INIT 动作；lifecycle 缺失 →
+    before-state invalid → BLOCKED；full-init RULE 本身保持 RED，
+    PU-17 成立）、PU-12（TEMP → DISCARD，owner proof 归 apply 层）、
+    PU-15/16（FULLIMAGE → IMAGE；valid source 准入 / lineage 失败 →
+    select -1）、PU-18/19（CLEANOUT class + APPLY 动作；codec census
+    RED，歧义属性 → UNKNOWN）、PU-20/21（NONLOGGED → REBUILD；owner
+    缺失 apply 层拒）、PU-11/27（INCARNATION_CROSS；跨 thread
+    contributor → **新 CLOSURE_THREAD_MISMATCH**——closure 增加
+    same-origin 检查，§6.3 跨 thread 裸 LSN 无全局顺序）。
+  - PL 面单元级：PL-01/02/04/05/06 映射 §7.7 crash matrix；PL-03 恒
+    STABLE_BASE_UNRESOLVED；PL-12 retire-before-proof 拒绝。
+- **fault TAP legs（PL-01..14）**：faithful TAP 铸造在 2-node 共享根
+  基板限制 + §7.6 STOP 下保持 RED/BLOCKED（与 RL-02..12 同因），单元
+  级判定已覆盖 crash-cut 语义；PL-03 永久 RED 直到 user 批准
+  stable-base 策略。
+- **§10.3 production caller**：仍 RED——把 PAGE 链接进真实 orchestrator
+  caller（source classifier → contributor builder → apply gate →
+  durability → post-read → release → retention handoff 逐段 fire）需要
+  production wiring + 不触碰现有 replay 路径（G1）——留 PGDEL-10 之后
+  的集成轮（与 RF-ROOT/SIDE 接线同批）。

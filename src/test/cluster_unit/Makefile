@@ -625,6 +625,16 @@ test_cluster_page_stats: test_cluster_page_stats.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_STATS_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-09: PU matrix + unit-level PL face over the delivered
+# semantic layers (classifier/decide/closure/source/handoff/crash matrix).
+CLUSTER_PAGE_MATRIX_LIBS = $(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_HANDOFF_O) \
+		$(CLUSTER_PAGE_RECOVERY_O) $(CLUSTER_PAGE_SET_O) $(CLUSTER_PAGE_SOURCE_O) \
+		$(CLUSTER_PAGE_VERSION_O)
+test_cluster_page_recovery_matrix: test_cluster_page_recovery_matrix.c unit_test.h \
+		$(CLUSTER_PAGE_MATRIX_LIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_MATRIX_LIBS) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

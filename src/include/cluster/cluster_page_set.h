@@ -95,6 +95,7 @@ typedef enum ClusterPageClosureResult
 	CLUSTER_PAGE_CLOSURE_GAP,	/* missing/unknown/invalid version join */
 	CLUSTER_PAGE_CLOSURE_UNKNOWN_CLASS, /* a contributor class is UNKNOWN */
 	CLUSTER_PAGE_CLOSURE_INCARNATION_CROSS, /* incarnation boundary crossed */
+	CLUSTER_PAGE_CLOSURE_THREAD_MISMATCH, /* contributor of another origin */
 	CLUSTER_PAGE_CLOSURE_TERMINAL_MISMATCH, /* chain end != terminal */
 	CLUSTER_PAGE_CLOSURE_INVALID_INPUT
 } ClusterPageClosureResult;
