@@ -251,10 +251,20 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
       ④ G3/G5 bit22 首开轮（all-member CLOSED-ACK 绑定 W6 事实 + reader
       切换）；⑤ census 重定义为 post-bit22 静态证明后接入门。
       ⚠️ 原"P7 W6 退休 + 三 consumer 迁移 + census 0"表述已作废（补记 43）。
-- [ ] P8 rebuild-first 编排
-- [ ] P9 fault legs + observability
-- [ ] 全量回归（cluster_tap 272 + cluster_unit 232 + cluster_regress 13）
-      + 推送 pgrac-dsh
+- [x] **P8 rebuild-first 编排**（2026-08-19）：结构性满足，无产品修复
+      ——增量 49/50 审计 + 本会话重新实证：gap1 replay-slot pin 每 episode
+      重写（episode_epoch 绑定，projection_current 拒 stale）；gap2 worker
+      pool 每 launch generation++ + verdict/bitmap 重写；gap3
+      BGW_NEVER_RESTART（worker.c:501 / thread_recovery_worker.c:353）+
+      serial acquire 门（同 episode 无 replacement）。测试固化 = plan 单测
+      （projection stale 拒）+ 集成断言归 RL 腿（2-node 限制，增量 50 裁决）。
+- [x] **P9 状态定稿**（2026-08-19）：§8.1 观测性 ✅（增量 55，G2 分级）；
+      RU-01..12 ✅；RL-01 ✅（t/271 6/6）；**RL-02..12 与 STOP-ROOT-IO-FENCE
+      （P4）= 🔴 BLOCKED（外部审计确认，见 §6a）**——非 complete。
+- [~] 全量回归：本会话已跑 t243 33/33 + cluster_regress 219/219 + 相关
+      cluster_unit 全绿 + census GREEN；**cluster_tap 全量 272 未跑**
+      （P9 BLOCKED 项完成后按合同再跑）+ 推送 pgrac-dsh（已推
+      rf-root-dev @ ad83c93ab7）。
 
 ## 9. DSH 工具（新 DSH 会话接手时可用）
 

@@ -4223,13 +4223,23 @@ multi-node harness 建设 = 独立工作项（P9 后）。
 （published_at/last_updated）——模块内分立，无混用；热路径（plan classify
 等）无新增日志（DEBUG1 级，批 1-4 未加 LOG 洪泛）✓。
 
-### P9 完成状态
+### P9 完成状态（修订 2026-08-19，与补记 62/63 外部审计一致）
 
-- RL-01 ✅（t/271）；RL-02..12 = unit 面 + honest 标注（增量 51/53）；
+- RL-01 ✅（t/271 6/6，canonical HW rebuild + zero replay + honest
+  dead-rejoin block）；
+- RL-02..12 = 🔴 **BLOCKED（外部审计确认）**，非 complete（补记 62
+  finding 7：无 faithful TAP 腿；2-node 基板限制：peer-DEAD 重启 phase3
+  600s、dead-rejoin 53R60 未实现、crash-rejoin epoch race、clean-leave
+  witness 窗口；增量 51/53）；RL-07 以单元面结论关闭（增量 40）；
 - RU-01..12 ✅（01-09 确认 + 10-12 action 拒绝面测试已存在）；
-- §8.1 ✅（本审计）；
-- P9 合同全部达成（faithful legs 按环境能力 + 合同允许的 honest
-  标注；RED matrix 全对照；观测性 G2 审计）。
+- §8.1 ✅（本审计，G2 分级合规）；
+- **STOP-ROOT-IO-FENCE（P4 external I/O eviction）= 🔴 BLOCKED（外部
+  审计确认）**（补记 62 finding 5）：external eviction/terminal
+  verification provider 未选择、无 IPC/receipt schema ——
+  cluster_external_fence_* 恒 false → P4/P9 不 complete；cooperative
+  fence 不能关闭该 gate（spec §8.4）。
+- P9 交付 = 上述 honest 状态（faithful legs 按环境能力；RED matrix 全
+  对照；观测性 G2 审计；未达成的腿显式 BLOCKED 并注明前置条件）。
 
 ---
 
