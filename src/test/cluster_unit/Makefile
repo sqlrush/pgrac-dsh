@@ -672,6 +672,14 @@ test_cluster_side_prepared: test_cluster_side_prepared.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_PREPARED_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-04: CLOG/MULTIXACT/COMMIT_TS derived-projection
+# judgements (verified / rebuildable / fail-closed lookup).
+CLUSTER_SIDE_PROJECTION_O = $(top_builddir)/src/backend/cluster/cluster_side_projection.o
+test_cluster_side_projection: test_cluster_side_projection.c unit_test.h \
+		$(CLUSTER_SIDE_PROJECTION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_PROJECTION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

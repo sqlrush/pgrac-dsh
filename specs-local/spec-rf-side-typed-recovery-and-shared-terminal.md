@@ -1012,3 +1012,32 @@ RECO-style recovery ownership、exact prepare/terminal binding）：
 - `src/test/cluster_unit/test_cluster_side_prepared.c`：2 组 RED 单测
   全绿（in-doubt 合取逐项、resolution 合取 + terminal-before-prepare/
   premature abort 拒绝）。
+
+---
+
+## 工作区本地增量 7：D-SIDE-04 落地（2026-08-20）
+
+**交付**（spec §1.2 D-SIDE-04：CLOG/MULTIXACT/COMMIT_TS projection
+producer、invalidate、rebuild/fail-closed、verification；local store
+不作 authority）：
+
+- `src/include/cluster/cluster_side_projection.h` + `src/backend/cluster/
+  cluster_side_projection.c`：
+  - `cluster_side_projection_verified`：§2.4 verifier 三事实合取
+    （canonical producer 双向一致 + exact coverage + integrity）——
+    每次 serve 前核对（durable ≠ authoritative）；任一缺 → scope
+    关闭（U-SIDE-08 local bit 不覆盖 TT/redo、U-SIDE-09 empty 不
+    当无 locker、U-SIDE-10 unknown timestamp 不翻 COMMITTED）。
+  - `cluster_side_projection_rebuildable`：§2.4 rebuild 规则——CLOG
+    从 canonical truth 重建（不要求 redo retained）；MULTIXACT/
+    COMMIT_TS 从 retained redo 重建（source retained 必须，否则
+    FND-10 deny retire，U-SIDE-09/10）；每类都要求 verified
+    canonical producer（无 producer 的重建是猜）。
+  - `cluster_side_projection_lookup`：miss/UNKNOWN → FAIL_CLOSED
+    （不读本机 ProcArray/CLOG 猜；判定为纯函数，零同步
+    network/durable I/O——§2.4 common rule 5）。
+- 边界：projection 存储、invalidation triggers、rebuild 执行仍是
+  生产 cluster_remote_xact wiring（RED）；零 ABI 改动。
+- `src/test/cluster_unit/test_cluster_side_projection.c`：3 组 RED 单测
+  全绿（verified 合取逐项 + 越界 kind fail-closed、lookup fail-closed、
+  rebuildable 按类 + source-retention 规则 + 无 producer 拒绝）。
