@@ -1384,6 +1384,144 @@ read_thread_claim_fields(uint16 thread_id, int32 node_id,
 }
 
 /*
+ * RF-ROOT P9 审计 #1b step-2 (增量 58): the thread-WAL-stream reader for
+ * the migration image.  The canonical root record needs the checkpoint
+ * record's CRC and the validated tail-last record; both live in the
+ * per-thread WAL stream (cluster_wal_threads_dir/thread_N), read through
+ * XLogReader with thread-local segment callbacks (the stream is NOT the
+ * local pg_wal).
+ */
+typedef struct MigrationWalReaderPrivate {
+	char thread_dir[MAXPGPATH];
+	uint32 tli;					/* stream TLI (from the wal-state slot) */
+} MigrationWalReaderPrivate;
+
+static void
+migration_wal_segment_open(XLogReaderState *state, XLogSegNo nextSegNo,
+						   TimeLineID *tli_p)
+{
+	MigrationWalReaderPrivate *priv =
+		(MigrationWalReaderPrivate *) state->private_data;
+	char fname[MAXFNAMELEN];
+	char path[MAXPGPATH];
+	int written;
+
+	if (priv == NULL) {
+		state->seg.ws_file = -1;
+		return;
+	}
+	XLogFileName(fname, *tli_p, nextSegNo, state->segcxt.ws_segsize);
+	written = snprintf(path, sizeof(path), "%s/%s", priv->thread_dir, fname);
+	if (written <= 0 || (size_t) written >= sizeof(path)) {
+		state->seg.ws_file = -1;
+		return;
+	}
+	state->seg.ws_file = BasicOpenFile(path, O_RDONLY | PG_BINARY);
+}
+
+static void
+migration_wal_segment_close(XLogReaderState *state)
+{
+	if (state->seg.ws_file >= 0)
+		CloseTransientFile(state->seg.ws_file);
+	state->seg.ws_file = -1;
+}
+
+static int
+migration_wal_read_page(XLogReaderState *state, XLogRecPtr targetPagePtr,
+						int reqLen, XLogRecPtr targetRecPtr,
+						char *cur_page)
+{
+	MigrationWalReaderPrivate *priv =
+		(MigrationWalReaderPrivate *) state->private_data;
+	WALReadError errinfo;
+
+	/* WALRead drives segment_open/close and pg_pread; a short read or a
+	 * missing segment is a clean end of the stream (WOULDBLOCK), which the
+	 * reader treats as EOF. */
+	if (priv == NULL)
+		return XLREAD_FAIL;
+	if (!WALRead(state, cur_page, targetPagePtr, XLOG_BLCKSZ, priv->tli,
+				 &errinfo))
+		return XLREAD_WOULDBLOCK;
+	return XLOG_BLCKSZ;
+}
+
+/*
+ * migration_wal_scan -- read the thread stream from the checkpoint redo
+ * record up to the write position; extract the checkpoint record CRC and
+ * the last complete record below the write position (tail-last).  A
+ * missing checkpoint record or any read failure fails closed (the image
+ * then cannot pass migration_image_validate — the round stays un-begun).
+ */
+static bool
+migration_wal_scan(uint16 thread_id, uint32 tli, XLogRecPtr checkpoint_redo,
+				   XLogRecPtr write_pos, uint32 *out_ckpt_crc,
+				   XLogRecPtr *out_tail_last_lsn, uint32 *out_tail_last_crc)
+{
+	MigrationWalReaderPrivate priv;
+	XLogReaderState *reader;
+	XLogRecPtr first_valid;
+	const XLogRecord *record;
+	char *errormsg;
+	bool saw_checkpoint = false;
+
+	if (out_ckpt_crc == NULL || out_tail_last_lsn == NULL
+		|| out_tail_last_crc == NULL || tli == 0
+		|| XLogRecPtrIsInvalid(checkpoint_redo)
+		|| XLogRecPtrIsInvalid(write_pos)
+		|| write_pos < checkpoint_redo)
+		return false;
+	*out_ckpt_crc = 0;
+	*out_tail_last_lsn = 0;
+	*out_tail_last_crc = 0;
+	{
+		char dirname[MAXPGPATH];
+
+		memset(&priv, 0, sizeof(priv));
+		priv.tli = tli;
+		cluster_wal_thread_dir_name(thread_id, dirname, sizeof(dirname));
+		if (dirname[0] == '\0'
+			|| snprintf(priv.thread_dir, sizeof(priv.thread_dir), "%s/%s",
+						cluster_wal_threads_dir, dirname) <= 0
+			|| (size_t)snprintf(priv.thread_dir, sizeof(priv.thread_dir),
+								"%s/%s", cluster_wal_threads_dir, dirname)
+			   >= sizeof(priv.thread_dir))
+			return false;
+	}
+	reader = XLogReaderAllocate(wal_segment_size, NULL,
+								XL_ROUTINE(.page_read = &migration_wal_read_page,
+										   .segment_open = &migration_wal_segment_open,
+										   .segment_close = &migration_wal_segment_close),
+								&priv);
+	if (reader == NULL)
+		return false;
+	first_valid = XLogFindNextRecord(reader, checkpoint_redo);
+	if (XLogRecPtrIsInvalid(first_valid)) {
+		XLogReaderFree(reader);
+		return false;
+	}
+	for (;;) {
+		record = XLogReadRecord(reader, &errormsg);
+		if (record == NULL)
+			break;		/* clean end of stream */
+		if (!saw_checkpoint) {
+			/* The first record at the redo pointer is the checkpoint record. */
+			*out_ckpt_crc = record->xl_crc;
+			saw_checkpoint = true;
+		}
+		if (reader->ReadRecPtr >= write_pos)
+			break;
+		if (reader->EndRecPtr <= write_pos) {
+			*out_tail_last_lsn = reader->ReadRecPtr;
+			*out_tail_last_crc = record->xl_crc;
+		}
+	}
+	XLogReaderFree(reader);
+	return saw_checkpoint && *out_ckpt_crc != 0;
+}
+
+/*
  * cluster_control_root_build_migration_image -- RF-ROOT P7 (增量 48, step
  * ④d): construct the create_prepared migration image from the live shared
  * state: wal-state registry slots (checkpoint/tail bounds), thread claim
@@ -1509,11 +1647,16 @@ cluster_control_root_build_migration_image(
 			= CLUSTER_CONTROL_ROOT_TAIL_WAL_RECORD_SCAN_V1;
 		record->recovered_through_lsn_exclusive = slot.checkpoint_redo_lsn;
 		record->recovered_tli = slot.tli;
-		/* RF-ROOT P9 审计 #1b step-2 (增量 58, 待续): the checkpoint /
-		 * tail-last record CRCs come from the thread WAL stream; the scan
-		 * lands after the thread-stream reader mechanism is confirmed.
-		 * Until then the fields stay 0 and migration_image_validate
-		 * refuses the image (honest: the round cannot begin yet). */
+		if (!migration_wal_scan(
+				(uint16)(i + 1), slot.tli, slot.checkpoint_redo_lsn,
+				slot.highest_lsn,
+				&record->checkpoint_record_crc32c,
+				&record->tail_last_record_lsn,
+				&record->tail_last_record_crc32c)) {
+			pfree(second);
+			pfree(first);
+			return CLUSTER_CONTROL_ROOT_IO_ERROR;
+		}
 		record->published_at_usec = image.created_at_usec;
 		record->lifecycle_reason
 			= CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT;

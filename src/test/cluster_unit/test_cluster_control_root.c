@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "access/xlog.h"
+#include "catalog/pg_control.h"
 #include "cluster/cluster_cf_enqueue.h"
 #include "cluster/cluster_cf_storage.h"
 #include "cluster/cluster_control_root.h"
@@ -40,6 +41,13 @@
 #undef strerror_r
 
 #include "unit_test.h"
+
+/* backend global provided by xlog.c in a real server; the cluster_unit
+ * fixture uses the default 16MiB segment size (segment 1 covers
+ * [0x1000000, 0x2000000) — the build_source_wal_state fixture's
+ * checkpoint LSN 0x1000000 therefore lives in segment 1). */
+int		wal_segment_size = XLOG_BLCKSZ * 2048;
+
 
 UT_DEFINE_GLOBALS();
 
@@ -88,18 +96,6 @@ extern ClusterWalPinResult cluster_wal_retention_root_publish_begin_exact(
 extern ClusterWalrReleaseResult cluster_wal_retention_root_publish_end(
 	ClusterWalRootPublishGuard **guard);
 
-void *
-palloc(Size size)
-{
-	return malloc(size);
-}
-
-void
-pfree(void *pointer)
-{
-	free(pointer);
-}
-
 void
 ExceptionalCondition(const char *conditionName, const char *fileName, int lineNumber)
 {
@@ -111,6 +107,44 @@ int
 OpenTransientFile(const char *fileName, int fileFlags)
 {
 	return open(fileName, fileFlags, 0600);
+}
+
+/* linked by xlogreader_fs.o via libpgport_srv.a path.o (make_absolute_path
+ * error paths) — the unit harness never raises; plain open() suffices. */
+int
+BasicOpenFile(const char *file_name, int fileFlags)
+{
+	return open(file_name, fileFlags, 0);
+}
+
+int
+errcode(int sqlerrcode pg_attribute_unused())
+{
+	return 0;
+}
+
+int
+errmsg(const char *fmt pg_attribute_unused(), ...)
+{
+	return 0;
+}
+
+int
+errmsg_internal(const char *fmt pg_attribute_unused(), ...)
+{
+	return 0;
+}
+
+bool
+errstart_cold(int elevel pg_attribute_unused(), const char *domain pg_attribute_unused())
+{
+	return false;
+}
+
+void
+errfinish(const char *filename pg_attribute_unused(), int lineno pg_attribute_unused(),
+		  const char *funcname pg_attribute_unused())
+{
 }
 
 int
@@ -430,6 +464,69 @@ read_all_or_abort(const char *path, void *buf, size_t len)
 	close(fd);
 }
 
+/*
+ * write_minimal_checkpoint_segment -- RF-ROOT P9 审计 #1b (增量 58): build
+ * a minimal real WAL segment for thread 1 (tli 1, seg 1 — the
+ * build_source_wal_state fixture's checkpoint_redo lives at 0x1000000,
+ * segment offset 0) containing one CheckPoint record, so the migration
+ * image scan can extract the checkpoint record CRC.  XLogRecord encoding
+ * follows the on-disk format (header + payload + CRC over everything but
+ * the xl_crc field).
+ */
+static void
+write_minimal_checkpoint_segment(const char *thread_dir)
+{
+	char path[MAXPGPATH];
+	uint8 page[XLOG_BLCKSZ];
+	XLogLongPageHeaderData longhdr;
+	XLogRecord rec;
+	pg_crc32c crc;
+	int off;
+
+	memset(page, 0, sizeof(page));
+	memset(&longhdr, 0, sizeof(longhdr));
+	/* Segment page 0 must carry the long header (offset==0 forces
+	 * XLP_LONG_HEADER in XLogReaderValidatePageHeader).  The reader's
+	 * system_identifier is 0 in the unit harness, so xlp_sysid stays 0;
+	 * segment size and block size must match the reader's. */
+	longhdr.std.xlp_magic = XLOG_PAGE_MAGIC;
+	longhdr.std.xlp_info = XLP_LONG_HEADER;
+	longhdr.std.xlp_tli = 1;
+	longhdr.std.xlp_pageaddr = UINT64_C(0x1000000);
+	longhdr.xlp_sysid = UINT64_C(0);
+	longhdr.xlp_seg_size = wal_segment_size;
+	longhdr.xlp_xlog_blcksz = XLOG_BLCKSZ;
+	memcpy(page, &longhdr, sizeof(longhdr));
+
+	off = SizeOfXLogLongPHD + SizeOfXLogRecord;
+	/* Payload follows the XLogInsert encoding for a pure main-data
+	 * record: XLogRecordDataHeaderShort (0xFF + len) + CheckPoint bytes.
+	 * The record reader parses these headers, so zeros alone would be
+	 * misread as block ids. */
+	page[off] = XLR_BLOCK_ID_DATA_SHORT;
+	page[off + 1] = (uint8) sizeof(CheckPoint);
+	memset(page + off + 2, 0, sizeof(CheckPoint));
+
+	memset(&rec, 0, sizeof(rec));
+	rec.xl_tot_len = SizeOfXLogRecord + 2 + sizeof(CheckPoint);
+	rec.xl_xid = 1;
+	rec.xl_prev = UINT64_C(0x1000000);
+	rec.xl_info = XLOG_CHECKPOINT_SHUTDOWN;
+	rec.xl_rmid = RM_XLOG_ID;
+	/* ValidXLogRecord order: payload first, then header up to (not
+	 * including) xl_crc. */
+	INIT_CRC32C(crc);
+	COMP_CRC32C(crc, page + off, 2 + sizeof(CheckPoint));
+	COMP_CRC32C(crc, (uint8 *) &rec, offsetof(XLogRecord, xl_crc));
+	FIN_CRC32C(crc);
+	rec.xl_crc = (uint32) crc;
+	memcpy(page + SizeOfXLogLongPHD, &rec, sizeof(rec));
+
+	snprintf(path, sizeof(path), "%s/%s", thread_dir,
+			 "000000010000000000000001");
+	write_all_or_abort(path, page, sizeof(page));
+}
+
 static void
 build_source_wal_state(void)
 {
@@ -458,6 +555,7 @@ build_source_wal_state(void)
 	snprintf(path, sizeof(path), "%s/%s", thread_dir,
 			 CLUSTER_WAL_THREAD_CLAIM_FILENAME);
 	write_all_or_abort(path, &claim, sizeof(claim));
+	write_minimal_checkpoint_segment(thread_dir);
 }
 
 static void
@@ -1297,6 +1395,8 @@ UT_TEST(test_build_migration_image_maps_registry_and_claims)
 	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&image),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	UT_ASSERT_EQ(image.assigned_record_count, 1);
+	/* the checkpoint record CRC must come from the real WAL stream scan */
+	UT_ASSERT(image.records[0].checkpoint_record_crc32c != 0);
 	UT_ASSERT_EQ(image.records[0].identity.origin_thread_id, 1);
 	UT_ASSERT_EQ(image.records[0].identity.origin_node_id, 0);
 	UT_ASSERT_EQ(image.records[0].identity.origin_owner_incarnation,

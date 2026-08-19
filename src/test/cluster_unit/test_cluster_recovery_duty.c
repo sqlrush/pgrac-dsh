@@ -606,19 +606,14 @@ UT_TEST(test_create_authority_requires_complete_ack_round)
 	round.coordinator_incarnation = 99;
 	cluster_node_id = 0;
 
-	/* ACK table not COMPLETE -> refused. */
+	/* RF-ROOT P9 审计 #1c (增量 58): the bit22 cutover round's create is
+	 * EXEMPT from the SAMPLE-stage ACK precondition — granted even while
+	 * the ACK table is not COMPLETE, and no ACK read happens at create
+	 * (the W6 clause-3 CLOSED binding lives in the activate proof). */
 	ut_ack_complete_ok = false;
 	ut_ack_complete_calls = 0;
-	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
-	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
-
-	/* The create proof demands only the SAMPLE-stage COMPLETE round. */
-	ut_ack_complete_ok = true;
-	ut_ack_min_stage = 0;
 	UT_ASSERT(cluster_control_root_create_authority_current_v1(&image, &round));
-	UT_ASSERT_EQ((int)ut_ack_min_stage,
-				 (int)CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE);
-	ut_ack_complete_ok = false;
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
 
 	/* Non-coordinator -> refused BEFORE any ACK read (fail-fast). */
 	cluster_node_id = 1;
@@ -627,24 +622,37 @@ UT_TEST(test_create_authority_requires_complete_ack_round)
 	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
 	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
 
-	/* Coordinator + COMPLETE ACK + bit22 target -> granted. */
+	/* Coordinator + bit22 target -> granted, still no ACK read. */
 	cluster_node_id = 0;
 	ut_ack_complete_calls = 0;
 	UT_ASSERT(cluster_control_root_create_authority_current_v1(&image, &round));
-	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
 
-	/* Target WITHOUT bit22 -> refused (the bit22 cutover carrier). */
+	/* Target WITHOUT bit22 -> the frozen SAMPLE-stage precondition binds
+	 * (R4 round): incomplete ACK table refuses after exactly one read... */
 	round.target_feature_bitmap = UINT64_C(1);
+	ut_ack_complete_ok = false;
 	ut_ack_complete_calls = 0;
 	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
 	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
 
-	/* Target with an UNKNOWN feature bit -> refused (whitelist gate). */
+	/* ...and a complete SAMPLE round still cannot lift the whitelist:
+	 * create_authority requires bit22 in the target for every round. */
+	ut_ack_complete_ok = true;
+	ut_ack_min_stage = 0;
+	ut_ack_complete_calls = 0;
+	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
+	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	UT_ASSERT_EQ((int)ut_ack_min_stage,
+				 (int)CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_SAMPLE);
+
+	/* Target with an UNKNOWN feature bit + bit22 -> refused (whitelist
+	 * gate), with no ACK read (exempt round). */
 	round.target_feature_bitmap = (UINT64_C(1) << 20)
 		| PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
 	ut_ack_complete_calls = 0;
 	UT_ASSERT(!cluster_control_root_create_authority_current_v1(&image, &round));
-	UT_ASSERT_EQ(ut_ack_complete_calls, 1);
+	UT_ASSERT_EQ(ut_ack_complete_calls, 0);
 	round.target_feature_bitmap =
 		UINT64_C(1) | PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1;
 }

@@ -562,11 +562,20 @@ test_cluster_cf_authority: test_cluster_cf_authority.c unit_test.h \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
 CLUSTER_CONTROL_ROOT_O = $(top_builddir)/src/backend/cluster/cluster_control_root.o
+# migration_wal_scan (增量 58) drives a real XLogReader over the thread
+# stream.  The reader is compiled -DFRONTEND (pg_waldump style) so the
+# unit binary does not drag in backend palloc/elog/ShmemVariableCache
+# machinery; err*/BasicOpenFile are stubbed in the test file.
 test_cluster_control_root: test_cluster_control_root.c unit_test.h \
-		$(CLUSTER_CONTROL_ROOT_O)
+		$(CLUSTER_CONTROL_ROOT_O) xlogreader_fs.o
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_CONTROL_ROOT_O) \
+		xlogreader_fs.o \
 		$(top_builddir)/src/common/libpgcommon.a \
-		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) -lssl -lcrypto -o $@
+		$(top_builddir)/src/port/libpgport_srv.a $(LDFLAGS) \
+		-lssl -lcrypto -llz4 -lzstd -o $@
+
+xlogreader_fs.o: $(top_srcdir)/src/backend/access/transam/xlogreader.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DFRONTEND -c $< -o $@
 
 CLUSTER_WAL_RETENTION_O = $(top_builddir)/src/backend/cluster/cluster_wal_retention.o
 test_cluster_wal_retention: test_cluster_wal_retention.c unit_test.h \
