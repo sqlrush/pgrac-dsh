@@ -73,6 +73,15 @@ static int test_cf_lock_calls = 0;
 static int test_durable_rename_calls = 0;
 static bool test_fail_primary_rename = false;
 static bool test_create_authorized = true;
+/* RF-ROOT P9 审计 #2 (增量 59): stub state for the bit22 latch
+ * cross-restart restore (cluster_control_root_restore_bit22_latch_if_active
+ * links the semantic_activation entry points; the unit harness stands in
+ * for the shmem latch with plain scalars). */
+static bool test_bit22_latch_active;
+static bool test_bit22_latch_apply_ok = true;
+static uint64 test_bit22_latch_apply_epoch;
+static uint64 test_bit22_latch_apply_generation;
+static int test_bit22_latch_apply_calls;
 static bool test_activate_authorized = true;
 static bool test_publish_authorized = true;
 static ClusterWalPinResult test_walr_begin_result = CLUSTER_WAL_PIN_OK;
@@ -204,6 +213,25 @@ cluster_membership_get_last_admitted_incarnation(int32 node_id)
 {
 	(void) node_id;
 	return test_membership_incarnation;
+}
+
+bool
+cluster_r4_bit22_cutover_active(void)
+{
+	return test_bit22_latch_active;
+}
+
+bool
+cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
+									 uint64 round_generation)
+{
+	test_bit22_latch_apply_calls++;
+	if (!test_bit22_latch_apply_ok)
+		return false;
+	test_bit22_latch_active = true;
+	test_bit22_latch_apply_epoch = transition_epoch;
+	test_bit22_latch_apply_generation = round_generation;
+	return true;
 }
 
 uint64
@@ -1592,6 +1620,68 @@ UT_TEST(test_activate_and_stale_token)
 	UT_ASSERT_EQ(stale_out.file_txn_seq, 0);
 }
 
+UT_TEST(test_restore_bit22_latch_from_active_root)
+{
+	/* RF-ROOT P9 审计 #2 (增量 59): a durable ACTIVE root (bit22 target)
+	 * re-arms the shmem latch with the root's round identity; PREPARED /
+	 * absent roots leave the gate pre-bit22, and a refused apply (census
+	 * RED) fails closed. */
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	ClusterControlRootFileToken prepared;
+	ClusterControlRootFileToken active;
+	uint8 round_sha[PG_SHA256_DIGEST_LENGTH];
+
+	/* Absent root -> no restore. */
+	wipe_root_files();
+	test_bit22_latch_active = false;
+	test_bit22_latch_apply_calls = 0;
+	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
+
+	/* PREPARED (create only) -> no restore. */
+	UT_ASSERT_EQ(create_prepared(&image, &round, &prepared),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	test_bit22_latch_apply_calls = 0;
+	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
+
+	/* ACTIVE + bit22 -> restored with the root's round identity. */
+	round_sha256(&round, round_sha);
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
+														&round, &active),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(active.activation_state, CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE);
+	test_bit22_latch_active = false;
+	test_bit22_latch_apply_calls = 0;
+	UT_ASSERT(cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 1);
+	UT_ASSERT_EQ(test_bit22_latch_apply_epoch, round.transition_epoch);
+	UT_ASSERT_EQ(test_bit22_latch_apply_generation, round.prepare_generation);
+	UT_ASSERT(test_bit22_latch_active);
+
+	/* Already armed -> no second apply. */
+	test_bit22_latch_apply_calls = 0;
+	UT_ASSERT(cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
+
+	/* Refused apply (census RED stand-in) -> fail-closed, gate stays off. */
+	wipe_root_files();
+	UT_ASSERT_EQ(create_prepared(&image, &round, &prepared),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	round_sha256(&round, round_sha);
+	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
+														&round, &active),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	test_bit22_latch_active = false;
+	test_bit22_latch_apply_ok = false;
+	test_bit22_latch_apply_calls = 0;
+	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 1);
+	UT_ASSERT(!test_bit22_latch_active);
+	test_bit22_latch_apply_ok = true;
+}
+
 UT_TEST(test_unbound_cutover_mutators_fail_before_cf_and_preserve_prepared_root)
 {
 	ClusterControlRootMigrationImage image;
@@ -2259,6 +2349,7 @@ main(int argc, char **argv)
 	UT_RUN(test_storage_contract_fails_before_cf_or_file_io);
 	UT_RUN(test_single_node_local_probe_fails_before_cf_or_file_io);
 	UT_RUN(test_activate_and_stale_token);
+	UT_RUN(test_restore_bit22_latch_from_active_root);
 	UT_RUN(test_unbound_cutover_mutators_fail_before_cf_and_preserve_prepared_root);
 	UT_RUN(test_native_cf_hold_cannot_authorize_strong_read);
 	UT_RUN(test_activation_rejects_changed_source_wal_bytes);

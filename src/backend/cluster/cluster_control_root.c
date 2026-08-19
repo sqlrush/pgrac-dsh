@@ -23,6 +23,7 @@
 #include "cluster/cluster_control_root.h"
 #include "cluster/cluster_wal_retention.h"
 #include "cluster/cluster_guc.h"
+#include "cluster/cluster_semantic_activation.h"
 #include "cluster/cluster_wal_state.h"
 #include "cluster/cluster_wal_thread.h"
 #include "cluster_control_root_private.h"
@@ -745,6 +746,44 @@ read_canonical_pair(ControlRootImage *primary, ControlRootImage *bak)
 	if (primary_result != CLUSTER_CONTROL_ROOT_ABSENT)
 		return primary_result;
 	return bak_result;
+}
+
+/*
+ * cluster_control_root_restore_bit22_latch_if_active -- RF-ROOT P9 审计 #2
+ *	(增量 59): re-arm the bit22 cutover latch across a postmaster restart.
+ *	The shmem latch lives only as long as the postmaster; a durable ACTIVE
+ *	root whose target bitmap carries bit22 means the cutover round
+ *	completed and the dual-path gate (§17.8) must read as post-bit22 on
+ *	the next boot.  The round identity is re-bound from the root header
+ *	(migration_transition_epoch / migration_prepare_generation) through
+ *	the same 0->1 CAS the in-round apply uses — a concurrent winner or an
+ *	already-armed latch is a no-op, and a census-RED apply fails closed
+ *	(the gate then stays pre-bit22, the registry path: safe direction).
+ *	Returns whether the gate reads as post-bit22 afterwards.
+ */
+bool
+cluster_control_root_restore_bit22_latch_if_active(void)
+{
+	ControlRootImage primary;
+	ControlRootImage bak;
+	ClusterControlRootResult result;
+
+	if (cluster_r4_bit22_cutover_active())
+		return true;
+	result = read_canonical_pair(&primary, &bak);
+	if (result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return false;
+	if (primary.header.activation_state
+			!= CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE
+		|| (primary.header.target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| primary.header.migration_transition_epoch == 0
+		|| primary.header.migration_prepare_generation == 0)
+		return false;
+	return cluster_r4_bit22_cutover_latch_apply(
+		primary.header.migration_transition_epoch,
+		primary.header.migration_prepare_generation);
 }
 
 static void

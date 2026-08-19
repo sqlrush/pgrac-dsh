@@ -429,6 +429,11 @@ extern ClusterControlRootResult cluster_control_root_read_canonical(
 	ClusterControlRootReadToken *out_token);
 /* 增量 39 §A: BOOTSTRAP identity discovery + STRONG bound read (token
  * minted by the STRONG step only). */
+/* RF-ROOT P9 审计 #2 (增量 59): re-arm the bit22 cutover latch from a
+ * durable ACTIVE root across a postmaster restart.  Returns whether the
+ * dual-path gate reads as post-bit22 afterwards. */
+extern bool cluster_control_root_restore_bit22_latch_if_active(void);
+
 extern ClusterControlRootResult cluster_control_root_read_canonical_discovered(
 	uint16 origin_thread_id, ClusterControlRootSnapshot *out_snapshot,
 	ClusterControlRootReadToken *out_token);

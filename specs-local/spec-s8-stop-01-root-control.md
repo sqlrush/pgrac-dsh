@@ -4326,3 +4326,37 @@ magic="PCRM"、version=1、bytes=sizeof(round)、coordinator_incarnation
   migration_image_validate）；
 - r4fsm/control_root 补字段断言；
 - t243/regress 复跑。
+
+---
+
+## 增量 59（RF-ROOT P9 审计 #2：bit22 latch 跨重启恢复）
+
+**审计命中**（补记 62 finding 2）：`cluster_r4_bit22_cutover_active()`
+读 shmem latch——postmaster 重启后 shmem 重建、latch 归零——若持久
+control root 已 ACTIVE（bit22 target），gate 丢失 → recovery plan 退回
+pre-bit22（registry 权威）路径 → §17.8 双路径门控跨重启不成立。
+
+**设计（§17.8 恢复语义）**：
+
+1. **恢复函数**（semantic_activation.c）：
+   `cluster_r4_bit22_cutover_restore_from_root(const ClusterControlRootSnapshot *)`
+   ——仅当 `snapshot.activation_state == ACTIVE` 且 header target
+   feature bitmap 含 bit22 时，用 root header 的
+   `migration_transition_epoch` / `migration_prepare_generation` 调
+   `cluster_r4_bit22_cutover_latch_apply`（0→1 CAS；已在 active 时
+   返回 false 无副作用；census 红时 fail-closed 拒绝恢复——安全方向，
+   退回 registry 路径）。
+2. **恢复点**：`cluster_recovery_plan` 每次 pass 开头、bit22_active
+   采样**之前**：无条件 `cluster_control_root_read_canonical_discovered`
+   （失败容忍——root 缺失/身份不符时跳过恢复）→ 满足条件即恢复 →
+   同一 pass 的 bit22_active 采样自然走 post-bit22 路径。
+   StartupProcess 的 plan pass 是重启后第一个通用 root 读取点。
+3. **幂等**：latch 已 active 时 apply 的 CAS 失败返回 false——恢复调用
+   与正常 apply 共用同一 0→1 CAS，无双写、无覆盖。
+
+**验收**：
+
+- recovery_duty/语义激活单测：恢复函数对 ACTIVE+bit22 snapshot 置位
+  latch 并绑定 root 轮次身份；对 PREPARED/非 bit22/非法 epoch 拒绝；
+- recovery_plan 单测：pass 前恢复（stub root 读 + stub latch）；
+- t243/regress 复跑。

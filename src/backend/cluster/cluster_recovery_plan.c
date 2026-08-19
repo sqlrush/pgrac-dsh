@@ -185,6 +185,13 @@ cluster_recovery_plan_generate(uint32 dbstate_at_startup, bool local_recovery_ne
 	now_us = (int64)GetCurrentTimestamp();
 	plan.generated_at = now_us;
 
+	/* RF-ROOT P9 审计 #2 (增量 59): the bit22 latch is shmem-only and dies
+	 * with the postmaster — re-arm it from the durable root when the
+	 * cutover round completed (ACTIVE + bit22 target) before the dual-path
+	 * sample below.  Fail-closed: absent/not-ACTIVE/census-RED roots leave
+	 * the gate pre-bit22 (frozen registry authority). */
+	cluster_control_root_restore_bit22_latch_if_active();
+
 	/* RF-ROOT P7 (增量 39 §B / 补记 43-44): dual-path by the bit22 cutover
 	 * latch, sampled once per pass so one plan is coherent.  false =
 	 * pre-bit22 (frozen §17.8: the wal-state registry remains the selected
