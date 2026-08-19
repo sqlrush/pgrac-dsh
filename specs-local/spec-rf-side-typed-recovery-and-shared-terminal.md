@@ -957,3 +957,31 @@ cold/online common primitive graph；unknown default BLOCKED）：
   observability（D-SIDE-10）保持 RED；零 ABI 改动。
 - `src/test/cluster_unit/test_cluster_side_route.c`：3 组 RED 单测全绿
   （matrix 具名行、unknown 默认 BLOCKED、verdict 纯函数/冷热一致）。
+
+---
+
+## 工作区本地增量 5：D-SIDE-02 落地（2026-08-20）
+
+**交付**（spec §1.2 D-SIDE-02：decode 与 apply 分离；normal TT/undo
+truth 只走一份 primitive；不得宣称现有 recovery writer 已安全）：
+
+- `src/include/cluster/cluster_side_undo.h` + `src/backend/cluster/
+  cluster_side_undo.c`：
+  - `cluster_undo_decode`：§2.1-1 纯解析——RM_CLUSTER_UNDO 单 record
+    → caller-owned parsed 字段（kind/opcode/instance/segment_id/
+    slot_offset/wrap/xid/commit_scn/block_no/has_payload），逐 opcode
+    精确长度校验（与 production handler 同 shape）；未知 info / 错误
+    rmgr / malformed length → false（BLOCKED，U-SIDE-04）；零
+    I/O/零 mutation/不重读 raw record。
+  - `cluster_undo_preflight`：§2.1-2——D-SIDE-01 route（TT_UNDO 行
+    过；XLOG_HW_RESERVE 恒 BLOCKED，STOP-RF-SIDE-SPACE-ABI）+ 字段
+    完整性（TT slot_offset < TT_SLOTS_PER_SEGMENT、xid 有效）——
+    任一 false → 零 mutation（U-SIDE-05 one-at-a-time 面）。
+  - **不得宣称现有 recovery writer 已安全**：apply 的执行仍由
+    production redo handler 负责（RED，RF-ROOT/RF-PAGE 集成轮接线）。
+- 边界：2PC binding（D-SIDE-03）、projection producer（D-SIDE-04）、
+  canonical space metadata（D-SIDE-05，STOP）保持 RED；零 ABI 改动。
+- `src/test/cluster_unit/test_cluster_side_undo.c`：4 组 RED 单测全绿
+  （TT_COMMIT 字段解析 + preflight、malformed/unknown/错 rmgr
+  BLOCKED、字段完整性逐项 + HW_RESERVE BLOCKED、BLOCK_WRITE 字段 +
+  payload 标志）。

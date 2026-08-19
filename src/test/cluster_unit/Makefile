@@ -656,6 +656,14 @@ test_cluster_side_route: test_cluster_side_route.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_ROUTE_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-02: TT/undo decode + preflight primitives (single
+# parser; malformed/unknown -> BLOCKED pre-mutation).
+CLUSTER_SIDE_UNDO_O = $(top_builddir)/src/backend/cluster/cluster_side_undo.o
+test_cluster_side_undo: test_cluster_side_undo.c unit_test.h \
+		$(CLUSTER_SIDE_UNDO_O) $(CLUSTER_SIDE_ROUTE_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_UNDO_O) $(CLUSTER_SIDE_ROUTE_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
