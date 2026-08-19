@@ -259,11 +259,13 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
       ACTIVE root 的交叉验证（增量 59b）；三态 latch（SOURCE/BOOTSTRAP/
       VERIFIED）+ CF(S) 强验证升级；first-open source-close BARRIER（增量
       61）让在线 cutover 可达（build 接受冻结 ACTIVE slot）。
-- [~] **t/243 fixture 保留**（诚实）：在线 cutover 已可达，但 t/243 的
-      L4 crash-rejoin 腿在 post-bit22 下依赖尚未实现的 post-bit22
-      crash-rejoin（P8 缺口：latch 置位后 peer join 30s 不收敛——增量
-      50 的"结构性满足"审计未覆盖此路径）；真实 cutover 的 t/274 重启
-      腿待 P8 该路径完成后实施。
+- [~] **t/243 fixture 保留**（诚实）：在线 cutover 已可达，但 post-bit22
+      的**节点死亡恢复路径未完成**（2026-08-19 实证诊断：强制 latch 后，
+      peer 死亡时 hw_remaster "structurally blocked"（bit22 分支 491）、
+      GRD recovery WAIT_CLUSTER 卡、checkpointer 拿不到 CF 锁 →
+      checkpoint 失败）——post-bit22 恢复需要 RF-PAGE/SIDE 的
+      stable-base/post-read/retirement proof（DSH 队列拆分建议）；t/243
+      fixture 与 t/274 重启腿在此路径完成后实施。
 - [x] **P8 rebuild-first 编排**（2026-08-19）：结构性满足，无产品修复
       ——增量 49/50 审计 + 本会话重新实证：gap1 replay-slot pin 每 episode
       重写（episode_epoch 绑定，projection_current 拒 stale）；gap2 worker
