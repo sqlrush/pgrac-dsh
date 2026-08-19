@@ -2023,3 +2023,53 @@ build_migration_image 的集成测试随 #1（首开可达）修复落地，当�
 - ✅ #4、#3、#8
 - 🔶 #1 partial（1a/1b-step1/1c 已落；step-2 CRC 剩余 → 仍 OPEN）
 - ⬜ #2、#5、#7
+
+---
+
+## 复审补记 67（2026-08-19 09:10，任务 4 堵点诊断：open_applied_advance 缺少分派路径）
+
+### 诊断
+
+`open_applied_advance` 的调用链是 mailbox 驱动的：
+
+```
+ingress_consume → install_prepare → install_commit → open_applied_advance
+```
+
+但 `pgrac_r4_bit22_cutover_begin` 绕过 mailbox 直接 publish ACK 表，不设
+`commit_cas_seq`。协调者 LMON tick 永远进不了 `install_commit`，所以
+`open_applied_advance` 永远不触发——**轮永远停在 PREPARED**。
+
+### 修法（一行分派）
+
+在 `progress_member_barrier` 分派（~3990 行附近，OPEN_APPLIED 分派旁边）加：
+
+```c
+if (before.stage == CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED
+    && (before.flags & CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE) != 0
+    && (before.target_feature_bitmap
+        & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0
+    && cluster_node_id == (int32)before.coordinator_node)
+    return semantic_activation_ack_lmon_open_applied_advance(
+        &before, current_members_lo, current_members_hi,
+        current_epoch, current_coordinator_node,
+        local_capability_word);
+```
+
+**前置**：需要 `current_authority` 数据（`cluster_node_id` 已有，`current_members_lo/hi`、
+`current_epoch`、`current_coordinator_node`、`local_capability_word` 需要从
+`progress_member_barrier` 的上下文中获取——如果 `progress_member_barrier` 没有这些参数，
+可以仿照 `progress_member_prepared` 的方式在函数开头用 `semantic_activation_ack_current_authority`
++ `cluster_ic_local_capability_word` 采样。
+
+### 当前工作树状态
+
+`cluster_control_root.c` 有 TEMP hack（`return false; /* TEMP: skip IO probe */`）——
+#2 跨重启调试中。修完 #2 后删 TEMP。
+
+### 会话下一步
+
+1. 删 TEMP，完成 #2 提交
+2. 加上述分派行，跑 r4fsm 单测验证 coordinator 推进路径
+3. t243 33/33 + regress 13/13
+4. bit22 首开轮闭环
