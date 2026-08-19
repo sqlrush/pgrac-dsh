@@ -1107,3 +1107,45 @@ unknown default 必须 BLOCKED）：
 - `src/test/cluster_unit/test_cluster_page_set.c`：6 个 RED 单测全绿
   （闭合链 + rerun 确定、gap/terminal mismatch、unknown class +
   incarnation cross、空链、invalid inputs、shape-2 skip）。
+
+---
+
+## 工作区本地增量 6：PGDEL-06 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-06：native buffer/GCS apply + durability +
+canonical post-read；carrier STOP 不绕过）：
+
+- `src/include/cluster/cluster_page_apply.h` + `src/backend/cluster/
+  cluster_page_apply.c`：
+  - §7.1 `cluster_page_mutation_admission`：7 条 typed fact 合取
+    （duty/root、active recoverer+failure generation、four-layer fence、
+    resource serialization、source proof fresh、working version exact、
+    retention pin 覆盖全部 contributors）；任一 false → 零 mutation、
+    临时失败绝不转 skip（PU-28）。
+  - §7.2 sequence-step 判定：`cluster_page_apply_step_durability /
+    _post_read / _authority`——各自持有证明才推进 §3.5 状态机
+    （WAL_BEFORE_DATA_SATISFIED → PAGE_WRITE_DURABLE → POST_READ_VERIFIED
+    → RESOURCE_RELEASED）；失败停在该步并给属主 outcome（durability
+    失败 BLOCKED_SOURCE、post-read 失败 CORRUPTION_VERSION（PU-30）、
+    authority 失败 STALE_AUTHORITY（PU-29）），绝不 release；write
+    return/dirty bit/fsync counter/logical DONE/pre-write checksum 均非
+    替代（§7.2 末段）。
+  - §7.3 `ClusterPageProof` typed export（只含可重算事实；ROOT 消费做
+    release + FND-10，SIDE 只消费 page dependency，非 all-domain
+    barrier）。
+  - §7.6 `cluster_page_apply_midwrite_cut`：恒返回
+    STABLE_BASE_UNRESOLVED——repeated-recoverer target-write cut 是
+    永久 RED/STOP（PL-03），无批准 stable-base 策略前不许 SKIP/假绿/
+    mock carrier。
+  - §7.7 `cluster_page_crash_matrix_verdict`：7 行 cut 全表（before
+    source proof / after proof / during write / after write before
+    durability / after durability before post-read / after post-read
+    before release / after release）→ 每行恰一 outcome；未知 cut
+    fail-closed。
+- 边界（G1″/G3，不得抹除）：本层只做判定；native buffer/GCS authority、
+  page write、durability barrier、canonical post-read 由 production
+  caller 执行（§10.3 production-caller 测试归 PGDEL-09）；现有 replay
+  路径未触碰、未宣称 versioned。
+- `src/test/cluster_unit/test_cluster_page_apply.c`：5 个 RED 单测全绿
+  （admission 合取逐条、sequence 步进/失败归属、mid-write 恒 STOP、
+  crash matrix 全表、proof 字段契约）。

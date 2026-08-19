@@ -597,6 +597,15 @@ test_cluster_page_set: test_cluster_page_set.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_SET_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-06: §7.1 mutation admission, §7.2 sequence-step gates,
+# §7.6 stable-base STOP (permanent RED) and §7.7 crash-matrix verdicts.
+# Judgement-only layer; links the recovery state machine too.
+CLUSTER_PAGE_APPLY_O = $(top_builddir)/src/backend/cluster/cluster_page_apply.o
+test_cluster_page_apply: test_cluster_page_apply.c unit_test.h \
+		$(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_RECOVERY_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_RECOVERY_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
