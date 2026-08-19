@@ -4386,6 +4386,48 @@ pre-bit22（registry 权威）路径 → §17.8 双路径门控跨重启不成�
 
 ---
 
+## 增量 59b（RF-ROOT P9 审计 #2 重做 —— durable Target OPEN 证明，DSH 2026-08-19）
+
+**问题**（DSH 复审）：旧恢复把 root.activation_state=ACTIVE 误当成 Target
+OPEN（activate 后全成员 OPEN_APPLIED 可能未完成）；lifecycle 条件与
+cutover 状态不是同一 authority axis；无 durable 证明 → §17.8 违反。
+
+**新语义**：
+
+1. **majority OPEN(P+2) 为 durable Target OPEN 证明**：bit22 轮流程重排
+   —— PREPARED 全成员 ACK → **majority COMMIT(P+1)（QVOTEC CAS）** →
+   activate root → **COMMIT_APPLIED 阶段**（成员用
+   `cluster_control_root_bootstrap_validate_active_round` 完整验证 ACTIVE
+   root + 核对 round sha 后 ACK）→ COMPLETE → **majority OPEN(P+2)**
+   （QVOTEC CAS，phase=OPEN, generation=commit+1）→ **成功后** coordinator
+   latch + OPEN_APPLIED（成员 latch + ACK，#3 顺序保留：latch 先于
+   observed）。
+2. **CAS 绑定**：bit22 轮无 utility 请求——`record_cas_formation_matches`
+   对 bit22 desired 走**表绑定**（`bit22_cas_table_binding_matches`：
+   desired 与 ACK 表逐字段匹配 + phase/generation 交叉检查）——QVOTEC
+   消费端（poll_record_cas）与提交端同一校验。formation_matches 的
+   OPEN case 放开（utility expected = expected - 2）。
+3. **三态 latch**：SOURCE(0) / TARGET_BOOTSTRAP(1) / TARGET_VERIFIED(2)。
+   轮内 apply 落 1；`read_canonical` STRONG（CF(S)-bound）成功 =
+   phase-4 强验证 → `cluster_r4_bit22_cutover_latch_verify()` 升 2。
+   reader gate 接受 1/2；serving/admission gate
+   （`cluster_r4_bit22_cutover_verified()`）要求 2。
+4. **启动恢复**（`cluster_control_root_restore_bit22_latch_if_active`
+   重写）：`cluster_qvotec_bootstrap_read_semantic_activation`（自开
+   voting disks、strict-majority 选择、零写入）读 OPEN(P+2) record →
+   与 ACTIVE root 交叉匹配（migration_transition_epoch ==
+   open.transition_epoch && migration_prepare_generation + 2 ==
+   open.record_generation）→ latch 落 1。无 OPEN record / 不匹配 →
+   不恢复（fail-closed）。
+5. **驱动**：`semantic_activation_ack_lmon_bit22_advance`（LMON tick）——
+   SQL 驱动的轮无 utility 请求，阶段机由 tick 推进。
+
+**验收**：r4fsm 195/195（test_136/137/138/139/145 适配新阶段）、
+control_root 33/33（restore 用 OPEN-record 交叉验证用例）、t243 33/33
+（cast root 无 OPEN record → 不恢复）、regress/census 复跑。
+
+---
+
 ## 增量 60（RF-ROOT P9 审计 #5：bit22 latch 幂等崩溃窗口）
 
 **审计命中**（补记 62 finding 6）：`cluster_r4_bit22_cutover_latch_apply`

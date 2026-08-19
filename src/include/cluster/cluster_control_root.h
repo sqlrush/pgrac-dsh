@@ -429,6 +429,14 @@ extern ClusterControlRootResult cluster_control_root_read_canonical(
 	ClusterControlRootReadToken *out_token);
 /* 增量 39 §A: BOOTSTRAP identity discovery + STRONG bound read (token
  * minted by the STRONG step only). */
+/* RF-ROOT P9 审计 #2 重做 (DSH): verify the canonical root is ACTIVE and
+ * bound to exactly this cutover round (full canonical validation, read-only
+ * proof; returns a file token for the caller's freshness binding). */
+extern ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round(
+	const ClusterControlRootMigrationRoundV1 *round,
+	ClusterControlRootFileToken *token);
+
 /* RF-ROOT P9 审计 #2 (增量 59): re-arm the bit22 cutover latch from a
  * durable ACTIVE root across a postmaster restart.  Returns whether the
  * dual-path gate reads as post-bit22 afterwards. */

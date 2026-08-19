@@ -23,6 +23,7 @@
 #include "cluster/cluster_control_root.h"
 #include "cluster/cluster_wal_retention.h"
 #include "cluster/cluster_guc.h"
+#include "cluster/cluster_qvotec.h"
 #include "cluster/cluster_semantic_activation.h"
 #include "cluster/cluster_wal_state.h"
 #include "cluster/cluster_wal_thread.h"
@@ -98,6 +99,9 @@ read_u64_le(const uint8 *src)
 		value = (value << 8) | src[i];
 	return value;
 }
+
+static void make_file_token(const ControlRootImage *image,
+						   ClusterControlRootFileToken *token);
 
 static void
 write_u16_le(uint8 *dst, uint16 value)
@@ -764,113 +768,49 @@ read_canonical_pair(ControlRootImage *primary, ControlRootImage *bak)
 bool
 cluster_control_root_restore_bit22_latch_if_active(void)
 {
-	uint8 hdr[CLUSTER_CONTROL_ROOT_HEADER_BYTES];
-	uint8 rec[16];
-	char path[MAXPGPATH];
-	uint8 current_uuid[16];
-	uint64 current_sysid;
-	uint32 activation_state;
-	uint64 target_bitmap;
-	uint64 epoch;
-	uint64 generation;
-	uint16 own_thread;
-	size_t done = 0;
-	int fd;
+	uint8 selected[CLUSTER_SEMANTIC_ACTIVATION_RECORD_BYTES];
+	ClusterSemanticActivationRecord open;
+	ControlRootImage primary;
+	ControlRootImage bak;
+	ClusterSemanticActivationResult qv_result;
+	ClusterControlRootResult root_result;
+	bool implicit_open = false;
 
 	if (cluster_r4_bit22_cutover_active())
 		return true;
-	if (!current_storage_uuid(current_uuid))
+	/* RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): the latch restores only on
+	 * the DURABLE Target OPEN proof — a strict-majority OPEN(P+2) record
+	 * on the voting disks (the cutover round's own final record), cross-
+	 * matched to the ACTIVE canonical root's round identity (root
+	 * migration_transition_epoch == OPEN.transition_epoch AND root
+	 * migration_prepare_generation + 2 == OPEN.record_generation).
+	 * Neither the root ACTIVE state alone (the all-member OPEN_APPLIED
+	 * may not have completed) nor any record lifecycle axis is used.
+	 * The apply lands at TARGET_BOOTSTRAP (recovery planning may select
+	 * the root); the phase-4 CF(S) strong revalidation upgrades it to
+	 * TARGET_VERIFIED before ordinary serving. */
+	qv_result = cluster_qvotec_bootstrap_read_semantic_activation(
+		selected, &implicit_open);
+	if (qv_result != CLUSTER_SEMANTIC_ACTIVATION_OK || !implicit_open
+		|| !cluster_semantic_activation_record_decode(
+			selected, &open, NULL)
+		|| open.phase != CLUSTER_SEMANTIC_PHASE_OPEN)
 		return false;
-	current_sysid = GetSystemIdentifier();
-	if (current_sysid == 0)
+	root_result = read_canonical_pair(&primary, &bak);
+	if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
 		return false;
-	if (!build_control_path(path, sizeof(path), CLUSTER_CONTROL_ROOT_REL_PATH))
-		return false;
-	/* Header-only probe: 512 header bytes + one 16-byte record header.
-	 * This deliberately does NOT read the 64 KiB body / compute the body
-	 * CRC — the restore runs on the startup-process recovery path where a
-	 * full-image read of the shared root perturbs the 2-node formation
-	 * window (observed in t/243: any full read of the cast root stalls the
-	 * peer rejoin).  The header CRC still gates the fields we act on, and
-	 * a torn/corrupt body keeps the root unusable for every later reader,
-	 * so failing to restore here is the safe direction. */
-	fd = OpenTransientFile(path, O_RDONLY | PG_BINARY);
-	if (fd < 0)
-		return false;
-	while (done < sizeof(hdr))
-	{
-		ssize_t n = read(fd, hdr + done, sizeof(hdr) - done);
-
-		if (n <= 0)
-		{
-			CloseTransientFile(fd);
-			return false;
-		}
-		done += (size_t) n;
-	}
-	if (memcmp(hdr, CONTROL_ROOT_HEADER_MAGIC, 4) != 0
-		|| read_u16_le(hdr + 4) != CONTROL_ROOT_FORMAT_VERSION
-		|| read_u16_le(hdr + 6) != CLUSTER_CONTROL_ROOT_HEADER_BYTES
-		|| read_u16_le(hdr + 8) != CLUSTER_CONTROL_ROOT_RECORD_BYTES
-		|| read_u16_le(hdr + 10) != CLUSTER_CONTROL_ROOT_RECORD_COUNT
-		|| read_u16_le(hdr + 72) != CONTROL_ROOT_READER_VERSION
-		|| read_u16_le(hdr + 74) != CONTROL_ROOT_WRITER_VERSION
-		|| read_u64_le(hdr + 64) != CLUSTER_CONTROL_ROOT_FORMAT_FLAGS_V1
-		|| read_u32_le(hdr + 12) != CONTROL_ROOT_ENDIAN_TAG
-		|| read_u32_le(hdr + CONTROL_ROOT_HEADER_CRC_OFFSET)
-			   != control_root_crc(hdr, CONTROL_ROOT_HEADER_CRC_OFFSET)
-		|| read_u64_le(hdr + 24) != current_sysid
-		|| memcmp(hdr + 32, current_uuid, 16) != 0)
-	{
-		CloseTransientFile(fd);
-		return false;
-	}
-	activation_state = read_u32_le(hdr + 76);
-	target_bitmap = read_u64_le(hdr + 188);
-	epoch = read_u64_le(hdr + 172);
-	generation = read_u64_le(hdr + 164);
-	own_thread = cluster_wal_thread_id();
-	if (activation_state != CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE
-		|| (target_bitmap
+	if (primary.header.activation_state
+			!= CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE
+		|| (primary.header.target_feature_bitmap
 			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
-		|| epoch == 0 || generation == 0
-		|| own_thread == XLP_THREAD_ID_LEGACY
-		|| own_thread > CLUSTER_CONTROL_ROOT_RECORD_COUNT)
-	{
-		CloseTransientFile(fd);
+		|| primary.header.migration_transition_epoch != open.transition_epoch
+		|| primary.header.migration_prepare_generation == UINT64_MAX
+		|| primary.header.migration_prepare_generation + 2
+		   != open.record_generation)
 		return false;
-	}
-	/* The record header carries the lifecycle at offset 10; read only the
-	 * own-thread record's header (records are 512 B each after the header). */
-	done = 0;
-	while (done < sizeof(rec))
-	{
-		ssize_t n = pread(fd, rec + done, sizeof(rec) - done,
-						  CLUSTER_CONTROL_ROOT_HEADER_BYTES
-						  + (size_t) (own_thread - 1) * CLUSTER_CONTROL_ROOT_RECORD_BYTES
-						  + done);
-
-		if (n <= 0)
-		{
-			CloseTransientFile(fd);
-			return false;
-		}
-		done += (size_t) n;
-	}
-	CloseTransientFile(fd);
-	/* The gate re-arms only for the post-bit22 crash-recovery shape: the
-	 * own-thread record must stand at RECOVERY_REQUIRED (crash after the
-	 * cutover completed).  CLOSED / OPEN / RECOVERY_COMPLETE records are
-	 * clean or pre-crash shapes — re-arming there would switch the local
-	 * recovery path to root-only ahead of the P8 post-bit22 crash-rejoin
-	 * (which the 2-node substrate cannot serve yet); the frozen
-	 * THREAD_OPEN/owner-rejoin mainline handles those shapes and the gate
-	 * re-arms once a crash actually marks the record. */
-	if (memcmp(rec, CONTROL_ROOT_RECORD_MAGIC, 4) != 0
-		|| read_u16_le(rec + 4) != CONTROL_ROOT_FORMAT_VERSION
-		|| rec[10] != CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_REQUIRED)
-		return false;
-	return cluster_r4_bit22_cutover_latch_apply(epoch, generation);
+	return cluster_r4_bit22_cutover_latch_apply(
+		open.transition_epoch, open.record_generation);
 }
 
 static void
@@ -968,8 +908,14 @@ cluster_control_root_read_canonical(uint16 origin_thread_id,
 		|| result == CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED) {
 		snapshot = primary->records[origin_thread_id - 1];
 		memset(&token, 0, sizeof(token));
-		if (strong)
+		if (strong) {
 			make_read_token(primary, origin_thread_id, CONTROL_ROOT_SOURCE_PRIMARY, &token);
+			/* RF-ROOT P9 审计 #2 重做 (DSH): a STRONG read is the CF(S)-
+			 * bound phase-4 revalidation — upgrade a bootstrapped bit22
+			 * latch to TARGET_VERIFIED (the serving/admission gate).
+			 * Idempotent; a SOURCE latch is left untouched. */
+			(void) cluster_r4_bit22_cutover_latch_verify();
+		}
 	}
 	pfree(bak);
 	pfree(primary);

@@ -1124,6 +1124,83 @@ qvotec_semantic_activation_record_read_fds(
 	return CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
 }
 
+/*
+ * cluster_qvotec_bootstrap_read_semantic_activation -- RF-ROOT P9 审计 #2
+ *	重做 (DSH 2026-08-19): read-only startup interface.  Opens the
+ *	configured voting disks itself (the qvotec process owns the long-lived
+ *	fds; the startup process / recovery path cannot rely on them), runs the
+ *	existing strict-majority selector over the R4 semantic-activation
+ *	record tail slots, closes every fd, and writes nothing.  `implicit_open`
+ *	reports whether the selected image is the all-zero implicit-OPEN sentinel
+ *	(the pre-R4 boot state).
+ */
+ClusterSemanticActivationResult
+cluster_qvotec_bootstrap_read_semantic_activation(
+	uint8 selected[CLUSTER_SEMANTIC_ACTIVATION_RECORD_BYTES],
+	bool *implicit_open)
+{
+	const char *csv = cluster_voting_disks;
+	const char *p;
+	int fds[CLUSTER_MAX_VOTING_DISKS];
+	int n_disks = 0;
+	ClusterSemanticActivationResult result;
+	int i;
+
+	if (selected == NULL || implicit_open == NULL)
+		return CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+	*implicit_open = false;
+	for (i = 0; i < CLUSTER_MAX_VOTING_DISKS; i++)
+		fds[i] = -1;
+	if (csv == NULL || csv[0] == '\0')
+		return CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+
+	p = csv;
+	while (*p) {
+		const char *start = p;
+		const char *end;
+		char path[MAXPGPATH];
+		size_t len;
+		int fd;
+
+		while (*p && *p != ',')
+			p++;
+		end = p;
+		while (start < end && (*start == ' ' || *start == '\t'))
+			start++;
+		while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
+			end--;
+		len = (size_t)(end - start);
+		if (len == 0) {
+			if (*p == ',')
+				p++;
+			continue;
+		}
+		if (len >= MAXPGPATH || n_disks >= CLUSTER_MAX_VOTING_DISKS) {
+			result = CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+			goto cleanup;
+		}
+		memcpy(path, start, len);
+		path[len] = '\0';
+		fd = cluster_voting_disk_open(path, false);
+		if (fd < 0) {
+			result = CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+			goto cleanup;
+		}
+		fds[n_disks++] = fd;
+	}
+	if (n_disks <= 0) {
+		result = CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+		goto cleanup;
+	}
+	result = qvotec_semantic_activation_record_read_fds(
+		fds, n_disks, selected, implicit_open);
+cleanup:
+	for (i = 0; i < n_disks; i++)
+		if (fds[i] >= 0)
+			cluster_voting_disk_close(fds[i]);
+	return result;
+}
+
 static ClusterSemanticActivationResult
 qvotec_semantic_activation_record_cas_write_fds(
 	const int *fds, int n_disks, uint64 expected_generation,

@@ -163,10 +163,25 @@ static ClusterSemanticActivationPgrdSnapshotShmem
  * pre-bit22 branch.  Kept OUT of ClusterSemanticActivationShmem whose layout
  * is frozen (StaticAssertDecl sizeof == 1104 above).
  */
+/*
+ * RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): the latch is three-state —
+ * 0 = SOURCE (pre-bit22, registry authority), 1 = TARGET_BOOTSTRAP (the
+ * durable Target OPEN proof was found at startup: recovery planning may
+ * select the root, ordinary serving is NOT yet allowed), 2 =
+ * TARGET_VERIFIED (the phase-4 CF(S) strong revalidation succeeded:
+ * ordinary serving/admission allowed).  Reader gates accept states 1 and
+ * 2; serving gates require state 2.
+ */
+typedef enum ClusterR4Bit22LatchState {
+	CLUSTER_R4_BIT22_SOURCE = 0,
+	CLUSTER_R4_BIT22_TARGET_BOOTSTRAP = 1,
+	CLUSTER_R4_BIT22_TARGET_VERIFIED = 2
+} ClusterR4Bit22LatchState;
+
 typedef struct ClusterR4Bit22CutoverLatchShmem {
-	pg_atomic_uint32 active; /* 0 = pre-bit22 (registry authority) */
+	pg_atomic_uint32 active; /* ClusterR4Bit22LatchState */
 	uint32 reserved;
-	/* Round identity.  Atomic since apply() writes BEFORE the 0->1 CAS
+	/* Round identity.  Atomic since apply() writes BEFORE the CAS
 	 * (增量 60: the CAS loser reads back its own or a same-round winner's
 	 * identity to prove the OPEN_APPLIED publication completed). */
 	pg_atomic_uint64 transition_epoch;
@@ -211,6 +226,10 @@ static uint64 semantic_activation_lmon_prepare_cas_seq;
 static uint64 semantic_activation_lmon_prepare_cas_utility_request_seq;
 static uint64 semantic_activation_lmon_commit_cas_seq;
 static uint64 semantic_activation_lmon_commit_cas_utility_request_seq;
+/* RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): the bit22 cutover round's
+ * majority OPEN(P+2) CAS (durable Target OPEN proof). */
+static uint64 semantic_activation_lmon_open_cas_seq;
+static uint64 semantic_activation_lmon_open_cas_utility_request_seq;
 
 static bool semantic_activation_record_cas_mailbox_submit(
 	uint64 expected_generation, uint64 expected_source_feature_bitmap,
@@ -426,6 +445,9 @@ static ClusterSemanticActivationAckTableV1 *SemanticActivationAckTable = NULL;
 static bool semantic_activation_ack_member_open_applied_image_current(
 	const ClusterSemanticActivationAckTableV1 *image,
 	SemanticActivationAckTuple *out_self);
+static bool semantic_activation_ack_member_bit22_stage_image_current(
+	const ClusterSemanticActivationAckTableV1 *image,
+	uint32 stage, SemanticActivationAckTuple *out_self);
 static bool semantic_activation_ack_lmon_progress_member_open_applied(
 	const ClusterSemanticActivationAckTableV1 *before);
 static bool semantic_activation_ack_lmon_finish_member_open_applied(
@@ -435,11 +457,19 @@ static bool semantic_activation_ack_member_prepared_image_current_bit22(
 	const ClusterSemanticActivationAckTableV1 *image,
 	SemanticActivationAckTuple *out_self);
 static bool semantic_activation_ack_lmon_send_bit22_prepared_requests(void);
-static bool semantic_activation_ack_lmon_open_applied_advance(
+static bool semantic_activation_ack_lmon_bit22_commit_applied_begin(
 	const ClusterSemanticActivationAckTableV1 *before,
 	uint64 current_members_lo, uint64 current_members_hi,
 	uint64 current_epoch, int32 current_coordinator_node,
 	uint32 local_capability_word);
+static bool semantic_activation_ack_lmon_bit22_open_applied_begin(
+	const ClusterSemanticActivationAckTableV1 *before,
+	uint64 current_members_lo, uint64 current_members_hi,
+	uint64 current_epoch, int32 current_coordinator_node,
+	uint32 local_capability_word);
+static bool semantic_activation_ack_lmon_bit22_advance(void);
+static bool semantic_activation_ack_lmon_progress_member_commit_applied_bit22(
+	const ClusterSemanticActivationAckTableV1 *before);
 
 static void semantic_activation_ack_ingress_init(
 	SemanticActivationAckIngress *ingress) pg_attribute_unused();
@@ -2582,15 +2612,22 @@ semantic_activation_ack_lmon_install_commit(
 	 * advances the round to OPEN_APPLIED instead of the R4 COMMIT_APPLIED
 	 * path (增量 44 option A: the cutover round is an independent stage
 	 * sequence). */
-	if ((desired.target_feature_bitmap
-		 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
-		return semantic_activation_ack_lmon_open_applied_advance(
-			&before, current_members_lo, current_members_hi,
-			current_epoch, current_coordinator_node,
-			local_capability_word);
 	if (!semantic_activation_record_cas_mailbox_poll_completion(
 			semantic_activation_lmon_commit_cas_seq, &result))
 		return true;
+	/* RF-ROOT P9 审计 #2 重做 (DSH): the bit22 cutover round now waits for
+	 * the majority COMMIT(P+1) record (durable) before advancing — the
+	 * root is activated only after COMMIT durability, then the
+	 * COMMIT_APPLIED stage verifies the ACTIVE root member-side. */
+	if ((desired.target_feature_bitmap
+		 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0) {
+		if (result != CLUSTER_SEMANTIC_ACTIVATION_OK)
+			return false;
+		return semantic_activation_ack_lmon_bit22_commit_applied_begin(
+			&before, current_members_lo, current_members_hi,
+			current_epoch, current_coordinator_node,
+			local_capability_word);
+	}
 	if (result != CLUSTER_SEMANTIC_ACTIVATION_OK
 		|| !semantic_activation_snapshot(&current_snapshot)
 		|| current_snapshot.seq != snapshot.seq
@@ -2647,22 +2684,22 @@ semantic_activation_ack_lmon_install_commit(
 }
 
 /*
- * RF-ROOT P7 (增量 46, step ②): the coordinator-side OPEN_APPLIED advance
- * for the bit22 cutover round.  Called when the PREPARED-stage all-member
- * ACK is COMPLETE and the round target carries bit22.  Executor of the
- * root activation is the coordinator LMON: CF(X) has no frozen executor
- * (AD-023 §4 binds CF(S) only) and the 补记 17-19 precedent approves
- * coordinator-LMON CF operations.  The round driver (step ④) staged the
- * PREPARED file token + round sha + round copy in the seam shmem after
- * create_prepared; a missing seam (driver not staged) or an activate
- * failure leaves the round un-advanced (fail-closed, retried on later
- * ticks; the driver's deadline bounds the stall).  On success the
- * coordinator applies its own latch, stamps its observed bit and
- * publishes the OPEN_APPLIED REQUEST to the members (their side applies
- * the latch and ACKs — 步骤 ①).
+ * RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): coordinator-side bit22
+ * cutover advance — stage 1/2.  Called once the majority COMMIT(P+1)
+ * record is durable AND the PREPARED-stage all-member ACK is COMPLETE.
+ * Executor of the root activation is the coordinator LMON (CF(X) has no
+ * frozen executor; AD-023 §4 binds CF(S) only; 补记 17-19 precedent).
+ * The round driver (step ④) staged the PREPARED file token + round sha +
+ * round copy in the seam shmem after create_prepared.  On success the
+ * coordinator activates the root (PREPARED -> ACTIVE) and publishes the
+ * COMMIT_APPLIED stage: every member must re-verify the ACTIVE root
+ * (bootstrap_validate_active_round, bound to the seam round sha) and ACK
+ * BEFORE the majority OPEN(P+2) record is CASed.  The coordinator's latch
+ * moves AFTER the OPEN CAS (bit22_open_applied_begin) — the durable
+ * Target OPEN proof precedes the gate flip.
  */
 static bool
-semantic_activation_ack_lmon_open_applied_advance(
+semantic_activation_ack_lmon_bit22_commit_applied_begin(
 	const ClusterSemanticActivationAckTableV1 *before,
 	uint64 current_members_lo, uint64 current_members_hi,
 	uint64 current_epoch, int32 current_coordinator_node,
@@ -2676,6 +2713,7 @@ semantic_activation_ack_lmon_open_applied_advance(
 	ClusterControlRootFileToken out_token;
 	ClusterControlRootResult act_result;
 	uint64 self_bit;
+	int node;
 
 	if (before == NULL || before->stage
 			!= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED
@@ -2701,11 +2739,82 @@ semantic_activation_ack_lmon_open_applied_advance(
 			&after.expected[cluster_node_id], &self))
 		return true;
 
+	self_bit = UINT64_C(1) << cluster_node_id;
+	next = after;
+	next.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED;
+	next.flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	next.record_generation = after.record_generation + 1;
+	next.observed_members_lo = 0;
+	next.observed_members_hi = 0;
+	memset(next.observed, 0, sizeof(next.observed));
+	for (node = 0; node < CLUSTER_MAX_NODES; node++)
+		if (semantic_activation_ack_member_present(
+				after.expected_members_lo, after.expected_members_hi, node))
+			next.expected[node].record_generation
+				= after.record_generation + 1;
+	if (!semantic_activation_ack_table_publish(&next))
+		return true;
+
+	memset(&request, 0, sizeof(request));
+	request.kind = CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;
+	request.stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED;
+	request.result = CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST;
+	request.coordinator_node = next.coordinator_node;
+	request.member_node = (uint32)cluster_node_id;
+	request.transition_epoch = next.transition_epoch;
+	request.record_generation = next.record_generation;
+	request.round_nonce = next.round_nonce;
+	request.source_feature_bitmap = next.source_feature_bitmap;
+	request.target_feature_bitmap = next.target_feature_bitmap;
+	request.rollback_feature_bitmap = next.rollback_feature_bitmap;
+	request.admitted_members_lo = next.expected_members_lo;
+	request.admitted_members_hi = next.expected_members_hi;
+	request.capability_sample_digest = next.capability_sample_digest;
+	memset(&pending, 0, sizeof(pending));
+	if (!semantic_activation_ack_pending_send_begin_positive(
+			&pending, &request, cluster_node_id, &self))
+		return true;
+	semantic_activation_ack_local_pending_send = pending;
+	semantic_activation_ack_lmon_send_pending();
+	return true;
+}
+
+/*
+ * RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): coordinator-side bit22 cutover
+ * advance — stage 2/2 (the latch + OPEN_APPLIED publication).  Called
+ * once the majority OPEN(P+2) record is durable (the exact Target OPEN
+ * proof).  #3 ordering (增量 57) is preserved: the coordinator's latch
+ * flips (return checked) BEFORE its observed bit is published.
+ */
+static bool
+semantic_activation_ack_lmon_bit22_open_applied_begin(
+	const ClusterSemanticActivationAckTableV1 *before,
+	uint64 current_members_lo, uint64 current_members_hi,
+	uint64 current_epoch, int32 current_coordinator_node,
+	uint32 local_capability_word)
+{
+	ClusterSemanticActivationAckTableV1 after;
+	ClusterSemanticActivationAckTableV1 next;
+	SemanticActivationAckPendingSend pending;
+	SemanticActivationAckTuple self;
+	ClusterSemanticActivationAckWireV1 request;
+	uint64 self_bit;
+
+	if (before == NULL || before->stage
+			!= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED)
+		return false;
+	if (!semantic_activation_ack_table_snapshot(&after)
+		|| memcmp(before, &after, sizeof(after)) != 0
+		|| !semantic_activation_ack_self_tuple(
+			cluster_node_id, local_capability_word, current_epoch,
+			after.record_generation, &self)
+		|| !semantic_activation_ack_matches(
+			&after.expected[cluster_node_id], &self))
+		return true;
+
 	/* RF-ROOT P9 审计 #3 (增量 57 / 补记 61-63): the coordinator's latch
 	 * MUST flip (and the return be checked) BEFORE its observed bit is
-	 * published — a refused latch (census RED regression / round invalid)
-	 * leaves the round fail-closed (no observed, no publish, no REQUEST)
-	 * instead of publishing a half-switched coordinator. */
+	 * published. */
 	if (!cluster_r4_bit22_cutover_latch_apply(
 			after.transition_epoch, after.record_generation))
 		return true;
@@ -2741,6 +2850,150 @@ semantic_activation_ack_lmon_open_applied_advance(
 	semantic_activation_ack_local_pending_send = pending;
 	semantic_activation_ack_lmon_send_pending();
 	return true;
+}
+
+/*
+ * semantic_activation_ack_lmon_bit22_advance -- RF-ROOT P9 审计 #2 重做
+ *	(DSH 2026-08-19): the coordinator-side driver of the bit22 cutover
+ *	round, run from the LMON tick (the round is SQL-driven and has no
+ *	utility request, so the R4 utility/install chain never runs for it).
+ *
+ *	PREPARED COMPLETE
+ *	  -> submit majority COMMIT(P+1) (CAS) -> poll durable
+ *	  -> activate root (PREPARED -> ACTIVE)
+ *	  -> publish COMMIT_APPLIED stage (members verify the ACTIVE root)
+ *	COMMIT_APPLIED COMPLETE
+ *	  -> submit majority OPEN(P+2) (CAS, the durable Target OPEN proof)
+ *	  -> poll durable
+ *	  -> coordinator latch + publish OPEN_APPLIED stage
+ *	OPEN_APPLIED (members latch + ACK; complete -> done, latch is the gate)
+ *
+ *	Fail-closed: any refused CAS / activate / latch leaves the stage
+ *	unchanged and the tick retries (the driver's deadline bounds the
+ *	stall).
+ */
+static bool
+semantic_activation_ack_lmon_bit22_advance(void)
+{
+	ClusterSemanticActivationAckTableV1 table;
+	ClusterSemanticActivationRecord commit;
+	ClusterSemanticActivationRecord desired;
+	SemanticActivationAdmissionSnapshot snapshot;
+	ClusterSemanticActivationResult result;
+	uint8 desired_bytes[CLUSTER_SEMANTIC_ACTIVATION_RECORD_BYTES];
+	uint64 current_members_lo;
+	uint64 current_members_hi;
+	uint64 current_epoch;
+	uint64 cas_seq;
+	uint32 local_capability_word;
+	int32 current_coordinator_node;
+
+	if (!semantic_activation_ack_table_snapshot(&table)
+		|| (table.target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| SemanticActivationBit22Seam == NULL
+		|| pg_atomic_read_u32(&SemanticActivationBit22Seam->valid) == 0
+		|| table.transition_epoch != SemanticActivationBit22Seam->transition_epoch
+		|| cluster_node_id != (int32)table.coordinator_node
+		|| !semantic_activation_ack_current_authority(
+			cluster_node_id, &current_members_lo, &current_members_hi,
+			&current_epoch, &current_coordinator_node)
+		|| current_members_lo != table.expected_members_lo
+		|| current_members_hi != table.expected_members_hi
+		|| current_epoch != table.transition_epoch
+		|| current_coordinator_node != (int32)table.coordinator_node)
+		return false;
+	local_capability_word = cluster_ic_local_capability_word();
+	if (table.stage == CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED) {
+		if ((table.flags
+			 & CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE) == 0)
+			return false;
+		if (!semantic_activation_snapshot(&snapshot)
+			|| !snapshot.transition_closed
+			|| snapshot.active_bits != table.source_feature_bitmap
+			|| snapshot.record_generation != table.record_generation
+			|| snapshot.formation_epoch != table.transition_epoch
+			|| !semantic_activation_ack_complete_image_current(
+				&table, current_members_lo, current_members_hi,
+				current_epoch, current_coordinator_node,
+				cluster_node_id, local_capability_word))
+			return false;
+		if (semantic_activation_lmon_commit_cas_seq == 0) {
+			memset(&desired, 0, sizeof(desired));
+			desired.phase = CLUSTER_SEMANTIC_PHASE_COMMIT;
+			desired.record_generation = table.record_generation + 1;
+			desired.source_feature_bitmap = table.source_feature_bitmap;
+			desired.target_feature_bitmap = table.target_feature_bitmap;
+			desired.rollback_feature_bitmap = table.rollback_feature_bitmap;
+			desired.admitted_members_lo = table.expected_members_lo;
+			desired.admitted_members_hi = table.expected_members_hi;
+			desired.transition_epoch = table.transition_epoch;
+			desired.capability_sample_digest
+				= table.capability_sample_digest;
+			desired.coordinator_node = table.coordinator_node;
+			desired.coordinator_incarnation
+				= cluster_qvotec_get_self_incarnation();
+			if (!cluster_semantic_activation_record_encode(
+					&desired, desired_bytes)
+				|| !semantic_activation_record_cas_mailbox_submit(
+					table.record_generation,
+					table.source_feature_bitmap, desired_bytes,
+					&cas_seq))
+				return false;
+			semantic_activation_lmon_commit_cas_seq = cas_seq;
+			return true;
+		}
+		if (!semantic_activation_record_cas_mailbox_poll_completion(
+				semantic_activation_lmon_commit_cas_seq, &result))
+			return true;
+		if (result != CLUSTER_SEMANTIC_ACTIVATION_OK)
+			return false;
+		return semantic_activation_ack_lmon_bit22_commit_applied_begin(
+			&table, current_members_lo, current_members_hi,
+			current_epoch, current_coordinator_node,
+			local_capability_word);
+	}
+	if (table.stage == CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED) {
+		if ((table.flags
+			 & CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE) == 0)
+			return false;
+		if (!semantic_activation_ack_complete_image_current(
+				&table, current_members_lo, current_members_hi,
+				current_epoch, current_coordinator_node,
+				cluster_node_id, local_capability_word))
+			return false;
+		if (semantic_activation_lmon_open_cas_seq == 0) {
+			if (SemanticActivationShmem == NULL
+				|| !cluster_semantic_activation_record_decode(
+					SemanticActivationShmem->record_cas_desired_bytes,
+					&commit, NULL)
+				|| commit.phase != CLUSTER_SEMANTIC_PHASE_COMMIT
+				|| commit.record_generation != table.record_generation)
+				return false;
+			desired = commit;
+			desired.record_generation = commit.record_generation + 1;
+			desired.phase = CLUSTER_SEMANTIC_PHASE_OPEN;
+			if (!cluster_semantic_activation_record_encode(
+					&desired, desired_bytes)
+				|| !semantic_activation_record_cas_mailbox_submit(
+					commit.record_generation,
+					commit.source_feature_bitmap, desired_bytes,
+					&cas_seq))
+				return false;
+			semantic_activation_lmon_open_cas_seq = cas_seq;
+			return true;
+		}
+		if (!semantic_activation_record_cas_mailbox_poll_completion(
+				semantic_activation_lmon_open_cas_seq, &result))
+			return true;
+		if (result != CLUSTER_SEMANTIC_ACTIVATION_OK)
+			return false;
+		return semantic_activation_ack_lmon_bit22_open_applied_begin(
+			&table, current_members_lo, current_members_hi,
+			current_epoch, current_coordinator_node,
+			local_capability_word);
+	}
+	return false;
 }
 
 static bool
@@ -3790,6 +4043,19 @@ semantic_activation_ack_member_open_applied_image_current(
 	const ClusterSemanticActivationAckTableV1 *image,
 	SemanticActivationAckTuple *out_self)
 {
+	return semantic_activation_ack_member_bit22_stage_image_current(
+		image, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED,
+		out_self);
+}
+
+/* RF-ROOT P9 审计 #2 重做 (DSH): stage-parameterized bit22 member image
+ * check — the cutover round's COMMIT_APPLIED and OPEN_APPLIED member
+ * stages share the same shape (bit22 target, parameterized member set). */
+static bool
+semantic_activation_ack_member_bit22_stage_image_current(
+	const ClusterSemanticActivationAckTableV1 *image,
+	uint32 stage, SemanticActivationAckTuple *out_self)
+{
 	SemanticActivationAckTuple self;
 	uint64 current_members_lo;
 	uint64 current_members_hi;
@@ -3799,7 +4065,7 @@ semantic_activation_ack_member_open_applied_image_current(
 
 	if (image == NULL || out_self == NULL
 		|| cluster_node_id < 0 || cluster_node_id >= CLUSTER_MAX_NODES
-		|| image->stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED
+		|| image->stage != stage
 		|| image->coordinator_node == (uint32)cluster_node_id
 		|| image->round_nonce == 0
 		|| image->transition_epoch == 0
@@ -3932,6 +4198,96 @@ semantic_activation_ack_lmon_progress_member_open_applied(
 		before->transition_epoch, before->record_generation);
 	return semantic_activation_ack_lmon_finish_member_open_applied(
 		before, latch_applied);
+}
+
+/*
+ * semantic_activation_ack_lmon_progress_member_commit_applied_bit22 --
+ * RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): member side of the bit22
+ * cutover round's COMMIT_APPLIED stage.  The member re-verifies the
+ * now-ACTIVE canonical root bound to this exact round (full canonical
+ * validation via bootstrap_validate_active_round against the seam round)
+ * and ACKs.  A failed verification leaves the member un-observed — the
+ * stage never completes and the round fails closed.
+ */
+static bool
+semantic_activation_ack_lmon_progress_member_commit_applied_bit22(
+	const ClusterSemanticActivationAckTableV1 *before)
+{
+	ClusterSemanticActivationAckTableV1 after;
+	ClusterSemanticActivationAckTableV1 next;
+	SemanticActivationAckPendingSend pending;
+	SemanticActivationAckTuple self;
+	ClusterSemanticActivationAckWireV1 request;
+	ClusterControlRootFileToken token;
+	ClusterControlRootResult root_result;
+	uint64 self_bit;
+	bool all_observed;
+
+	if (before == NULL || before->stage
+			!= CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED)
+		return false;
+	if (cluster_node_id == (int32)before->coordinator_node)
+		return false;	/* the coordinator drives, it does not apply */
+	if (!semantic_activation_ack_member_bit22_stage_image_current(
+			before, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED,
+			&self))
+		return true;	/* image not current: retry on the next tick */
+	self_bit = UINT64_C(1) << cluster_node_id;
+	if ((before->observed_members_lo & self_bit) != 0)
+		return true;	/* idempotent: this member already applied */
+
+	/* The ACTIVE canonical root must be bound to this exact round. */
+	if (SemanticActivationBit22Seam == NULL
+		|| pg_atomic_read_u32(&SemanticActivationBit22Seam->valid) == 0
+		|| before->transition_epoch
+		   != SemanticActivationBit22Seam->transition_epoch)
+		return true;
+	root_result = cluster_control_root_bootstrap_validate_active_round(
+		&SemanticActivationBit22Seam->round, &token);
+	if (root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& root_result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return true;	/* fail-closed: no ACK until the root verifies */
+
+	if (!semantic_activation_ack_table_snapshot(&after)
+		|| memcmp(before, &after, sizeof(after)) != 0
+		|| !semantic_activation_ack_member_bit22_stage_image_current(
+			&after, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED,
+			&self))
+		return true;
+
+	memset(&request, 0, sizeof(request));
+	request.kind = CLUSTER_SEMANTIC_ACTIVATION_ACK_KIND_REQUEST;
+	request.stage = after.stage;
+	request.result = CLUSTER_SEMANTIC_ACTIVATION_ACK_RESULT_REQUEST;
+	request.coordinator_node = after.coordinator_node;
+	request.member_node = (uint32)cluster_node_id;
+	request.transition_epoch = after.transition_epoch;
+	request.record_generation = after.record_generation;
+	request.round_nonce = after.round_nonce;
+	request.source_feature_bitmap = after.source_feature_bitmap;
+	request.target_feature_bitmap = after.target_feature_bitmap;
+	request.rollback_feature_bitmap = after.rollback_feature_bitmap;
+	request.admitted_members_lo = after.expected_members_lo;
+	request.admitted_members_hi = after.expected_members_hi;
+	request.capability_sample_digest = after.capability_sample_digest;
+	memset(&pending, 0, sizeof(pending));
+	if (!semantic_activation_ack_pending_send_begin_positive(
+			&pending, &request, cluster_node_id, &self))
+		return true;
+
+	next = after;
+	next.observed_members_lo |= self_bit;
+	next.observed[cluster_node_id] = self;
+	all_observed
+		= next.observed_members_lo == next.expected_members_lo;
+	next.flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID;
+	if (all_observed)
+		next.flags |= CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	if (!semantic_activation_ack_table_publish(&next))
+		return true;
+	semantic_activation_ack_local_pending_send = pending;
+	semantic_activation_ack_lmon_send_pending();
+	return true;
 }
 
 static bool
@@ -4209,9 +4565,17 @@ semantic_activation_ack_lmon_progress_member_barrier(void)
 		|| cluster_node_id == (int32)before.coordinator_node)
 		return false;
 	if (before.stage
-		== CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED)
+		== CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED) {
+		/* RF-ROOT P9 审计 #2 重做 (DSH): the bit22 cutover round's member
+		 * COMMIT_APPLIED verifies the ACTIVE root (no four-member R4
+		 * shape). */
+		if ((before.target_feature_bitmap
+			 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+			return semantic_activation_ack_lmon_progress_member_commit_applied_bit22(
+				&before);
 		return semantic_activation_ack_lmon_progress_member_commit_applied(
 			&before);
+	}
 	/* RF-ROOT P7 (增量 45): bit22 cutover round — the member applies the
 	 * bit22 latch at OPEN_APPLIED (one-shot, monotonic). */
 	if (before.stage
@@ -5767,8 +6131,44 @@ cluster_semantic_activation_shmem_init(void)
 bool
 cluster_r4_bit22_cutover_active(void)
 {
+	/* Reader gate: TARGET_BOOTSTRAP (1) and TARGET_VERIFIED (2) both
+	 * select the root. */
 	return SemanticActivationBit22Latch != NULL
 		&& pg_atomic_read_u32(&SemanticActivationBit22Latch->active) != 0;
+}
+
+/*
+ * cluster_r4_bit22_cutover_verified -- RF-ROOT P9 审计 #2 重做 (DSH):
+ * serving/admission gate.  Only TARGET_VERIFIED (2) — the phase-4 CF(S)
+ * strong revalidation succeeded — allows ordinary serving.
+ */
+bool
+cluster_r4_bit22_cutover_verified(void)
+{
+	return SemanticActivationBit22Latch != NULL
+		&& pg_atomic_read_u32(&SemanticActivationBit22Latch->active)
+		   == CLUSTER_R4_BIT22_TARGET_VERIFIED;
+}
+
+/*
+ * cluster_r4_bit22_cutover_latch_verify -- RF-ROOT P9 审计 #2 重做 (DSH):
+ * upgrade TARGET_BOOTSTRAP -> TARGET_VERIFIED once the phase-4 CF(S)
+ * strong revalidation of the ACTIVE root succeeded.  Idempotent; a latch
+ * at SOURCE (not yet restored) is left untouched.
+ */
+bool
+cluster_r4_bit22_cutover_latch_verify(void)
+{
+	uint32 expected;
+
+	if (SemanticActivationBit22Latch == NULL)
+		return false;
+	expected = CLUSTER_R4_BIT22_TARGET_BOOTSTRAP;
+	if (!pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
+										&expected,
+										CLUSTER_R4_BIT22_TARGET_VERIFIED))
+		return false;
+	return true;
 }
 
 /*
@@ -5791,7 +6191,7 @@ bool
 cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 									 uint64 round_generation)
 {
-	uint32 expected = 0;
+	uint32 expected = CLUSTER_R4_BIT22_SOURCE;
 
 	if (SemanticActivationBit22Latch == NULL
 		|| transition_epoch == 0 || round_generation == 0)
@@ -5836,7 +6236,8 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 						round_generation);
 	pg_write_barrier();
 	if (pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
-										&expected, 1))
+										&expected,
+										CLUSTER_R4_BIT22_TARGET_BOOTSTRAP))
 		return true;
 	return pg_atomic_read_u64(
 			   &SemanticActivationBit22Latch->transition_epoch) == transition_epoch
@@ -6879,6 +7280,56 @@ semantic_activation_qvotec_formation_matches_expected(
 /* RECORD_CAS keeps the utility episode's immutable starting generation while
  * each serial durable edge binds the generation it actually compares.  The
  * approved happy path currently reaches PREPARE(g+1) and COMMIT(g+2) only. */
+/*
+ * semantic_activation_bit22_cas_table_binding_matches -- RF-ROOT P9 审计 #2
+ *	重做 (DSH 2026-08-19): round-identity binding for the bit22 cutover
+ *	round's RECORD_CAS requests.  The cutover round has no utility request;
+ *	its CAS desired image must match the ACK table exactly (the table is
+ *	the round's authoritative identity: begin() fills it from the round,
+ *	every member ACKs it).  Phase/generation cross-check: a COMMIT desired
+ *	stands one generation above the PREPARED table, an OPEN desired one
+ *	generation above the COMMIT_APPLIED table.
+ */
+static bool
+semantic_activation_bit22_cas_table_binding_matches(
+	const ClusterSemanticActivationRecord *desired)
+{
+	ClusterSemanticActivationAckTableV1 table;
+	uint64 expected_table_generation;
+
+	if (desired == NULL || SemanticActivationAckTable == NULL
+		|| !semantic_activation_ack_table_snapshot(&table)
+		|| (table.target_feature_bitmap
+			& PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) == 0
+		|| table.transition_epoch != desired->transition_epoch
+		|| table.coordinator_node != desired->coordinator_node
+		|| table.expected_members_lo != desired->admitted_members_lo
+		|| table.expected_members_hi != desired->admitted_members_hi
+		|| table.source_feature_bitmap != desired->source_feature_bitmap
+		|| table.target_feature_bitmap != desired->target_feature_bitmap
+		|| table.rollback_feature_bitmap != desired->rollback_feature_bitmap
+		|| table.capability_sample_digest
+		   != desired->capability_sample_digest
+		|| desired->coordinator_incarnation
+		   != cluster_qvotec_get_self_incarnation())
+		return false;
+	switch (desired->phase) {
+	case CLUSTER_SEMANTIC_PHASE_COMMIT:
+		if (table.stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED)
+			return false;
+		expected_table_generation = desired->record_generation - 1;
+		break;
+	case CLUSTER_SEMANTIC_PHASE_OPEN:
+		if (table.stage != CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED)
+			return false;
+		expected_table_generation = desired->record_generation - 1;
+		break;
+	default:
+		return false;
+	}
+	return table.record_generation == expected_table_generation;
+}
+
 static bool
 semantic_activation_record_cas_formation_matches(
 	const ClusterSemanticFormationBinding *formation,
@@ -6897,6 +7348,17 @@ semantic_activation_record_cas_formation_matches(
 		|| desired->coordinator_node != (uint32)cluster_node_id)
 		return false;
 
+	/* RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): the bit22 cutover round is
+	 * SQL-driven and has NO utility request, so its RECORD_CAS requests
+	 * (majority COMMIT(P+1) and majority OPEN(P+2)) cannot bind to the
+	 * utility mailbox.  They bind to the ACK table's round identity
+	 * instead — the table is constructed by begin() from the same round
+	 * and every member ACKs it before the CAS is submitted. */
+	if ((desired->target_feature_bitmap
+		 & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0)
+		return semantic_activation_bit22_cas_table_binding_matches(
+			desired);
+
 	switch (desired->phase) {
 	case CLUSTER_SEMANTIC_PHASE_PREPARE:
 		utility_expected_record_generation
@@ -6909,6 +7371,16 @@ semantic_activation_record_cas_formation_matches(
 			= formation->expected_record_generation - 1;
 		break;
 	case CLUSTER_SEMANTIC_PHASE_OPEN:
+		/* RF-ROOT P9 审计 #2 重做 (DSH 2026-08-19): the bit22 cutover
+		 * round's OPEN record (majority OPEN(P+2)) is the durable Target
+		 * OPEN proof the latch restore keys on.  OPEN is COMMIT+1 =
+		 * PREPARE+2, so the utility side's expected generation is
+		 * expected - 2. */
+		if (formation->expected_record_generation < 2)
+			return false;
+		utility_expected_record_generation
+			= formation->expected_record_generation - 2;
+		break;
 	default:
 		return false;
 	}
@@ -7721,6 +8193,11 @@ cluster_semantic_activation_lmon_tick(void)
 		return;
 	semantic_activation_lmon_consume_phase3();
 	if (semantic_activation_ack_lmon_progress_member_barrier())
+		return;
+	/* RF-ROOT P9 审计 #2 重做 (DSH): the bit22 cutover round is
+	 * SQL-driven (no utility request); the coordinator-side stage machine
+	 * runs from the tick. */
+	if (semantic_activation_ack_lmon_bit22_advance())
 		return;
 	semantic_activation_lmon_consume_utility();
 	/*

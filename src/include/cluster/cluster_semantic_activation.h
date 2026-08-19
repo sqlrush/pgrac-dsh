@@ -272,6 +272,11 @@ extern void cluster_semantic_activation_shmem_init(void);
  * gate idiom anchor (DSH 补记 44 设计点 ②).  False = pre-bit22, the frozen
  * §17.8 wal-state authority; true = post-bit22 root-only. */
 extern bool cluster_r4_bit22_cutover_active(void);
+/* RF-ROOT P9 审计 #2 重做 (DSH): serving/admission gate — only the
+ * TARGET_VERIFIED state (phase-4 CF(S) strong revalidation) allows
+ * ordinary serving. */
+extern bool cluster_r4_bit22_cutover_verified(void);
+extern bool cluster_r4_bit22_cutover_latch_verify(void);
 extern bool cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 												 uint64 round_generation);
 /* 增量 46: the round driver stages the PREPARED token/sha/round here after

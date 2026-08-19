@@ -260,6 +260,23 @@ cluster_control_root_activate_prepared(
 	return ut_activate_result;
 }
 
+/* RF-ROOT P9 审计 #2 重做: bootstrap_validate_active_round stub — the
+ * member-side COMMIT_APPLIED verification of the ACTIVE root. */
+static ClusterControlRootResult ut_bootstrap_validate_result
+	= CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+static int ut_bootstrap_validate_calls = 0;
+
+ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round(
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
+	ClusterControlRootFileToken *token)
+{
+	ut_bootstrap_validate_calls++;
+	if (token != NULL)
+		memset(token, 0, sizeof(*token));
+	return ut_bootstrap_validate_result;
+}
+
 /* RF-ROOT P7 (增量 47 step ④c): create_prepared / round_sha256 stubs — this
  * binary does not link cluster_control_root.o. */
 static ClusterControlRootResult ut_create_result
@@ -4877,6 +4894,29 @@ ut_open_applied_prepared_table_setup(void)
 	}
 }
 
+/* RF-ROOT P9 审计 #2 重做: COMMIT_APPLIED stage table (the bit22 round
+ * advances PREPARED -> COMMIT_APPLIED with generation P+1 after the root
+ * activation; members verify the ACTIVE root and ACK). */
+static void
+ut_bit22_commit_applied_table_setup(void)
+{
+	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	int node;
+
+	ut_open_applied_prepared_table_setup();
+	table->stage = CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED;
+	table->record_generation = 6;
+	table->observed_members_lo = 0;
+	memset(table->observed, 0, sizeof(table->observed));
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		if (!cluster_membership_is_member(node))
+			continue;
+		table->expected[node].record_generation = 6;
+	}
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+}
+
 static void
 ut_open_applied_env_setup_coordinator(void)
 {
@@ -4907,16 +4947,19 @@ UT_TEST(test_136_coordinator_open_applied_advance_activates_and_publishes)
 	round.prepare_generation = 5;
 	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
 	ut_activate_calls = 0;
-	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_commit_applied_begin(
 		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
 		test_local_capability_word));
 	UT_ASSERT_EQ(ut_activate_calls, 1);
-	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	/* RF-ROOT P9 审计 #2 重做: the coordinator latch is NOT flipped at
+	 * COMMIT_APPLIED — it waits for the durable majority OPEN(P+2)
+	 * record.  The stage advances to COMMIT_APPLIED (members verify the
+	 * ACTIVE root) with a fresh observed set and generation P+1. */
+	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
-				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_OPEN_APPLIED);
-	/* coordinator observed itself (bit 0) */
-	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
-				 & UINT64_C(0x01), UINT64_C(0x01));
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED);
+	UT_ASSERT_EQ(SemanticActivationAckTable->record_generation, 6);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo, 0);
 	test_gate_reset();
 }
 
@@ -4926,7 +4969,7 @@ UT_TEST(test_137_coordinator_open_applied_advance_waits_for_seam)
 	ut_open_applied_prepared_table_setup();
 	/* no seam staged */
 	ut_activate_calls = 0;
-	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_commit_applied_begin(
 		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
 		test_local_capability_word));
 	UT_ASSERT_EQ(ut_activate_calls, 0);
@@ -4952,7 +4995,7 @@ UT_TEST(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failur
 	round.prepare_generation = 5;
 	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
 	ut_activate_result = CLUSTER_CONTROL_ROOT_IO_ERROR;
-	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_commit_applied_begin(
 		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
 		test_local_capability_word));
 	UT_ASSERT_EQ(ut_activate_calls, 1);
@@ -4962,18 +5005,19 @@ UT_TEST(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failur
 	test_gate_reset();
 }
 
-UT_TEST(test_145_coordinator_latch_refused_leaves_round_prepared)
+UT_TEST(test_145_coordinator_latch_refused_leaves_round_commit_applied)
 {
 	ClusterControlRootFileToken token;
 	uint8 sha[PG_SHA256_DIGEST_LENGTH];
 	ClusterControlRootMigrationRoundV1 round;
 
-	/* RF-ROOT P9 审计 #3 (增量 57): the coordinator's latch must flip
-	 * BEFORE its observed bit is published — a refused latch (here a
-	 * census-RED regression) leaves the round PREPARED with no observed
-	 * bit and no REQUEST. */
+	/* RF-ROOT P9 审计 #3 (增量 57) + #2 重做: the coordinator's latch
+	 * flips at the OPEN_APPLIED publication (after the durable majority
+	 * OPEN record), BEFORE its observed bit is published — a refused
+	 * latch (census-RED regression) leaves the round at COMMIT_APPLIED
+	 * with no observed bit and no REQUEST. */
 	ut_open_applied_env_setup_coordinator();
-	ut_open_applied_prepared_table_setup();
+	ut_bit22_commit_applied_table_setup();
 	memset(&token, 0, sizeof(token));
 	token.file_txn_seq = 1;
 	memset(sha, 0x11, sizeof(sha));
@@ -4982,16 +5026,13 @@ UT_TEST(test_145_coordinator_latch_refused_leaves_round_prepared)
 	round.prepare_generation = 5;
 	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
 	ut_r4fsm_census_ok = false; /* latch apply refuses (census RED) */
-	ut_activate_calls = 0;
-	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_open_applied_begin(
 		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
 		test_local_capability_word));
-	UT_ASSERT_EQ(ut_activate_calls, 1);
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
-				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
-	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo,
-				 UINT64_C(0x03)); /* the PREPARED all-member ACK, no new bit */
+				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo, 0);
 	test_gate_reset();
 }
 
@@ -5011,7 +5052,7 @@ UT_TEST(test_139_coordinator_open_applied_advance_rejects_mismatched_seam)
 	round.prepare_generation = 5;
 	UT_ASSERT(cluster_r4_bit22_cutover_seam_store(&token, sha, &round));
 	ut_activate_calls = 0;
-	UT_ASSERT(semantic_activation_ack_lmon_open_applied_advance(
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_commit_applied_begin(
 		SemanticActivationAckTable, UINT64_C(0x03), 0, 7, 0,
 		test_local_capability_word));
 	UT_ASSERT_EQ(ut_activate_calls, 0);
@@ -5132,7 +5173,7 @@ UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
 int
 main(void)
 {
-	UT_PLAN(194);
+	UT_PLAN(195);
 	UT_RUN(test_01_feature_bit_is_one);
 	UT_RUN(test_02_required_hello_caps_are_frozen);
 	UT_RUN(test_03_action_values_are_frozen);
@@ -5322,7 +5363,7 @@ main(void)
 	UT_RUN(test_137_coordinator_open_applied_advance_waits_for_seam);
 	UT_RUN(test_138_coordinator_open_applied_advance_fail_closed_on_activate_failure);
 	UT_RUN(test_139_coordinator_open_applied_advance_rejects_mismatched_seam);
-	UT_RUN(test_145_coordinator_latch_refused_leaves_round_prepared);
+	UT_RUN(test_145_coordinator_latch_refused_leaves_round_commit_applied);
 	UT_RUN(test_140_member_prepared_bit22_round_parameterized);
 	UT_RUN(test_141_member_prepared_r4_round_keeps_four_member_shape);
 	UT_RUN(test_142_cutover_begin_stages_seam_and_publishes_prepared);

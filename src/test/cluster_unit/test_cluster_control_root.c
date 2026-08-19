@@ -83,6 +83,12 @@ static bool test_bit22_latch_apply_ok = true;
 static uint64 test_bit22_latch_apply_epoch;
 static uint64 test_bit22_latch_apply_generation;
 static int test_bit22_latch_apply_calls;
+/* RF-ROOT P9 审计 #2 重做: durable-OPEN restore stub state — the harness
+ * stands in for the voting-disk majority OPEN(P+2) record. */
+static bool test_qvotec_open_present;
+static uint64 test_qvotec_open_epoch;
+static uint64 test_qvotec_open_generation;
+static int test_qvotec_bootstrap_calls;
 static bool test_activate_authorized = true;
 static bool test_publish_authorized = true;
 static ClusterWalPinResult test_walr_begin_result = CLUSTER_WAL_PIN_OK;
@@ -239,6 +245,44 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 	test_bit22_latch_apply_epoch = transition_epoch;
 	test_bit22_latch_apply_generation = round_generation;
 	return true;
+}
+
+ClusterSemanticActivationResult
+cluster_qvotec_bootstrap_read_semantic_activation(
+	uint8 selected[CLUSTER_SEMANTIC_ACTIVATION_RECORD_BYTES],
+	bool *implicit_open)
+{
+	test_qvotec_bootstrap_calls++;
+	if (selected != NULL)
+		memset(selected, 0, CLUSTER_SEMANTIC_ACTIVATION_RECORD_BYTES);
+	if (implicit_open != NULL)
+		*implicit_open = false;
+	if (!test_qvotec_open_present)
+		return CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
+	if (selected != NULL)
+		selected[0] = 0x5a; /* non-zero: restore decodes via the stub below */
+	if (implicit_open != NULL)
+		*implicit_open = true;
+	return CLUSTER_SEMANTIC_ACTIVATION_OK;
+}
+
+static ClusterSemanticActivationRecord test_decoded_open;
+
+bool
+cluster_semantic_activation_record_decode(
+	const uint8 bytes[512] pg_attribute_unused(),
+	ClusterSemanticActivationRecord *record pg_attribute_unused(),
+	ClusterSemanticActivationRefusal *refusal pg_attribute_unused())
+{
+	if (record != NULL)
+		*record = test_decoded_open;
+	return true;
+}
+
+bool
+cluster_r4_bit22_cutover_latch_verify(void)
+{
+	return test_bit22_latch_active;
 }
 
 uint64
@@ -1629,77 +1673,70 @@ UT_TEST(test_activate_and_stale_token)
 
 UT_TEST(test_restore_bit22_latch_from_active_root)
 {
-	/* RF-ROOT P9 审计 #2 (增量 59): a durable ACTIVE root (bit22 target)
-	 * re-arms the shmem latch with the root's round identity; PREPARED /
-	 * absent roots leave the gate pre-bit22, and a refused apply (census
-	 * RED) fails closed. */
+	/* RF-ROOT P9 审计 #2 重做 (DSH): the latch restores only on the
+	 * DURABLE Target OPEN proof — a strict-majority OPEN(P+2) record on
+	 * the voting disks cross-matched to the ACTIVE canonical root's round
+	 * identity (root migration_transition_epoch == OPEN.transition_epoch
+	 * AND root migration_prepare_generation + 2 == OPEN.record_generation).
+	 * No record-lifecycle axis participates.  The apply lands at
+	 * TARGET_BOOTSTRAP; a refused apply (census RED) fails closed. */
 	ClusterControlRootMigrationImage image;
 	ClusterControlRootMigrationRoundV1 round;
 	ClusterControlRootFileToken prepared;
 	ClusterControlRootFileToken active;
 	uint8 round_sha[PG_SHA256_DIGEST_LENGTH];
 
-	/* Absent root -> no restore. */
+	/* No durable OPEN record -> no restore. */
 	wipe_root_files();
 	test_bit22_latch_active = false;
 	test_bit22_latch_apply_calls = 0;
+	test_qvotec_open_present = false;
 	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
 	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
 
-	/* PREPARED (create only) -> no restore. */
+	/* OPEN record present but no root -> no restore. */
+	test_qvotec_open_present = true;
+	test_qvotec_open_epoch = 7;
+	test_qvotec_open_generation = 7;
+	test_decoded_open.phase = CLUSTER_SEMANTIC_PHASE_OPEN;
+	test_decoded_open.transition_epoch = 7;
+	test_decoded_open.record_generation = 7;
+	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
+	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
+
+	/* PREPARED root (create only) -> no restore (not ACTIVE). */
 	UT_ASSERT_EQ(create_prepared(&image, &round, &prepared),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	test_bit22_latch_apply_calls = 0;
 	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
 	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
 
-	/* ACTIVE + bit22 but the record is NOT RECOVERY_REQUIRED (clean /
-	 * pre-crash shapes: CLOSED, OPEN, RECOVERY_COMPLETE) -> NO restore:
-	 * re-arming there would switch the local recovery path to root-only
-	 * ahead of the P8 post-bit22 crash-rejoin; the frozen
-	 * THREAD_OPEN/owner-rejoin mainline handles those shapes. */
+	/* ACTIVE root but the OPEN record does not cross-match the round
+	 * identity -> no restore. */
 	round_sha256(&round, round_sha);
 	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
 														&round, &active),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	UT_ASSERT_EQ(active.activation_state, CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE);
-	test_bit22_latch_active = false;
+	test_decoded_open.transition_epoch = round.transition_epoch + 1;
+	test_decoded_open.record_generation
+		= round.prepare_generation + 2; /* epoch mismatch */
 	test_bit22_latch_apply_calls = 0;
 	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
 	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
 	UT_ASSERT(!test_bit22_latch_active);
 
-	/* RECOVERY_COMPLETE (the t/243 cast shape) also does not re-arm. */
-	wipe_root_files();
-	build_migration(&image, &round);
-	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_COMPLETE;
-	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &prepared),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
-	round_sha256(&round, round_sha);
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
-														&round, &active),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
-	test_bit22_latch_apply_calls = 0;
-	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
-	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
-	UT_ASSERT(!test_bit22_latch_active);
-
-	/* RECOVERY_REQUIRED record + ACTIVE + bit22 (post-bit22 crash shape)
-	 * -> restored with the root's round identity. */
-	wipe_root_files();
-	build_migration(&image, &round);
-	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_REQUIRED;
-	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &prepared),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
-	round_sha256(&round, round_sha);
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
-														&round, &active),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	/* ACTIVE root + exact cross-match -> restored with the OPEN record's
+	 * round identity (TARGET_BOOTSTRAP). */
+	test_decoded_open.transition_epoch = round.transition_epoch;
+	test_decoded_open.record_generation
+		= round.prepare_generation + 2;
 	test_bit22_latch_apply_calls = 0;
 	UT_ASSERT(cluster_control_root_restore_bit22_latch_if_active());
 	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 1);
 	UT_ASSERT_EQ(test_bit22_latch_apply_epoch, round.transition_epoch);
-	UT_ASSERT_EQ(test_bit22_latch_apply_generation, round.prepare_generation);
+	UT_ASSERT_EQ(test_bit22_latch_apply_generation,
+				 round.prepare_generation + 2);
 	UT_ASSERT(test_bit22_latch_active);
 
 	/* Already armed -> no second apply. */
@@ -1707,34 +1744,17 @@ UT_TEST(test_restore_bit22_latch_from_active_root)
 	UT_ASSERT(cluster_control_root_restore_bit22_latch_if_active());
 	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
 
-	/* A node whose thread is NOT covered by the root (migration fixture
-	 * root carries only thread 1 in a 2-node world) must not re-arm the
-	 * gate — its recovery path stays on the frozen registry authority. */
+	/* Refused apply (census RED stand-in) -> fail-closed, gate stays off. */
 	wipe_root_files();
-	test_bit22_latch_active = false;
-	test_own_thread = 2;
 	UT_ASSERT_EQ(create_prepared(&image, &round, &prepared),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	round_sha256(&round, round_sha);
 	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
 														&round, &active),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
-	test_bit22_latch_apply_calls = 0;
-	UT_ASSERT(!cluster_control_root_restore_bit22_latch_if_active());
-	UT_ASSERT_EQ(test_bit22_latch_apply_calls, 0);
-	UT_ASSERT(!test_bit22_latch_active);
-	test_own_thread = 1;
-
-	/* Refused apply (census RED stand-in) -> fail-closed, gate stays off. */
-	wipe_root_files();
-	build_migration(&image, &round);
-	image.records[0].lifecycle = CLUSTER_CONTROL_ROOT_LIFECYCLE_RECOVERY_REQUIRED;
-	UT_ASSERT_EQ(cluster_control_root_create_prepared(&image, &round, &prepared),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
-	round_sha256(&round, round_sha);
-	UT_ASSERT_EQ(cluster_control_root_activate_prepared(&prepared, round_sha,
-														&round, &active),
-				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	test_decoded_open.transition_epoch = round.transition_epoch;
+	test_decoded_open.record_generation
+		= round.prepare_generation + 2;
 	test_bit22_latch_active = false;
 	test_bit22_latch_apply_ok = false;
 	test_bit22_latch_apply_calls = 0;
