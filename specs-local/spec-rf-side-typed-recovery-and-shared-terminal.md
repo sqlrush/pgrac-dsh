@@ -920,3 +920,40 @@ STALE 后 reform 恢复 ACTIVE）。
   shmem 内遍历（无 ABI 影响）。
 - formation tick BLOCKED 分支接线。
 - 悬置持有的 D3′ 处置与 RF-ROOT/PAGE 面（FND-10 已有 deny 语义）。
+
+---
+
+## 工作区本地增量 4：D-SIDE-01 落地（2026-08-20）
+
+**交付**（spec §1.2 D-SIDE-01：single decoder、total route registry、
+cold/online common primitive graph；unknown default BLOCKED）：
+
+- `src/include/cluster/cluster_side_route.h` + `src/backend/cluster/
+  cluster_side_route.c`：
+  - **total route registry**（§3.2 matrix）：opcode 粒度行覆盖
+    matrix 具名 opcode（XLOG 的 FPI/FPI_FOR_HINT→PAGE、NOOP/SWITCH/
+    RESTORE_POINT/BACKUP_END→PROVED_NOOP(CONTROL_ONLY)、checkpoint/
+    control 系列→BLOCKED；XACT 的 COMMIT/ABORT/PREPARE/COMMIT_PREPARED/
+    ABORT_PREPARED/ASSIGNMENT→TT_UNDO（HAS_INFO 位用忽略位掩码）、
+    INVALIDATIONS→BLOCKED；SMGR CREATE/TRUNCATE→STORAGE；CLOG/
+    COMMIT_TS/MULTIXACT→PROJECTION；STANDBY LOCK/RUNNING_XACTS→
+    PROVED_NOOP(PRIMARY_NO_STANDBY_CONSUMER)；CLUSTER_UNDO 的
+    TT/undo 系列→TT_UNDO、XLOG_HW_RESERVE→BLOCKED（STOP-RF-SIDE-
+    SPACE-ABI））+ rmgr 粒度行（mask 0xFFFF：页族→PAGE、DBASE/
+    TBLSPC/RELMAP/REPLORIGIN/RAW_LAYOUT/ADG/XID_STRIPE→BLOCKED、
+    LOGICALMSG→PROVED_NOOP(LOGICAL_MESSAGE_ONLY)）；未知
+    rmgr/opcode 无行 → lookup false → BLOCKED。
+  - `cluster_side_route_verdict`：§2.1 verdict **纯函数**（U-SIDE-02：
+    cold/online 对同 record 同 route 同 verdict，差异只在 process
+    severity）。
+  - **single-parser 契约面**（U-SIDE-03）：registry 是唯一 route
+    判定点——消费方只用 lookup+verdict，无第二 opcode switch。
+  - 实现要点：exact-opcode-0 行（如 XLOG_CHECKPOINT_SHUTDOWN=0x00）
+    与 rmgr 粒度行必须区分（lookup 对 mask==0 恒 exact 匹配含
+    opcode 0；rmgr 粒度用 0xFFFF 掩码）——首版 wildcard 泄漏被单测
+    抓住。
+- 边界：132/132 opcode 的机械生成 census（G1，U-SIDE-01 全量）留
+  增量后续；payload decoders（D-SIDE-02..04）、cold/online wrapper、
+  observability（D-SIDE-10）保持 RED；零 ABI 改动。
+- `src/test/cluster_unit/test_cluster_side_route.c`：3 组 RED 单测全绿
+  （matrix 具名行、unknown 默认 BLOCKED、verdict 纯函数/冷热一致）。

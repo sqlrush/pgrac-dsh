@@ -649,6 +649,13 @@ test_cluster_side_recovery: test_cluster_side_recovery.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_RECOVERY_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-01: total route registry (§3.2 matrix) + §2.1 verdicts.
+CLUSTER_SIDE_ROUTE_O = $(top_builddir)/src/backend/cluster/cluster_side_route.o
+test_cluster_side_route: test_cluster_side_route.c unit_test.h \
+		$(CLUSTER_SIDE_ROUTE_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_ROUTE_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
