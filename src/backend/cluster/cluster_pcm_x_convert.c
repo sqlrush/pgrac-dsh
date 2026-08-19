@@ -2904,6 +2904,143 @@ cluster_pcm_x_runtime_activate(uint64 master_session_incarnation)
 	return cluster_pcm_x_runtime_activate_bound(master_session_incarnation, NULL);
 }
 
+/*
+ * Advance the cluster_epoch generation of every LIVE master tag slot.
+ * Runs only while the runtime gate is RECOVERY_BLOCKED (this function is
+ * called from cluster_pcm_x_runtime_reform, which holds the claimed
+ * ACTIVATING gate): all ticket admission/confirmation paths require
+ * runtime ACTIVE, so no concurrent ticket creation can observe a torn
+ * epoch.  A live tag whose epoch is advanced makes every older-epoch
+ * ticket STALE at its next confirmation (fail-closed suspended holders),
+ * while new-epoch requests admit normally.
+ */
+static void
+pcm_x_allocator_advance_tag_epoch(uint64 new_epoch)
+{
+	PcmXAllocatorView view;
+	Size		i;
+
+	if (!pcm_x_allocator_view(PCM_X_ALLOC_MASTER_TAG, &view))
+		return;
+	for (i = view.first_slot_index; i < view.first_slot_index + view.capacity; i++) {
+		PcmXSlotHeader *slot = pcm_x_allocator_slot(&view, i);
+		PcmXMasterTagSlot *tag;
+
+		if (slot == NULL)
+			continue;
+		if (pcm_x_slot_state_read(slot) != PCM_X_TAG_LIVE)
+			continue;
+		tag = (PcmXMasterTagSlot *) slot;
+		tag->cluster_epoch = new_epoch;
+	}
+	pg_write_barrier();
+}
+
+bool
+cluster_pcm_x_runtime_reform(uint64 new_epoch,
+							 const PcmXPeerBinding bindings[PCM_X_PROTOCOL_NODE_LIMIT])
+{
+	uint32		blocked_gate;
+	uint32		claimed_gate;
+	uint32		active_gate;
+	uint32		generation;
+	bool		changed = false;
+	int			i;
+
+	/*
+	 * RF-SIDE D-SIDE-07 (t/274 L4/L5): re-form after a reconfig froze the
+	 * runtime.  See the header comment for the full contract.
+	 */
+	if (ClusterPcmXConvertShmem == NULL || new_epoch == 0 || bindings == NULL)
+		return false;
+	blocked_gate = pg_atomic_read_u32(&ClusterPcmXConvertShmem->runtime_gate);
+	if (pcm_x_runtime_gate_state(blocked_gate) != PCM_X_RUNTIME_RECOVERY_BLOCKED)
+		return false;
+	generation = pcm_x_runtime_gate_generation(blocked_gate);
+	if (generation >= PCM_X_RUNTIME_GATE_GENERATION_MAX - 1)
+		return false;
+
+	/*
+	 * Change evidence (anti-spin): at least one peer's epoch or session
+	 * must differ from the currently bound formation.  A node that is
+	 * already bound to the exact collect (nothing reconfig'd) must not
+	 * re-form.
+	 */
+	for (i = 0; i < PCM_X_PROTOCOL_NODE_LIMIT; i++) {
+		PcmXOutboundTargetFrontier *outbound =
+			&ClusterPcmXConvertShmem->outbound_targets[i];
+
+		if (bindings[i].cluster_epoch == 0
+			&& bindings[i].peer_session_incarnation == 0)
+			continue;			/* peer absent from the collect */
+		if (outbound->cluster_epoch != bindings[i].cluster_epoch
+			|| outbound->target_session_incarnation
+				   != bindings[i].peer_session_incarnation) {
+			changed = true;
+			break;
+		}
+	}
+	if (!changed)
+		return false;
+
+	/* master_session_incarnation stays unchanged (wire identity contract:
+	 * retire/ack ingress validates it against the sender's authenticated
+	 * session, which is the node's qvotec incarnation). */
+
+	claimed_gate = pcm_x_runtime_gate_pack(generation + 1,
+										   PCM_X_RUNTIME_GATE_ACTIVATING);
+	if (!pg_atomic_compare_exchange_u32(&ClusterPcmXConvertShmem->runtime_gate,
+										&blocked_gate, claimed_gate))
+		return false;
+
+	for (i = 0; i < PCM_X_PROTOCOL_NODE_LIMIT; i++) {
+		PcmXPeerFrontier *frontier = &ClusterPcmXConvertShmem->peer_frontiers[i];
+		PcmXOutboundTargetFrontier *outbound =
+			&ClusterPcmXConvertShmem->outbound_targets[i];
+		uint64		peer_epoch = bindings[i].cluster_epoch;
+		uint64		peer_session = bindings[i].peer_session_incarnation;
+		bool		session_changed;
+
+		session_changed = outbound->target_session_incarnation != peer_session;
+		frontier->cluster_epoch = peer_epoch;
+		frontier->sender_session_incarnation = peer_session;
+		outbound->cluster_epoch = peer_epoch;
+		outbound->target_session_incarnation = peer_session;
+		outbound->flags = PCM_X_OUTBOUND_TARGET_INITIALIZED
+			| (peer_session == 0 ? 0 : PCM_X_OUTBOUND_TARGET_BOUND);
+		if (session_changed) {
+			/* A restarted peer's process starts its sequences at 1; reset
+			 * to match so new requests line up.  An unchanged peer keeps
+			 * its sequences so its in-flight conversions keep completing. */
+			frontier->next_expected_prehandle_sequence = 1;
+			frontier->retired_prehandle_sequence = 0;
+			outbound->next_prehandle_sequence = 1;
+		}
+	}
+
+	/* Advance the tag generation: old-epoch tickets go STALE (suspended
+	 * holders stay frozen for the D3-prime recovery), new-epoch requests
+	 * admit normally. */
+	pcm_x_allocator_advance_tag_epoch(new_epoch);
+
+	pg_write_barrier();
+	active_gate = pcm_x_runtime_gate_pack(generation + 1, PCM_X_RUNTIME_ACTIVE);
+	if (!pg_atomic_compare_exchange_u32(&ClusterPcmXConvertShmem->runtime_gate,
+										&claimed_gate, active_gate)) {
+		/* Single-writer by construction (only the formation tick drives
+		 * BLOCKED->ACTIVE); a lost CAS rolls back to BLOCKED fail-closed
+		 * (only if the gate is still our ACTIVATING value). */
+		uint32		cur = pg_atomic_read_u32(
+			&ClusterPcmXConvertShmem->runtime_gate);
+
+		if (cur == active_gate)
+			(void) pg_atomic_compare_exchange_u32(
+				&ClusterPcmXConvertShmem->runtime_gate, &cur, blocked_gate);
+		return false;
+	}
+	return true;
+}
+
 
 /*
  * Revalidate one already-published peer binding without extending authority.
