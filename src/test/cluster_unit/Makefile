@@ -579,6 +579,15 @@ test_cluster_page_recovery: test_cluster_page_recovery.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_RECOVERY_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-04: CURRENT/PI/STORAGE provenance validators (§5.2/5.3/
+# 5.4 conjunctions) + §5.5/§6.2 source selection.  Pure judgement over
+# caller-declared typed facts.
+CLUSTER_PAGE_SOURCE_O = $(top_builddir)/src/backend/cluster/cluster_page_source.o
+test_cluster_page_source: test_cluster_page_source.c unit_test.h \
+		$(CLUSTER_PAGE_SOURCE_O) $(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_SOURCE_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

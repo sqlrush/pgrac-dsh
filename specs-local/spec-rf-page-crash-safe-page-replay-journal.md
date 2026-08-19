@@ -1049,3 +1049,31 @@ unknown default 必须 BLOCKED）：
 - `src/test/cluster_unit/test_cluster_page_recovery.c`：5 个 RED 单测
   全绿（action 闭表全行、unknown 默认 BLOCKED、状态机相邻链、跳步/
   重复/终态拒绝、verdict 组合）。
+
+---
+
+## 工作区本地增量 4：PGDEL-04 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-04：CURRENT/PI/STORAGE provenance validators；
+必须有 production source owners）：
+
+- `src/include/cluster/cluster_page_source.h` + `src/backend/cluster/
+  cluster_page_source.c`：
+  - `ClusterPageSourceKind`（CURRENT/PI/STORAGE）+ 统一 typed fact 集
+    `ClusterPageSourceValidateInput`（identity/source_version/
+    integrity/stability/lineage/owner/ship_boundary/anchored/coverage/
+    fresh/contributors_closed）——每个 fact 由具名 production owner
+    声明（GCS holder、past-image 子系统、shared-storage smgr）；
+    validator 是纯判定，不读盘/不持锁/不拷字节（G1′）。
+  - §5.2 CURRENT 合取（identity + valid version + integrity + GCS
+    stability witness + lineage + owner；PU-22 空集无 witness 不可承重）；
+    §5.3 PI 合取（+ ship/boundary SCN proof；失败即丢弃，字节不得
+    流入 STORAGE，PU-23）；§5.4 STORAGE 七条合取——`contributors_closed`
+    为 false（PGDEL-05 未落）时 STORAGE 恒失败，诚实关闭（G3，PU-24）。
+  - §5.5/§6.2 `cluster_page_source_select`：无 valid → BLOCKED（PU-26）；
+    多 valid 版本冲突 → BLOCKED（绝不 max-SCN/LSN/多数）；同版本 →
+    CURRENT > PI > STORAGE 优先序。
+- 边界：contributor boundary（§5.4-5）归 PGDEL-05；mutation/
+  durability/post-read 归 PGDEL-06；现有 replay 路径未触碰。
+- `src/test/cluster_unit/test_cluster_page_source.c`：6 个 RED 单测全绿
+  （三 validator 合取真值表 + select 的 BLOCKED/冲突/优先序）。
