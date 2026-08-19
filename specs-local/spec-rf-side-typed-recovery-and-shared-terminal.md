@@ -985,3 +985,30 @@ truth 只走一份 primitive；不得宣称现有 recovery writer 已安全）�
   （TT_COMMIT 字段解析 + preflight、malformed/unknown/错 rmgr
   BLOCKED、字段完整性逐项 + HW_RESERVE BLOCKED、BLOCK_WRITE 字段 +
   payload 标志）。
+
+---
+
+## 工作区本地增量 6：D-SIDE-03 落地（2026-08-20）
+
+**交付**（spec §1.2 D-SIDE-03：database-scoped PREPARED pending state、
+RECO-style recovery ownership、exact prepare/terminal binding）：
+
+- `src/include/cluster/cluster_side_prepared.h` + `src/backend/cluster/
+  cluster_side_prepared.c`：
+  - `cluster_side_prepared_verdict`：§2.3 PREPARED 四事实合取
+    （prepare terminal redo + **database-scoped durable** pending entry
+    + 匹配 TT/undo identity + 精确 GID/identity）→ IN_DOUBT；任一缺/
+    冲突 → BLOCKED（U-SIDE-06 顺序 + U-SIDE-07 identity 冲突对称
+    BLOCKED；origin-local file / recoverer-local cache 不承重——由
+    caller 的 pending_durable_ok 事实承载）。
+  - `cluster_side_prepared_resolve_ready`：RECO-style resolution——
+    terminal redo + 精确 pending/prepare 匹配 + 侧完成（COMMIT=TT
+    匹配；ROLLBACK=verified undo 完成）全成立才 ready；terminal-
+    before-prepare 与 premature abort 恒 BLOCKED（§4：restart 永不
+    自动 abort；locks/resources 只在 matching resolution durable
+    verified 后释放）。
+- 边界：durable pending store 与 RECO resolution ownership 仍是生产
+  2PC/TT wiring（RED）；零 ABI 改动。
+- `src/test/cluster_unit/test_cluster_side_prepared.c`：2 组 RED 单测
+  全绿（in-doubt 合取逐项、resolution 合取 + terminal-before-prepare/
+  premature abort 拒绝）。
