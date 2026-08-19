@@ -107,6 +107,26 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
 - §9.1 单元 RED matrix **RU-01..RU-12**。
 - §8.1 recovery-only observability：counter 语义 G2 分级。
 
+### 6a. P9 审计状态（补记 62/63 外部审计确认，2026-08-19）
+
+- ✅ **RL-01**：complete（`t/271_wal_first_recoverer_fresh.pl` 6/6 ——
+  canonical HW rebuild + zero replay + honest dead-rejoin block）。
+- 🔴 **RL-02..RL-12**：**BLOCKED（外部审计确认）**，非 complete。2 节点
+  共享根基板限制下无法铸造 faithful TAP 腿：peer DEAD 时节点重启阻塞于
+  phase3 live-formation（600s FATAL）；dead-rejoin 未实现（53R60，
+  spec-5.22）；crash-rejoin 存在 epoch race；clean-leave→restart 存在
+  phase3 witness 窗口（增量 40/41/51/53 记录）。RL-07 以单元面结论关闭
+  （增量 40：primary-bad/bak-good 合法 DEGRADED；dual-copy tamper 失败于
+  phase3 formation，非 root mismatch）。审计 finding 7：RL-03..12 无 TAP
+  腿 —— 必须外部提供可 crash 的基板（或按合同豁免）后才可标 complete。
+- 🔴 **STOP-ROOT-IO-FENCE（P4 external I/O eviction）**：**BLOCKED（外部
+  审计确认）**，非 complete。external eviction/terminal verification
+  provider 未选择、无 IPC/receipt schema —— `cluster_external_fence_*`
+  恒 false（审计 finding 5，P0/gate）→ **P4/P9 不 complete**；cooperative
+  fence 不能关闭该 gate（spec §8.4）。
+- 📋 RU-01..RU-12 与 §8.1 observability：合同已落 spec §9.1/§9.2/§8.1
+  （本会话映射完成）；执行状态随各 RL 腿。
+
 ## 7. 测试面盘点（RF-ROOT 相关 TAP）
 
 - 已完成：`t/243_wal_thread_2node_shared_root.pl`（33/33）
