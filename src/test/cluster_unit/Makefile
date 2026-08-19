@@ -559,6 +559,17 @@ test_cluster_page_version: test_cluster_page_version.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-02: rmgr census (closed-table row assignment + t/256
+# differential-evidence state), census -> classifier wiring, and the
+# §3.1 hints decoder (identity + record-side facts; no version judgement).
+# Links cluster_page_rmgr.o + cluster_page_version.o; the fabricator
+# constructs a minimal XLogReaderState, so no backend objects are needed.
+CLUSTER_PAGE_RMGR_O = $(top_builddir)/src/backend/cluster/cluster_page_rmgr.o
+test_cluster_page_rmgr: test_cluster_page_rmgr.c unit_test.h \
+		$(CLUSTER_PAGE_RMGR_O) $(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_RMGR_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

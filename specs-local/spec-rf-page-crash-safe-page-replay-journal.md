@@ -989,3 +989,35 @@ pure helper coverage不满足G1/G9。
   （exact-f076 PX-01..PX-06：smgrread -> LSN-gated apply -> smgrwrite）
   **未触碰、未宣称 versioned**；producer/source-proof/mutation/
   durability/post-read/release 链全部仍 RED，属 PGDEL-02..06。
+
+---
+
+## 工作区本地增量 2：PGDEL-02 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-02：applicable redo expected-before/result-
+version producer + decoder；rmgr census 实现）：
+
+- `src/include/cluster/cluster_page_rmgr.h` + `src/backend/cluster/
+  cluster_page_rmgr.c`：
+  - **rmgr census**：opcode 粒度行（RM_HEAP INSERT/DELETE/UPDATE/
+    HOT_UPDATE = NORMAL + known_delta=true——byte-for-byte differential
+    证据 t/256；LOCK/CONFIRM/INPLACE = NORMAL 但 known_delta=false——
+    现有 matrix 8.A/R11 拒绝；INIT_PAGE = NEW + will_init 属性行——
+    非 §4.6 规则，PU-17 保持 UNKNOWN）+ rmgr 粒度行（SLRU/relmap/undo =
+    HEADER + typed owner，§4.5 禁止 generic replay；索引/SEQ = NORMAL
+    未证明；控制/事务/文件级 = 非 page-affecting）。未知 rmgr 无行 →
+    fail-closed。
+  - **census → classifier 接线**：`cluster_page_rmgr_populate_known_set`
+    只注册 known_delta=true 的行；未证明 opcode 继续 UNKNOWN（§4.2）。
+  - **decode**：`cluster_page_redo_decode` 从 record block ref 提取
+    PageIdentity + §3.1 hints（xl_scn/EndRecPtr/FPI/WILL_INIT 属性）——
+    显式 locator/hint，非 VersionToken；不做版本判定、不 mutation。
+- 边界（G1/G3，不得抹除）：`decoder_registered` 全行 false——§3.4
+  deterministic-mutation 声明与 VersionToken producer 契约（§3.1
+  producer/consumer census 证明）留 PGDEL-03/06；现有 replay 路径
+  未触碰。
+- `src/test/cluster_unit/test_cluster_page_rmgr.c`：10 个 RED 单测全绿
+  （census 行归属/证据状态/typed-owner/非 page-affecting/未知 rmgr/
+  INIT_PAGE 属性行/接线只注册已证明项/decode 事实提取/FPI+WILL_INIT/
+  fail-closed 路径）。注意：rmgr opcode 用 `XLR_RMGR_INFO_MASK`(0xF0)，
+  非 XLR_INFO_MASK(0x0F)。
