@@ -53,6 +53,7 @@ OBJS = \
 	cluster_formation_marker.o \
 	cluster_page_version.o \
 	cluster_page_rmgr.o \
+	cluster_page_recovery.o \
 	cluster_recovery_duty.o \
 	cluster_cf_enqueue.o \
 	cluster_cf_phase2.o \

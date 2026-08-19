@@ -1021,3 +1021,31 @@ version producer + decoder；rmgr census 实现）：
   INIT_PAGE 属性行/接线只注册已证明项/decode 事实提取/FPI+WILL_INIT/
   fail-closed 路径）。注意：rmgr opcode 用 `XLR_RMGR_INFO_MASK`(0xF0)，
   非 XLR_INFO_MASK(0x0F)。
+
+---
+
+## 工作区本地增量 3：PGDEL-03 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-03：exhaustive page/record class dispatcher；
+unknown default 必须 BLOCKED）：
+
+- `src/include/cluster/cluster_page_recovery.h` + `src/backend/cluster/
+  cluster_page_recovery.c`：
+  - **§4.1 recovery-action 闭表**：`cluster_page_class_recovery_action`
+    ——NORMAL/CLEANOUT=APPLY、NEW=INIT、INCARNATION=INCARNATE、TEMP=
+    DISCARD、REBUILDABLE/NONLOGGED=REBUILD、HEADER=ROUTE、FULLIMAGE=
+    IMAGE、WILLINIT/UNKNOWN/UNCLASSIFIED=BLOCKED（mutation=0，永不
+    release）。
+  - **§3.5 状态机**：`cluster_page_state_advance` 只允许相邻推进；跳步/
+    重复/终态再推进/NULL 全拒；crash 后从 UNCLASSIFIED 重建（D3′，
+    不读 predecessor-private phase）。
+  - **§8.1 outcome 面**：`cluster_page_dispatcher_verdict`（class +
+    §3.2 decide → APPLY/SKIP/BLOCKED_CLASS）；BLOCKED_SOURCE/
+    BLOCKED_CONTRIBUTOR/CORRUPTION_VERSION/STALE_AUTHORITY/
+    STABLE_BASE_UNRESOLVED 归 PGDEL-04..06 的证明所有者，本层不猜
+    （G9）。
+- 边界：纯内存、零 mutation/I/O/authority；source/contributor/
+  mutation/durability/post-read 链仍 RED。
+- `src/test/cluster_unit/test_cluster_page_recovery.c`：5 个 RED 单测
+  全绿（action 闭表全行、unknown 默认 BLOCKED、状态机相邻链、跳步/
+  重复/终态拒绝、verdict 组合）。

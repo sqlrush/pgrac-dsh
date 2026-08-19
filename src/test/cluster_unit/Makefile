@@ -570,6 +570,15 @@ test_cluster_page_rmgr: test_cluster_page_rmgr.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_RMGR_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-03: §4.1 recovery-action table, §3.5 per-block state
+# machine (adjacent advance only) and §8.1 dispatcher verdict.  Pure
+# in-memory layer.
+CLUSTER_PAGE_RECOVERY_O = $(top_builddir)/src/backend/cluster/cluster_page_recovery.o
+test_cluster_page_recovery: test_cluster_page_recovery.c unit_test.h \
+		$(CLUSTER_PAGE_RECOVERY_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_RECOVERY_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
