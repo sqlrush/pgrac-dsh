@@ -4622,8 +4622,8 @@ UT_TEST(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_roun
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 3);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->transition_epoch), 7);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->round_generation), 3);
 	test_gate_reset();
 }
 
@@ -4631,10 +4631,27 @@ UT_TEST(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept)
 {
 	test_gate_reset();
 	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
+	/* RF-ROOT P9 审计 #5 (增量 60): a DIFFERENT-round apply is rejected
+	 * and — critically — must not rewrite the bound identity. */
 	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(8, 4));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 3);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->transition_epoch), 7);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->round_generation), 3);
+	test_gate_reset();
+}
+
+UT_TEST(test_128b_bit22_latch_same_round_apply_is_idempotent)
+{
+	/* RF-ROOT P9 审计 #5 (增量 60): a CAS loser of the SAME round must
+	 * read as applied — the member's OPEN_APPLIED publication completed
+	 * (winner bound the same round identity), so it proceeds to publish
+	 * its observed+ACK instead of stalling the round. */
+	test_gate_reset();
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(7, 3));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->transition_epoch), 7);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->round_generation), 3);
 	test_gate_reset();
 }
 
@@ -4744,8 +4761,8 @@ UT_TEST(test_131_member_open_applied_applies_latch_and_acks)
 	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
 		SemanticActivationAckTable));
 	UT_ASSERT(cluster_r4_bit22_cutover_active());
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 5);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->transition_epoch), 7);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->round_generation), 5);
 	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
 				 & UINT64_C(0x02), UINT64_C(0x02));
 	/* COMPLETE awaits the coordinator's own observed bit, which the
@@ -4766,8 +4783,8 @@ UT_TEST(test_132_member_open_applied_replay_is_idempotent)
 	 * re-ACKs; the observed set and latch round identity must not move. */
 	UT_ASSERT(semantic_activation_ack_lmon_progress_member_open_applied(
 		SemanticActivationAckTable));
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationBit22Latch->round_generation, 5);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->transition_epoch), 7);
+	UT_ASSERT_EQ(pg_atomic_read_u64(&SemanticActivationBit22Latch->round_generation), 5);
 	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo
 				 & UINT64_C(0x02), UINT64_C(0x02));
 	test_gate_reset();
@@ -5293,6 +5310,7 @@ main(void)
 	UT_RUN(test_126_bit22_latch_fail_closed_without_shmem);
 	UT_RUN(test_127_bit22_latch_defaults_inactive_then_apply_flips_and_records_round);
 	UT_RUN(test_128_bit22_latch_second_apply_rejected_and_round_identity_kept);
+	UT_RUN(test_128b_bit22_latch_same_round_apply_is_idempotent);
 	UT_RUN(test_129_bit22_latch_rejects_zero_round_identity);
 	UT_RUN(test_130_bit22_latch_apply_refused_while_census_red);
 	UT_RUN(test_131_member_open_applied_applies_latch_and_acks);

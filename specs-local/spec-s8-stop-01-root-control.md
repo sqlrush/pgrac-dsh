@@ -4360,3 +4360,37 @@ pre-bit22（registry 权威）路径 → §17.8 双路径门控跨重启不成�
   latch 并绑定 root 轮次身份；对 PREPARED/非 bit22/非法 epoch 拒绝；
 - recovery_plan 单测：pass 前恢复（stub root 读 + stub latch）；
 - t243/regress 复跑。
+
+---
+
+## 增量 60（RF-ROOT P9 审计 #5：bit22 latch 幂等崩溃窗口）
+
+**审计命中**（补记 62 finding 6）：`cluster_r4_bit22_cutover_latch_apply`
+的 0→1 CAS 失败即返回 false——**多成员 cutover** 中，coordinator 与
+member 各自在 OPEN_APPLIED 时 apply：**CAS 输者**（同 round 已被并发置位）
+返回 false → 调用者不再发布 observed+ACK → coordinator 等该 member 的
+observed → **round 卡死**。崩溃窗口形态：赢者 CAS 置位、身份写入后、其
+observed 发布前崩溃——重启后 latch 归零（shmem 重建）重新 apply 无碍；
+**真正的死锁是输者不继续**。
+
+**设计（幂等 apply）**：
+
+1. **先写身份、再 CAS、输者按身份放行**：
+   - 原子写 `transition_epoch` / `round_generation`（字段升格为
+     pg_atomic_uint64，sizeof 不变）→ 写屏障 → CAS 0→1；
+   - **赢者** return true（身份已写）；
+   - **输者**：读身份——**等于本次 round** 即 return true（同 round 并发
+     置位 = 本 member 的 OPEN_APPLIED 发布已完成，调用者继续发布
+     observed+ACK）；**不等** return false（跨 round 拒绝，fail-closed）。
+   - 输者读到"自己的身份"（赢者尚未覆盖）与"赢者的身份"（同 round 同值）
+     均为放行；**跨 round 并发**（身份被污染）在调用层不可能（cutover
+     round 串行）——文档注明。
+2. **读侧不变**：`cluster_r4_bit22_cutover_active()` 只读 active 位。
+3. **census 检查仍在身份写之前**（census 红 → false，不写身份）。
+
+**验收**：
+
+- r4fsm：CAS 已置位 + 同 round → apply 返回 true（幂等放行）；
+  CAS 已置位 + 异 round → false；census 红 → false 且不写身份；
+- control_root 恢复测试回归（restore 走同一 apply）；
+- t243/regress 复跑。

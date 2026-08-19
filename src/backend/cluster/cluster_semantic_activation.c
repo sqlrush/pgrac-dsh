@@ -166,8 +166,11 @@ static ClusterSemanticActivationPgrdSnapshotShmem
 typedef struct ClusterR4Bit22CutoverLatchShmem {
 	pg_atomic_uint32 active; /* 0 = pre-bit22 (registry authority) */
 	uint32 reserved;
-	uint64 transition_epoch; /* round identity, observability only */
-	uint64 round_generation; /* ACK-table record_generation (增量 45) */
+	/* Round identity.  Atomic since apply() writes BEFORE the 0->1 CAS
+	 * (增量 60: the CAS loser reads back its own or a same-round winner's
+	 * identity to prove the OPEN_APPLIED publication completed). */
+	pg_atomic_uint64 transition_epoch;
+	pg_atomic_uint64 round_generation;
 } ClusterR4Bit22CutoverLatchShmem;
 
 static ClusterR4Bit22CutoverLatchShmem *SemanticActivationBit22Latch = NULL;
@@ -5741,8 +5744,8 @@ cluster_semantic_activation_shmem_init(void)
 	if (!latch_found) {
 		pg_atomic_init_u32(&SemanticActivationBit22Latch->active, 0);
 		SemanticActivationBit22Latch->reserved = 0;
-		SemanticActivationBit22Latch->transition_epoch = 0;
-		SemanticActivationBit22Latch->round_generation = 0;
+		pg_atomic_init_u64(&SemanticActivationBit22Latch->transition_epoch, 0);
+		pg_atomic_init_u64(&SemanticActivationBit22Latch->round_generation, 0);
 	}
 	if (!seam_found) {
 		pg_atomic_init_u32(&SemanticActivationBit22Seam->valid, 0);
@@ -5795,12 +5798,50 @@ cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 		return false;
 	if (!cluster_wal_state_correctness_census_ok())
 		return false;
-	if (!pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
-										&expected, 1))
+	/* RF-ROOT P9 审计 #5 (增量 60): idempotent apply.  The coordinator and
+	 * every member latch at OPEN_APPLIED; exactly one 0->1 CAS wins and
+	 * the losers must still publish their observed+ACK or the round stalls
+	 * waiting on them.  When the latch is ALREADY set the identity is
+	 * authoritative: a same-round apply returns true (publication
+	 * completed), a different round fails closed — and the identity is NOT
+	 * rewritten (a wrong-round apply must not pollute the bound round; the
+	 * short re-read tolerates a winner between its CAS and its identity
+	 * write).  When unset, the identity is written before the CAS so a CAS
+	 * loser reads back either its own value (winner not yet overwritten)
+	 * or the same-round winner's — both match.  Cross-round concurrent
+	 * applies cannot occur (cutover rounds are driver-serialized). */
+	if (pg_atomic_read_u32(&SemanticActivationBit22Latch->active) != 0)
+	{
+		int		i;
+
+		if (pg_atomic_read_u64(
+				&SemanticActivationBit22Latch->transition_epoch) == transition_epoch
+			&& pg_atomic_read_u64(
+				&SemanticActivationBit22Latch->round_generation) == round_generation)
+			return true;
+		for (i = 0; i < 8; i++)
+		{
+			pg_read_barrier();
+			if (pg_atomic_read_u64(
+					&SemanticActivationBit22Latch->transition_epoch) == transition_epoch
+				&& pg_atomic_read_u64(
+					&SemanticActivationBit22Latch->round_generation) == round_generation)
+				return true;
+		}
 		return false;
-	SemanticActivationBit22Latch->transition_epoch = transition_epoch;
-	SemanticActivationBit22Latch->round_generation = round_generation;
-	return true;
+	}
+	pg_atomic_write_u64(&SemanticActivationBit22Latch->transition_epoch,
+						transition_epoch);
+	pg_atomic_write_u64(&SemanticActivationBit22Latch->round_generation,
+						round_generation);
+	pg_write_barrier();
+	if (pg_atomic_compare_exchange_u32(&SemanticActivationBit22Latch->active,
+										&expected, 1))
+		return true;
+	return pg_atomic_read_u64(
+			   &SemanticActivationBit22Latch->transition_epoch) == transition_epoch
+		   && pg_atomic_read_u64(
+			   &SemanticActivationBit22Latch->round_generation) == round_generation;
 }
 
 /*
