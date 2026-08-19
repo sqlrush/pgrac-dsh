@@ -795,3 +795,54 @@ PGDEL 同风格）：
   ACTIVE 重入但要求 stranded-ACTIVATING marker（正常 fail-closed 的
   generation != 0 且 activation_retry_generation == 0 不满足）——
   reformation 新入口见下一步（独立 commit）。
+
+---
+
+## 工作区本地增量 2：t274 L4/L5 根因实锤 + PCM-X re-form 设计要点（2026-08-20）
+
+### 根因（t274 两轮日志实证）
+
+- L4/L5 均败于 `wait_for_pcm_x_active TIMEOUT: node0=0 node1=0`——**双节点
+  PCM-X runtime 均非 ACTIVE**（日志：
+  `cluster PCM-X runtime fail-closed (recovery blocked) at
+  cluster_pcm_x_convert.c:2962` 双节点各一条，L4 后 node1 新进程
+  01:06:23、node0 01:06:15；L5 同形）。
+- **精确因果**：PCM-X formation binding（peer_frontiers/outbound_targets
+  的 cluster_epoch + sender/target session）是 **activation 时快照**。
+  L4/L5 的 clean stop/start 触发集群 reconfig（fail-stop epoch bump +
+  peer 新 session），formation tick 的 ACTIVE 分支每 tick 用
+  `cluster_pcm_x_runtime_peer_binding_revalidate_exact`（:2962）重验
+  快照——epoch/session 任一变化 → STALE → `pcm_x_runtime_fail_closed`
+  → RECOVERY_BLOCKED；BLOCKED 分支直接 return（"non-pristine"），
+  `activate_bound` 的重入要求 stranded-ACTIVATING marker（正常
+  fail-closed 的 generation != 0 且 activation_retry_generation == 0
+  不满足）→ **任何 reconfig 后 runtime 永久冻结**（非仅 peer 重启）。
+- 既有注释自认："permanently closed until the deferred crash-recovery
+  protocol intervenes"——该协议缺失 = 增量 62 形态 2 的实质。
+
+### re-form 设计要点（独立 commit，下一轮）
+
+1. 触发：formation tick 的 BLOCKED 分支，当 collect_formation 双采样
+   稳定（epoch 一致 + 全部 MEMBER peer auth OK + 新 session）时调
+   `cluster_pcm_x_runtime_reform(self_session, bindings)`。
+2. 变化证据（防空转重入）：至少一个 peer 的 binding session != 当前
+   outbound target session，或 collect epoch != 绑定 epoch。
+3. **master_session 语义问题**：ticket/payload/local-progress 全部按
+   `master_session_incarnation == runtime session` 校验（:4256
+   pcm_x_runtime_token_exact），gate generation 不在 ticket 校验内。
+   本节点未重启时 qvotec incarnation 不变 → reform 若不换 master
+   session，旧 in-flight ticket 可跨 reform 存活（prehandle 重置 1 后
+   可能误匹配）——**二选一**：
+   a. reform 派生单调新 master_session（如 gate generation 混合）——
+      改变 master_session 语义（从"节点 incarnation"变为"activation
+      世代"），需审计全部 6+ 处 master_session 消费点；
+   b. ticket 校验增加 activation generation 维度——PcmXLocalProgress/
+     PcmXLocalHolderProgress/PcmXLocalCutoff 等 ABI StaticAssert 结构
+     扩字段（ABI 影响，需 product plan 批准？—— 均为 in-memory
+     shmem/wire 结构，§8.2-4 冻结期需谨慎）。
+4. 验收：t274 L4/L5（pair reformed 双断言）+ 无回归 t243。
+
+### 归属
+
+RF-SIDE D-SIDE-07（resource serve readiness）落点；PCM-X 是 block-
+access serve 协议，re-form = 集群 reconfig 收敛后的 serve 门恢复。
