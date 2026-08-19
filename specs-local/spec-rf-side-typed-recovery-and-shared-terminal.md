@@ -1041,3 +1041,27 @@ producer、invalidate、rebuild/fail-closed、verification；local store
 - `src/test/cluster_unit/test_cluster_side_projection.c`：3 组 RED 单测
   全绿（verified 合取逐项 + 越界 kind fail-closed、lookup fail-closed、
   rebuildable 按类 + source-retention 规则 + 无 producer 拒绝）。
+
+---
+
+## 工作区本地增量 8：D-SIDE-05 落地（2026-08-20）
+
+**交付**（spec §1.2 D-SIDE-05：WAL-logged shared HWM/extent/bitmap
+pages；Rule-26 approval 前只写 RED/STOP，不写 ABI）：
+
+- `src/include/cluster/cluster_side_space.h` + `src/backend/cluster/
+  cluster_side_space.c`：
+  - `cluster_side_space_metadata_mutation_allowed`：**恒 false**（任何
+    kind、任何输入）——STOP-RF-SIDE-SPACE-ABI active 时 canonical
+    space page/redo ABI 未批准，mutation 路径全部关闭；API **无任何
+    config/GUC/test override 参数**（U-SIDE-18：STOP 不可被
+    override；§3.2 HW 行 "never raise shmem and call complete"）。
+  - `cluster_side_space_metadata_page_verdict`：§2.5-3 metadata
+    PageVersion 两门——委托 RF-PAGE §3.2 decide（result-skip 仅
+    trusted exact result；expected-before apply 仅 exact match；
+    mismatch/numeric-higher 恒 BLOCKED；U-SIDE-12 负测面）。
+- 边界：canonical space page layout/ABI 与 allocation 执行保持
+  STOPPED（RED，U-SIDE-11 语义测试先 RED）；Rule-26 approval 后才
+  修订；零 ABI 改动。
+- `src/test/cluster_unit/test_cluster_side_space.c`：2 组 RED 单测全绿
+  （mutation 门恒关（含越界 kind）、metadata page 两门负测）。

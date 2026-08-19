@@ -680,6 +680,14 @@ test_cluster_side_projection: test_cluster_side_projection.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_PROJECTION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-05: canonical space metadata gates (HWM/extent/bitmap)
+# under STOP-RF-SIDE-SPACE-ABI.
+CLUSTER_SIDE_SPACE_O = $(top_builddir)/src/backend/cluster/cluster_side_space.o
+test_cluster_side_space: test_cluster_side_space.c unit_test.h \
+		$(CLUSTER_SIDE_SPACE_O) $(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_SPACE_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
