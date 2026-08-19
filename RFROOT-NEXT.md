@@ -254,6 +254,16 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
       ④ G3/G5 bit22 首开轮（all-member CLOSED-ACK 绑定 W6 事实 + reader
       切换）；⑤ census 重定义为 post-bit22 静态证明后接入门。
       ⚠️ 原"P7 W6 退休 + 三 consumer 迁移 + census 0"表述已作废（补记 43）。
+- [x] **#2 重做（durable Target OPEN 证明）**（2026-08-19，27dc616eb6 +
+      ea8bbc358d）：latch 恢复基于 majority OPEN(P+2) voting-disk 记录与
+      ACTIVE root 的交叉验证（增量 59b）；三态 latch（SOURCE/BOOTSTRAP/
+      VERIFIED）+ CF(S) 强验证升级；first-open source-close BARRIER（增量
+      61）让在线 cutover 可达（build 接受冻结 ACTIVE slot）。
+- [~] **t/243 fixture 保留**（诚实）：在线 cutover 已可达，但 t/243 的
+      L4 crash-rejoin 腿在 post-bit22 下依赖尚未实现的 post-bit22
+      crash-rejoin（P8 缺口：latch 置位后 peer join 30s 不收敛——增量
+      50 的"结构性满足"审计未覆盖此路径）；真实 cutover 的 t/274 重启
+      腿待 P8 该路径完成后实施。
 - [x] **P8 rebuild-first 编排**（2026-08-19）：结构性满足，无产品修复
       ——增量 49/50 审计 + 本会话重新实证：gap1 replay-slot pin 每 episode
       重写（episode_epoch 绑定，projection_current 拒 stale）；gap2 worker
