@@ -849,6 +849,45 @@ cluster_control_root_bootstrap_validate_active_round(
 	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
 }
 
+/*
+ * cluster_control_root_bootstrap_validate_active_round_fields -- RF-ROOT
+ * P9 audit #2 redo part 3 (DSH B′): member-side twin of
+ * bootstrap_validate_active_round for the bit22 cutover round.  The full
+ * round (and its sha) is coordinator-local (the seam lives in coordinator
+ * shmem, which other NODES cannot see), so a member cannot recompute
+ * round_sha256.  It binds the ACTIVE root to the round identity it DOES
+ * hold — the ACK table's transition_epoch / prepare_generation (= table
+ * generation - 1) / source+target feature bitmaps — plus the invariant
+ * that the root carries a non-zero round sha (the coordinator wrote it
+ * under the create/activate proofs; header+body CRCs and the primary/bak
+ * coherence already validated).  Full canonical validation via
+ * read_canonical_pair; read-only, grants no token authority.
+ */
+ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round_fields(
+	uint64 transition_epoch, uint64 prepare_generation,
+	uint64 source_feature_bitmap, uint64 target_feature_bitmap)
+{
+	ControlRootImage primary;
+	ControlRootImage bak;
+	ClusterControlRootResult result;
+
+	result = read_canonical_pair(&primary, &bak);
+	if (result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return result;
+	if (primary.header.activation_state
+			!= CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE
+		|| primary.header.migration_transition_epoch != transition_epoch
+		|| primary.header.migration_prepare_generation != prepare_generation
+		|| primary.header.source_feature_bitmap != source_feature_bitmap
+		|| primary.header.target_feature_bitmap != target_feature_bitmap
+		|| bytes_are_zero(primary.header.migration_round_sha256,
+						  sizeof(primary.header.migration_round_sha256)))
+		return CLUSTER_CONTROL_ROOT_IDENTITY_MISMATCH;
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 static void
 make_read_token(const ControlRootImage *image, uint16 thread_id, uint8 source,
 				ClusterControlRootReadToken *token)
@@ -1182,7 +1221,8 @@ read_thread_claim_exact(uint16 thread_id, int32 node_id,
 
 static ClusterControlRootResult
 read_source_wal_state(const ClusterControlRootSnapshot *expected_records,
-					  const uint8 *expected_hash, uint8 hash_out[PG_SHA256_DIGEST_LENGTH])
+					  const uint8 *expected_hash, uint8 hash_out[PG_SHA256_DIGEST_LENGTH],
+					  const ClusterControlRootMigrationRoundV1 *round)
 {
 	uint8 *first;
 	uint8 *second;
@@ -1258,7 +1298,13 @@ read_source_wal_state(const ClusterControlRootSnapshot *expected_records,
 			}
 			continue;
 		}
-		if (verdict != CLUSTER_WAL_SLOT_OK || slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
+		if (verdict != CLUSTER_WAL_SLOT_OK
+			|| (slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
+				&& !(slot.state == CLUSTER_WAL_SLOT_STATE_ACTIVE
+					 && round != NULL
+					 && cluster_r4_bit22_source_close_current(
+						 round->transition_epoch,
+						 round->prepare_generation)))
 			|| slot.checkpoint_redo_lsn == 0 || slot.merge_recovered_lsn != 0
 			|| expected->identity.system_identifier == 0
 			|| expected->identity.origin_node_id != slot.node_id
@@ -1530,8 +1576,14 @@ migration_wal_segment_open(XLogReaderState *state, XLogSegNo nextSegNo,
 static void
 migration_wal_segment_close(XLogReaderState *state)
 {
+	/* RF-ROOT P9 audit #2 redo part 3 / DSH review: the segment was opened
+	 * with BasicOpenFile (a raw fd, NOT the OpenTransientFile virtual-fd
+	 * table), so CloseTransientFile here is an API pairing violation
+	 * ("fd passed to CloseTransientFile was not obtained from
+	 * OpenTransientFile") — close() directly, matching PostgreSQL's own
+	 * wal_segment_close(). */
 	if (state->seg.ws_file >= 0)
-		CloseTransientFile(state->seg.ws_file);
+		close(state->seg.ws_file);
 	state->seg.ws_file = -1;
 }
 
@@ -1661,6 +1713,13 @@ cluster_control_root_build_migration_image(
 	if (out == NULL)
 		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
 	memset(out, 0, sizeof(*out));
+	/* RF-ROOT P9 audit #2 redo part 3 / DSH review: the LOCAL image is
+	 * filled field-by-field; without zeroing it first the reserved fields
+	 * carry stack garbage (observed live: reserved42=1 -> snapshot_
+	 * validate BAD_RESERVED -> create_prepared INVALID_ARGUMENT on the
+	 * very first bit22 round).  Zero it with out so every reserved byte is
+	 * deterministic. */
+	memset(&image, 0, sizeof(image));
 	if (cluster_wal_threads_dir == NULL || cluster_wal_threads_dir[0] == '\0'
 		|| lstat(cluster_wal_threads_dir, &st) != 0 || !S_ISDIR(st.st_mode)
 		|| snprintf(path, sizeof(path), "%s/%s", cluster_wal_threads_dir,
@@ -1703,6 +1762,17 @@ cluster_control_root_build_migration_image(
 		pfree(first);
 		return CLUSTER_CONTROL_ROOT_IO_ERROR;
 	}
+	/* RFC-4122 version-4 stamp: migration_image_validate requires
+	 * uuid_v4_valid (version 4 + RFC variant bits) on the image authority
+	 * UUID; pg_strong_random alone yields arbitrary bytes (1/64 chance of
+	 * accidentally satisfying the nibble checks), which failed the live
+	 * first-open create_prepared (INVALID_ARGUMENT) at the very first
+	 * bit22 round — the fixture cast path never hit this because it
+	 * carries an externally-minted v4 UUID. */
+	image.authority_uuid[6] = (uint8) ((image.authority_uuid[6] & UINT8_C(0x0f))
+									   | UINT8_C(0x40));
+	image.authority_uuid[8] = (uint8) ((image.authority_uuid[8] & UINT8_C(0x3f))
+									   | UINT8_C(0x80));
 	image.created_at_usec = GetCurrentTimestamp();
 	for (i = 0; i < CLUSTER_WAL_STATE_SLOT_COUNT; i++) {
 		ClusterWalStateSlot slot;
@@ -1775,6 +1845,18 @@ cluster_control_root_build_migration_image(
 			pfree(first);
 			return CLUSTER_CONTROL_ROOT_IO_ERROR;
 		}
+		/* RF-ROOT P9 审计 #2 redo part 3: the scan fills the tail-last
+		 * record fields; snapshot_validate requires the matching
+		 * TAIL_LAST_RECORD_VALID flag whenever a tail-last record exists
+		 * (and forbids the flag when the fields are empty — the
+		 * checkpoint-at-write-pos degenerate case, where the scan leaves
+		 * both zero).  Without the flag the live first-open image failed
+		 * migration_image_validate (RANGE_INVALID) and create_prepared
+		 * refused the round. */
+		if (record->tail_last_record_lsn != 0
+			&& record->tail_last_record_crc32c != 0)
+			record->root_flags
+				|= CLUSTER_CONTROL_ROOT_FLAG_TAIL_LAST_RECORD_VALID;
 		record->published_at_usec = image.created_at_usec;
 		record->lifecycle_reason
 			= CLUSTER_CONTROL_ROOT_PUBLISH_MIGRATION_IMPORT;
@@ -1837,7 +1919,8 @@ cluster_control_root_create_prepared(const ClusterControlRootMigrationImage *ima
 		result = CLUSTER_CONTROL_ROOT_IO_ERROR;
 	else
 		result = read_source_wal_state(image->records, NULL,
-								 root->header.source_wal_state_sha256);
+								 root->header.source_wal_state_sha256,
+								 round);
 	if (result == CLUSTER_CONTROL_ROOT_OK_PRIMARY) {
 		for (i = 0; i < CLUSTER_CONTROL_ROOT_RECORD_COUNT; i++) {
 			if (image->records[i].identity.system_identifier == 0)
@@ -1929,7 +2012,7 @@ cluster_control_root_activate_prepared(const ClusterControlRootFileToken *expect
 		else
 			result = read_source_wal_state(primary->records,
 								   primary->header.source_wal_state_sha256,
-								   source_hash);
+								   source_hash, round);
 	}
 	if (result == CLUSTER_CONTROL_ROOT_OK_PRIMARY
 		|| result == CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED) {

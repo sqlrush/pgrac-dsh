@@ -2460,6 +2460,10 @@ qvotec_poll_once(void)
 	bool join_disk_write_succeeded[CLUSTER_MAX_VOTING_DISKS] = { false };
 	ClusterRemovalMarker removal_submit_marker; /* spec-5.18 §2.5 staged removal marker */
 	bool have_removal_submit;
+	/* RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling):
+	 * staged cold-formation marker submit (region 7) + self-slot observe. */
+	ClusterFormationMarkerSubmitRequest formation_marker_request;
+	bool have_formation_marker_submit;
 	ClusterAdgApplyMasterLease apply_lease_request;
 	ClusterAdgApplyMasterLeaseQuorum apply_lease_winner;
 	bool have_apply_lease_request;
@@ -2564,6 +2568,15 @@ qvotec_poll_once(void)
 		= cluster_reconfig_join_qvotec_poll_pending(
 			&join_marker_operation, &join_target_node, join_marker_slot);
 
+	/* RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling): pick
+	 * up a pending cold-formation marker submit.  The arbiter LMON staged a
+	 * COMMITTED marker + the target co-boot member set; qvotec writes it to
+	 * every target member's region-7 slot on every disk and ACKs only on a
+	 * majority write + majority exact readback. */
+	have_formation_marker_submit
+		= cluster_reconfig_formation_qvotec_poll_pending(
+			&formation_marker_request);
+
 	/* spec-5.18 §2.5: pick up a pending removal-marker submit too.  It rides THIS
 	 * node's own self-slot _reserved1[64..] (right after the 4.12 fence marker),
 	 * carried forward every poll like the fence marker (R12), and acked majority-
@@ -2589,6 +2602,8 @@ qvotec_poll_once(void)
 		if (have_join_submit)
 			cluster_reconfig_join_qvotec_complete(
 				join_marker_operation, false, NULL); /* no disk -> no majority */
+		if (have_formation_marker_submit)
+			cluster_reconfig_formation_qvotec_complete(false); /* no disk */
 		if (have_removal_submit)
 			cluster_node_remove_qvotec_complete(false); /* no disk -> no majority */
 		if (have_apply_lease_request)
@@ -2686,36 +2701,14 @@ qvotec_poll_once(void)
 	}
 
 	/*
-	 * spec-5.15 D1: publish the freshest observed slot (incarnation + generation)
-	 * per declared node from the matrix we just read into the reconfig region, so
-	 * LMON can detect/vet join candidates from shmem (no disk read in the tick).
-	 * For each node take the slot with the highest generation across disks
-	 * (newest-valid; read_slot already zeroed torn/CRC-bad cells, so generation
-	 * > 0 means a valid slot).  qvotec is the sole voting-disk reader, so it is
-	 * the natural publisher.
+	 * RF-ROOT P9 audit #2 redo part 3 (DSH B′): the per-node observed-slot
+	 * publication (incarnation/generation/epoch) MOVED to the end of the
+	 * poll cycle, where it is published together with the fresh-alive view
+	 * and the same-round in-quorum snapshot inside ONE seqlock window
+	 * (see the publish-shmem block below).  Publishing it here — BEFORE
+	 * decide_quorum_view computed the fresh-alive view — let an ABSENT
+	 * admission combine a new incarnation with a stale fresh bit.
 	 */
-	{
-		uint32 node;
-
-
-		for (node = 0; node < CLUSTER_MAX_NODES; node++) {
-			uint64 best_gen = 0;
-			uint64 best_incarnation = 0;
-			uint64 best_epoch = 0;
-
-			for (i = 0; i < qvotec_n_disks; i++) {
-				ClusterVotingSlot *cell = &qvotec_slot_matrix[i * CLUSTER_MAX_NODES + node];
-
-				if (cell->generation > best_gen && cell->node_id == node) {
-					best_gen = cell->generation;
-					best_incarnation = cell->incarnation;
-					best_epoch = cell->current_epoch;
-				}
-			}
-			cluster_reconfig_record_observed_slot((int32)node, best_incarnation, best_gen,
-												  best_epoch);
-		}
-	}
 
 	/*
 	 * spec-5.16 (3-node join participation) — observe each PEER's durable COMMITTED
@@ -2872,23 +2865,13 @@ qvotec_poll_once(void)
 							 now_us, heartbeat_timeout_us, &decision);
 
 	/*
-	 * spec-5.15 Hardening v1.3 (INV-J14 stale-slot fail-open) — publish the
-	 * per-node FRESH-ALIVE liveness from decide_quorum_view's alive_bitmap (the
-	 * P2.1 heartbeat-freshness gate that already excludes a crashed peer's stale
-	 * leftover slot) into the reconfig region.  The cold-bootstrap proof reads it
-	 * so it counts only genuinely live co-booting peers, never a stale gen > 0
-	 * leftover (which would fail-open).  Anchored on the durable voting-disk
-	 * heartbeat, so it is robust to CSSD / tier1 churn — the v1.2 race fix stands.
+	 * RF-ROOT P9 audit #2 redo part 3 (DSH B′): the per-node FRESH-ALIVE
+	 * publication moved to the end of the poll cycle — it is now published
+	 * with the observed slots and the in-quorum snapshot inside ONE seqlock
+	 * window (see the publish-shmem block below).  Publishing it right after
+	 * decide_quorum_view left a window where a NEW incarnation (published
+	 * above it) could pair with a STALE fresh bit.
 	 */
-	{
-		uint32 node;
-
-		for (node = 0; node < CLUSTER_MAX_NODES; node++) {
-			bool fresh = (decision.alive_bitmap[node / 8] & (uint8)(1u << (node % 8))) != 0;
-
-			cluster_reconfig_record_observed_fresh_alive((int32)node, fresh);
-		}
-	}
 
 	/*
 	 * Hardening v0.4 P1.1:  Q6 v0.2 newer-self-FATAL.  decide_quorum_
@@ -2951,8 +2934,22 @@ qvotec_poll_once(void)
 	 * this to catch up (joiner_self_tick) so its IC frames are not stale-dropped
 	 * (the anti-stale envelope guard, spec-2.4) before it can be detected ALIVE
 	 * and admitted.  The incarnation vet + COMMITTED marker still gate MEMBER.
+	 *
+	 * RF-ROOT P9 audit #2 redo part 3 / DSH B′ cold-formation ruling
+	 * (2026-08-19): an UN-FORMED node publishes CLUSTER_EPOCH_INITIAL in its
+	 * slot — NOT the local (possibly recovered) epoch.  A formed survivor
+	 * publishes the live epoch, so a co-booting peer's observation window can
+	 * distinguish "old formation live survivor" (fresh slot past INITIAL)
+	 * from "fresh cold co-boot" (fresh slot at INITIAL, still unformed) —
+	 * the 5.22 no-survivor observation window.  The node flips to the live
+	 * epoch the moment its membership becomes MEMBER (cold-formation marker
+	 * admission or any join path).  This is a slot-epoch SEMANTIC only: the
+	 * membership epoch itself is untouched.
 	 */
-	self_slot.current_epoch = cluster_epoch_get_current();
+	if (cluster_membership_get_state(cluster_node_id) == CLUSTER_MEMBER_MEMBER)
+		self_slot.current_epoch = cluster_epoch_get_current();
+	else
+		self_slot.current_epoch = CLUSTER_EPOCH_INITIAL;
 	self_slot.flags = CLUSTER_VOTING_SLOT_FLAG_ALIVE;
 
 	/*
@@ -3103,6 +3100,26 @@ qvotec_poll_once(void)
 											   join_marker_slot)
 				   == CLUSTER_VOTING_DISK_IO_OK)
 			join_disk_write_succeeded[i] = true;
+
+		/*
+		 * RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling):
+		 * write the staged cold-formation marker into EVERY target member's
+		 * region-7 slot on this disk (the JCMK coordinator-write pattern).
+		 */
+		if (have_formation_marker_submit)
+		{
+			int			tm;
+
+			for (tm = 0; tm < CLUSTER_MAX_NODES; tm++)
+			{
+				if ((formation_marker_request.target_members[tm / 8]
+					 & (uint8) (1u << (tm % 8))) == 0)
+					continue;
+				(void) cluster_voting_disk_write_formation_slot(
+					qvotec_fds[i], (uint32) tm,
+					formation_marker_request.marker_bytes);
+			}
+		}
 	}
 
 	/*
@@ -3179,6 +3196,41 @@ qvotec_poll_once(void)
 			join_marker_operation, proven, NULL);
 	}
 
+		/* RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling):
+		 * ACK the cold-formation marker submit only when EVERY target
+		 * member's region-7 slot carries the EXACT image on a strict
+		 * majority of disks (write + readback). */
+		if (have_formation_marker_submit)
+		{
+			bool		proven = true;
+			int			tm;
+
+			for (tm = 0; tm < CLUSTER_MAX_NODES && proven; tm++)
+			{
+				uint32		exact = 0;
+				int			d;
+
+				if ((formation_marker_request.target_members[tm / 8]
+					 & (uint8) (1u << (tm % 8))) == 0)
+					continue;
+				for (d = 0; d < qvotec_n_disks; d++)
+				{
+					uint8		reread[CLUSTER_VOTING_SLOT_BYTES];
+
+					if (cluster_voting_disk_read_formation_slot(
+							qvotec_fds[d], (uint32) tm, reread)
+							== CLUSTER_VOTING_DISK_IO_OK
+						&& memcmp(reread,
+								  formation_marker_request.marker_bytes,
+								  CLUSTER_VOTING_SLOT_BYTES) == 0)
+						exact++;
+				}
+				if (exact < (uint32) qvotec_n_disks / 2u + 1u)
+					proven = false;
+			}
+			cluster_reconfig_formation_qvotec_complete(proven);
+		}
+
 		/*
 		 * spec-5.18 §2.5: ack the removal-marker submit.  It rode in the self-slot
 		 * write (same _reserved1 as the fence marker), so the count of disks that
@@ -3251,6 +3303,104 @@ qvotec_poll_once(void)
 		 * it so observability picks up the peer-incarnation race. */
 		if (decision.collision_state == CLUSTER_COLLISION_OBSERVED_OLDER)
 			cluster_pgstat_inc(qvotec_counter_collision);
+	}
+
+	/* RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling):
+	 * observe THIS node's own region-7 formation-marker slot.  A COMMITTED
+	 * marker standing on a strict majority of disks (exact same image) is
+	 * published for the cold-formation admission; otherwise the observation
+	 * is cleared (fail-closed: no marker, no admission). */
+	{
+		uint8		images[CLUSTER_MAX_VOTING_DISKS][CLUSTER_VOTING_SLOT_BYTES];
+		bool		valid[CLUSTER_MAX_VOTING_DISKS];
+		int			selected = -1;
+		uint32		majority = (uint32) qvotec_n_disks / 2u + 1u;
+		int			d;
+
+		memset(valid, 0, sizeof(valid));
+		for (d = 0; d < qvotec_n_disks; d++)
+		{
+			if (cluster_voting_disk_read_formation_slot(
+					qvotec_fds[d], (uint32) cluster_node_id, images[d])
+					== CLUSTER_VOTING_DISK_IO_OK)
+			{
+				ClusterFormationCommitMarker dec;
+
+				if (cluster_formation_marker_validate(images[d], &dec, NULL))
+					valid[d] = true;
+			}
+		}
+		for (d = 0; d < qvotec_n_disks && selected < 0; d++)
+		{
+			uint32		same = 0;
+			int			e;
+
+			if (!valid[d])
+				continue;
+			for (e = 0; e < qvotec_n_disks; e++)
+				if (valid[e]
+					&& memcmp(images[d], images[e], CLUSTER_VOTING_SLOT_BYTES) == 0)
+					same++;
+			if (same >= majority)
+				selected = d;
+		}
+		if (selected >= 0)
+		{
+			ClusterFormationCommitMarker dec;
+			uint64		incarnation_by_node[CLUSTER_MAX_NODES];
+
+			if (cluster_formation_marker_decode(
+					images[selected], &dec, incarnation_by_node))
+				cluster_reconfig_formation_qvotec_publish_observed(
+					&dec, incarnation_by_node);
+		}
+		else
+			cluster_reconfig_formation_qvotec_clear_observed();
+	}
+
+	/*
+	 * RF-ROOT P9 audit #2 redo part 3 / DSH B′ ruling (2026-08-19): publish
+	 * the bootstrap-observation window — per-node observed incarnation /
+	 * generation / epoch + fresh-alive + the same-round in-quorum snapshot —
+	 * inside ONE seqlock window (observed_bootstrap_seq odd = writer in
+	 * progress).  The founding-formation ABSENT admission reads this window
+	 * through cluster_reconfig_bootstrap_proof_node, which retries until it
+	 * samples a stable EVEN seq: no "new incarnation + stale fresh-alive"
+	 * cross-window combination can form an admission proof.  The observed
+	 * slot/epoch data comes from this poll's matrix (decide_quorum_view's
+	 * input); the fresh view is decide's alive_bitmap (P2.1 freshness); the
+	 * in-quorum snapshot is the post-write quorum decision (same cycle as
+	 * the quorum_state published above).  JCMK observations (region-3) are
+	 * NOT part of the founding proof and stay outside the window.
+	 */
+	{
+		uint32 node;
+
+		cluster_reconfig_bootstrap_publish_begin();
+		for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+			uint64 best_gen = 0;
+			uint64 best_incarnation = 0;
+			uint64 best_epoch = 0;
+			bool	fresh;
+
+			for (i = 0; i < qvotec_n_disks; i++) {
+				ClusterVotingSlot *cell = &qvotec_slot_matrix[i * CLUSTER_MAX_NODES + node];
+
+				if (cell->generation > best_gen && cell->node_id == node) {
+					best_gen = cell->generation;
+					best_incarnation = cell->incarnation;
+					best_epoch = cell->current_epoch;
+				}
+			}
+			cluster_reconfig_record_observed_slot((int32)node, best_incarnation,
+												  best_gen, best_epoch);
+			fresh = (decision.alive_bitmap[node / 8]
+					 & (uint8) (1u << (node % 8))) != 0;
+			cluster_reconfig_record_observed_fresh_alive((int32)node, fresh);
+		}
+		cluster_reconfig_bootstrap_publish_in_quorum(
+			decision.quorum_state == CLUSTER_QVOTEC_QUORUM_OK);
+		cluster_reconfig_bootstrap_publish_end();
 	}
 }
 
@@ -3457,7 +3607,39 @@ ClusterQvotecMain(void)
 	 * clean leave (else the rebuild's re-set would mask N's later fail-stop).
 	 */
 	cluster_reconfig_publish_join_qvotec_latch(MyLatch);
+	cluster_reconfig_publish_formation_qvotec_latch(MyLatch);
 	cluster_membership_seed_last_admitted_from_voting_disk(qvotec_fds, qvotec_n_disks);
+
+	/* RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling):
+	 * seed the highest COMMITTED cold-formation generation found across
+	 * region 7, so a takeover arbiter writes max+1 (monotonic).  The
+	 * marker's per-member INCARNATIONS are never inherited — each cold
+	 * formation commits its CURRENT boot incarnations (a new postmaster
+	 * never resumes a previous marker's incarnation). */
+	{
+		uint64		max_generation = 0;
+		int			n;
+
+		for (n = 0; n < CLUSTER_MAX_NODES; n++)
+		{
+			int			d;
+
+			for (d = 0; d < qvotec_n_disks; d++)
+			{
+				uint8		slot_bytes[CLUSTER_VOTING_SLOT_BYTES];
+				ClusterFormationCommitMarker dec;
+
+				if (cluster_voting_disk_read_formation_slot(
+						qvotec_fds[d], (uint32) n, slot_bytes)
+						== CLUSTER_VOTING_DISK_IO_OK
+					&& cluster_formation_marker_validate(
+						slot_bytes, &dec, NULL)
+					&& dec.formation_generation > max_generation)
+					max_generation = dec.formation_generation;
+			}
+		}
+		cluster_reconfig_formation_qvotec_note_max_generation(max_generation);
+	}
 
 	/*
 	 * spec-6.15 D5b: publish the durable xid-stripe activation state

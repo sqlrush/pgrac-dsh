@@ -50,6 +50,7 @@ OBJS = \
 	cluster_backup_manifest.o \
 	cluster_cf_authority.o \
 	cluster_control_root.o \
+	cluster_formation_marker.o \
 	cluster_recovery_duty.o \
 	cluster_cf_enqueue.o \
 	cluster_cf_phase2.o \

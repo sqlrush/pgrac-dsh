@@ -1046,6 +1046,7 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 {
 	ClusterFenceMarker expected;
 	int32 origin_node;
+	int		i;
 
 	if (f1 == NULL || authority == NULL || f2 == NULL || origin_thread == 0
 		|| origin_thread > CLUSTER_MAX_NODES)
@@ -1115,6 +1116,24 @@ formation_witness_decide_live_v1(const ClusterFormationSnapshotV1 *f1,
 		|| formation_bitmap_has_node(f2->excluded_bitmap, origin_node))
 	{
 		return CLUSTER_FORMATION_WITNESS_OWNER_MISMATCH;
+	}
+	/*
+	 * RF-ROOT P9 audit #2 redo part 3 / DSH B′ ruling (2026-08-19): phase-3
+	 * readiness must ALSO wait until every founding member — the local
+	 * admitted bitmap: every non-excluded MEMBER of this formation — carries
+	 * a NON-ZERO exact floor, before the D13/BARRIER cutover may start.  With
+	 * the B′ ABSENT-branch floor publish (cluster_reconfig.c) this holds as
+	 * soon as the founding formation is admitted; while LMON is still
+	 * publishing floors the witness stays OWNER_MISMATCH, the same transient
+	 * the phase-3 deadline loop already retries.
+	 */
+	for (i = 0; i < CLUSTER_MAX_NODES; i++)
+	{
+		if (f2->membership.membership_state[i] != CLUSTER_MEMBER_MEMBER
+			|| formation_bitmap_has_node(f2->excluded_bitmap, i))
+			continue;
+		if (f2->membership.last_admitted_incarnation[i] == 0)
+			return CLUSTER_FORMATION_WITNESS_OWNER_MISMATCH;
 	}
 	return CLUSTER_FORMATION_WITNESS_READY;
 }

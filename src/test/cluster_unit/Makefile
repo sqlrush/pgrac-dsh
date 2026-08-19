@@ -536,6 +536,17 @@ test_cluster_undo_root_descriptor: test_cluster_undo_root_descriptor.c unit_test
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_UNDO_ROOT_DESCRIPTOR_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-ROOT P9 audit #2 redo part 3 (DSH B′ cold-formation ruling): pure
+# 512-byte formation-commit-marker codec (encode/decode + wire CRC over
+# header + compact incarnation table + 48/128 capacity clamp + corrupt
+# n_admitted out-of-bounds guard).  CRC32C comes from libpgport; the
+# codec has no PG-backend dependencies.
+CLUSTER_FORMATION_MARKER_O = $(top_builddir)/src/backend/cluster/cluster_formation_marker.o
+test_cluster_formation_marker: test_cluster_formation_marker.c unit_test.h \
+		$(CLUSTER_FORMATION_MARKER_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_FORMATION_MARKER_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
@@ -1426,12 +1437,14 @@ test_cluster_reconfig: test_cluster_reconfig.c unit_test.h \
 		$(CLUSTER_VERSION_O) $(CLUSTER_RECONFIG_O) $(CLUSTER_EPOCH_O) \
 		$(CLUSTER_EPOCH_BALLOT_O) \
 		$(CLUSTER_TOUCHED_PEERS_O) $(CLUSTER_MEMBERSHIP_O) \
-		$(CLUSTER_REPLACEMENT_EPISODE_O) $(CLUSTER_REPLACEMENT_WIRE_O)
+		$(CLUSTER_REPLACEMENT_EPISODE_O) $(CLUSTER_REPLACEMENT_WIRE_O) \
+		$(CLUSTER_FORMATION_MARKER_O)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< \
 		$(CLUSTER_VERSION_O) $(CLUSTER_RECONFIG_O) $(CLUSTER_EPOCH_O) \
 		$(CLUSTER_EPOCH_BALLOT_O) \
 		$(CLUSTER_TOUCHED_PEERS_O) $(CLUSTER_MEMBERSHIP_O) \
 		$(CLUSTER_REPLACEMENT_EPISODE_O) $(CLUSTER_REPLACEMENT_WIRE_O) \
+		$(CLUSTER_FORMATION_MARKER_O) \
 		$(top_builddir)/src/common/libpgcommon_srv.a \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 

@@ -437,6 +437,17 @@ cluster_control_root_bootstrap_validate_active_round(
 	const ClusterControlRootMigrationRoundV1 *round,
 	ClusterControlRootFileToken *token);
 
+/* RF-ROOT P9 audit #2 redo part 3 (DSH B′): member-side field binding —
+ * ACTIVE root bound to the round identity a member holds (epoch /
+ * prepare-generation / source+target bitmaps) + non-zero round sha.  The
+ * full round + its sha are coordinator-local (seam shmem), so members
+ * cannot recompute round_sha256; the identity fields + the root's own
+ * CRC/dual-copy validation bind the round. */
+extern ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round_fields(
+	uint64 transition_epoch, uint64 prepare_generation,
+	uint64 source_feature_bitmap, uint64 target_feature_bitmap);
+
 /* RF-ROOT P9 审计 #2 (增量 59): re-arm the bit22 cutover latch from a
  * durable ACTIVE root across a postmaster restart.  Returns whether the
  * dual-path gate reads as post-bit22 afterwards. */
