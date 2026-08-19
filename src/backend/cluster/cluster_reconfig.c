@@ -5452,13 +5452,33 @@ cluster_reconfig_joiner_self_tick(void)
 							"write gate open",
 							cluster_node_id)));
 		} else {
-			/* UNDECIDED: neither proof holds yet.  Keep the gate CLOSED
-			 * (fail-closed) and re-evaluate next tick — a slow qvotec waits here
-			 * rather than mis-opening as bootstrap (P1-2). */
+			/*
+			 * UNDECIDED: neither proof holds yet.  Keep the gate CLOSED
+			 * (fail-closed) and re-evaluate next tick — a slow qvotec
+			 * waits here rather than mis-opening as bootstrap (P1-2).
+			 *
+			 * RF-SIDE integration closure (external-rejoin leg): while an
+			 * EXTERNAL REJOIN FENCE is active, a node whose gate is
+			 * ALREADY OPEN (self_join_admitted) carries independent strong
+			 * admission evidence — the JOIN_COMMITTED marker +
+			 * publish-proof (note_self_admitted), or the B' cold-
+			 * formation marker admission — and its admission is managed
+			 * by the external provider, so the boot classifier's LACK of
+			 * evidence (this node never ran a founding classification)
+			 * must not revoke it.  Without this guard every tick demoted
+			 * the admitted node back to JOINING, the survivor set lost a
+			 * member, no coordinator existed, and the external rejoin
+			 * fence could never start its operation.
+			 */
 			LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
 			cluster_write_fence_authority_cache_invalidate();
-			ReconfigShmem->self_join_admitted = 0;
-			cluster_membership_set_state(cluster_node_id, CLUSTER_MEMBER_JOINING);
+			if (ReconfigShmem->self_join_admitted == 0
+				|| !cluster_external_fence_runtime_active())
+			{
+				ReconfigShmem->self_join_admitted = 0;
+				cluster_membership_set_state(cluster_node_id,
+											 CLUSTER_MEMBER_JOINING);
+			}
 			LWLockRelease(&ReconfigShmem->lock);
 		}
 		return;
