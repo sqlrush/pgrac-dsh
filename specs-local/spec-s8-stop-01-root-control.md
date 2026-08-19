@@ -4494,3 +4494,75 @@ observed 发布前崩溃——重启后 latch 归零（shmem 重建）重新 app
 **验收**：r4fsm 195/195（test_142/144 改 BARRIER 两阶段）、control_root
 34/34（新增 build 接受冻结 ACTIVE）、t243 33/33、regress 219/219、census
 GREEN。
+
+---
+
+## 增量 62：post-bit22 节点死亡恢复缺口 —— 双形态代码级诊断（2026-08-19/20，B′ 验收后）
+
+**背景**：B′ 冷成形闭环（cb7097b620，t243 33/33、focused unit、三条负腿全绿）
+后，post-bit22 节点死亡恢复路径是 t/274 L4/L5 与 crash 变体的唯一剩余阻断
+（c79dacb4ae 已 defer 到 RF-PAGE/SIDE 队列）。本增量把两个失败形态钉到代码
+行级，供 RF-PAGE/SIDE 的 stable-base/post-read/retirement proof 直接引用。
+
+### 形态 1：crash 变体 —— hw_remaster bit22 分支 → GRD WAIT_CLUSTER → CF 锁 checkpoint stall
+
+证据链（t243 强制 latch + peer kill 实验，2026-08-19 实证）：
+
+1. `cluster_hw_remaster.c` bit22 分支（`if (cluster_r4_bit22_cutover_active())`，
+   调用点 ~:496）：dead peer 的 canonical root 只能经
+   `cluster_control_root_read_canonical_discovered`（BOOTSTRAP_VALIDATE →
+   STRONG）读取；STRONG 需要 `acquire_clusterwide_cf(ShareLock)`
+   （cluster_control_root.c:966-967）——**crash-rejoin episode 窗口内拿不到
+   clusterwide CF**（增量 31 补记 24 已实测 16× LOCK_UNAVAILABLE；代码注释
+   亦明言 "a root STRONG read cannot be obtained inside the crash-rejoin
+   episode window"）。
+2. 读失败后走 minted-lost 判别器：registry `highest_lsn != 0`（已发布）但 root
+   读失败 → `CLUSTER_HW_REMASTER_BLOCKED_STRUCTURAL`（worker 终止且不持 hw
+   gate）。t243 fixture 的 root 文件在 base-backup 后被移除（增量 35 实锤：
+   L4 崩溃时 `global/` 无 pgrac_control_root），正是该形态的触发条件。
+3. hw gate 永不 unfreeze → `grd_recovery_wait_cluster_watchdog`
+   （cluster_grd.c:3393，仅观测）持续 WARNING → GRD episode 永不完成 →
+   checkpointer 的 `cluster_cf_lock(ExclusiveLock)`（xlog.c:7777）无限等锁 →
+   checkpoint 失败，集群楔死。
+
+**根因**：post-bit22 冻结 §17.8 只允许 canonical root 读，但 episode 内
+STRONG 读（CF(S)-bound）不可用；增量 31/32 的 **pre-IR pinned canonical
+projection**（episode P0 accept 前零锁 STRONG 读 → pin token/validated_tail/
+checkpoint 边界 → episode worker 只消费投影）在 root 存在时已被实证正确
+（16:08 运行：projection 版 hw_remaster 成功 "rebuilt authority from dead
+node 1"），因 t243 fixture 的 root-ABSENT 回退（增量 32），**从未在 post-bit22
+双路径下重新落地**。
+
+### 形态 2：clean-restart 变体 —— PCM-X runtime 永久 RECOVERY_BLOCKED（t/274 L4/L5 实锤）
+
+证据链（t/274 L4/L5，断言 `wait_for_pcm_x_active` 失败；log 行
+`cluster PCM-X runtime fail-closed (recovery blocked) at
+cluster_pcm_x_convert.c:2962`）：
+
+1. 节点 clean restart → 新 session incarnation。node0 的 ACTIVE 态
+   `cluster_gcs_block_pcm_x_formation_tick`（cluster_gcs_block.c:12470+）逐
+   peer 调 `cluster_pcm_x_runtime_peer_binding_revalidate_exact`：outbound
+   target 仍绑定旧 session incarnation → `PCM_X_QUEUE_STALE` → `goto
+   fail_closed` → `pcm_x_runtime_fail_closed()`（:2962）→ runtime
+   RECOVERY_BLOCKED。
+2. 恢复路径**不存在**：formation tick 对非 pristine 态直接 return
+   （"ACTIVATING and any post-activation BLOCKED state are non-pristine"，
+   注释明言 "permanently closed until the deferred crash-recovery protocol
+   intervenes"）；`cluster_pcm_x_runtime_reset_activating`（唯一 escape，
+   要求 publisher 死于 ACTIVATING）**全树零调用**（grep 实证，仅头文件声明）；
+   `PCM_X_RUNTIME_RECOVERY_BLOCKED` 无任何消费方。errhint "until the PCM-X
+   runtime is reformed" 无实现。
+3. membership 已恢复（B′ 路径：n0/n1 均 MEMBER + 非零 floor），root 仍
+   ACTIVE —— 卡点纯粹是 PCM-X 层的 reformation 缺失。
+
+### 归口（RF-PAGE/SIDE stable-base/post-read/retirement proof）
+
+- 形态 1 需要 **stable-base/post-read**：hw_remaster 改消费 episode P0 前
+  pin 的 canonical projection（增量 31/32 设计 + 16:08 实证），不再 episode
+  内自取 STRONG；t243 fixture 的 root 生命周期（base-backup 移除）按
+  RETURN_MAINLINE 裁决走 setup-only 生产 producer 补救，不改 workload/judge。
+- 形态 2 需要 **retirement + 重建**：peer 新 session 的 outbound binding 从
+  恢复后的 formation（B′ membership 证据）re-bind，旧 session 先 retire，
+  再 gated re-activate —— 禁止盲开（fail-closed 保留为默认）。
+
+**验收前置**：t/274 L4/L5（`pair reformed` 断言）、t243 强制 latch crash 腿。

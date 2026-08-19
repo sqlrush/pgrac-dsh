@@ -547,6 +547,18 @@ test_cluster_formation_marker: test_cluster_formation_marker.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_FORMATION_MARKER_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-01: PageVersion semantic type (valid/exact-equality),
+# §3.2 expected-before -> result-version admission decision with the §3.3
+# shape-1 trusted skip, and the §4.1 closed page/record classifier
+# (unknown/ambiguous default UNKNOWN/BLOCKED; rmgr known-set registry
+# compiled empty — PGDEL-02 owns the census).  Pure in-memory layer: no
+# backend deps beyond the Assert hook.
+CLUSTER_PAGE_VERSION_O = $(top_builddir)/src/backend/cluster/cluster_page_version.o
+test_cluster_page_version: test_cluster_page_version.c unit_test.h \
+		$(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
