@@ -846,3 +846,77 @@ PGDEL 同风格）：
 
 RF-SIDE D-SIDE-07（resource serve readiness）落点；PCM-X 是 block-
 access serve 协议，re-form = 集群 reconfig 收敛后的 serve 门恢复。
+
+---
+
+## 工作区本地增量 3：PCM-X re-form 协议设计定稿（2026-08-20，v1）
+
+### 决定性发现（wire/世代语义审计）
+
+1. **master_session 的 wire 语义 = 本节点 qvotec incarnation**：
+   `retire_request_ingress_valid` 要求 `request->master_session_incarnation ==
+   authenticated_session`（对端 auth session = 对端观测 incarnation）；
+   `retire_ack_ingress_valid` 要求 == 本地 runtime master_session。
+   → **方案 a（reform 派生任意新 master_session）否决**：对端会拒绝
+   本节点的 retire 帧。master_session 必须保持 == 本节点 incarnation。
+2. **ticket/tag_slot 的 epoch 世代绑定**：ticket ref 的
+   `identity.cluster_epoch` 与确认路径的
+   `tag_slot->cluster_epoch != ref.identity.cluster_epoch → STALE`
+   （:4240）——tag_slot->cluster_epoch 在**新 tag 创建时**写入
+   （:3803）且之后不更新；同 tag 跨 reconfig 的所有 ticket（含新
+   epoch 请求）均 STALE。→ re-form 必须**显式推进 tag 世代**
+   （更新存量 tag_slot 的 cluster_epoch），否则新 epoch 请求被拒
+   （假 ACTIVE 风险）。
+3. formation binding（peer_frontiers/outbound_targets 的 epoch +
+   session）是 activation 快照；`:3453` 只支持首次绑定或同
+   epoch/session 确认；变化 → STALE → fail_closed（永久，无恢复
+   → t274 L4/L5 双节点 0 的根因）。
+
+### re-form 协议 v1
+
+**触发**：formation tick（cluster_gcs_block.c:12529 BLOCKED 分支），
+collect_formation 双采样稳定（epoch 一致 + 全 MEMBER peer auth OK +
+session 非零）+ 变化证据（collect epoch != 绑定 epoch，或任一 peer
+session != 绑定 session）→ `cluster_pcm_x_runtime_reform(bindings)`。
+
+**执行**（cluster_pcm_x_convert.c 新函数，复用 activate_bound 主体）：
+1. 前置：gate == RECOVERY_BLOCKED；bindings 非空；变化证据；master
+   session 不变（== incarnation）。
+2. CAS gate BLOCKED→ACTIVATING（generation+1）。
+3. 对每个 peer：frontier/outbound 的 cluster_epoch ← collect epoch、
+   sender/target_session ← collect session；**session 变化的 peer 的
+   prehandle sequence 重置 1**（重启的新进程从 1 开始），**session
+   不变的 peer 的 sequence 保持**（in-flight 连续性；无 peer 重启
+   的 reconfig 不打断转换）。
+4. **tag 世代推进**：遍历 master tag 目录（需新增 allocator 遍历
+   API：pcm_x_allocator_visit/PCM_X_DIR_MASTER_TAG），把所有存量
+   tag_slot->cluster_epoch 更新为 collect epoch——旧 epoch ticket
+   全部 STALE（悬置持有保持 frozen，D3′/RF-ROOT recovery 重 census
+   处置），新 epoch 请求可用。
+5. 发布 ACTIVE（generation+1）。
+
+**安全性**：
+- 世代隔离由 epoch 绑定提供（旧 ticket 因 tag_slot epoch 推进而
+  STALE；悬置持有 frozen = fail-closed 方向）。
+- session 不变的 peer 的 in-flight 因 sequence 保持而正常收尾
+  （其 ticket 的 epoch 若已因步骤 4 失效——注意：步骤 4 会让所有
+  旧 ticket STALE，包括 session 不变 peer 的 in-flight！——取舍：
+  要么 tag 世代推进放弃 in-flight 收尾（悬置 + D3′），要么只推进
+  受影响 tag。v1 取前者：**reconfig 后旧世代全部悬置**，语义最
+  简单、fail-closed 最干净；代价是 in-flight 转换需 recovery 重
+  放——与 B′/RF-ROOT 的 crash-recovery 面一致）。
+- 双节点时序：各自 formation tick 驱动；中间态（一方已 reform）
+  对端仍 BLOCKED 时拒绝新帧（fail-closed），收敛后正常。
+- master_session 不变 → wire 语义（retire/ack ingress）保持。
+
+**验收**：t274 L4/L5（pair reformed + 服务）+ t243 无回归 +
+test_cluster_pcm_x_convert 新增 re-form 单测（前置真值表、变化证据、
+sequence 重置/保持规则、tag 世代推进、CAS 失败路径、revalidate
+STALE 后 reform 恢复 ACTIVE）。
+
+### 依赖/前置
+
+- allocator 遍历 API（PCM_X_ALLOC_MASTER_TAG 域）——新增，纯
+  shmem 内遍历（无 ABI 影响）。
+- formation tick BLOCKED 分支接线。
+- 悬置持有的 D3′ 处置与 RF-ROOT/PAGE 面（FND-10 已有 deny 语义）。
