@@ -616,6 +616,15 @@ test_cluster_page_handoff: test_cluster_page_handoff.c unit_test.h \
 		$(CLUSTER_PAGE_RECOVERY_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-08: §9.1 recovery-only counters (G2-classified),
+# vocabulary table and §9.3 attempt dump.  GetCurrentTimestamp comes
+# from the port library; no backend objects needed.
+CLUSTER_PAGE_STATS_O = $(top_builddir)/src/backend/cluster/cluster_page_stats.o
+test_cluster_page_stats: test_cluster_page_stats.c unit_test.h \
+		$(CLUSTER_PAGE_STATS_O) $(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_STATS_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

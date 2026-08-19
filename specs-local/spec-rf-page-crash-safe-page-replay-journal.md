@@ -1173,3 +1173,37 @@ SIDE；不创建 global barrier）：
   测试归 PGDEL-09/10；本层零 mutation/零持久状态。
 - `src/test/cluster_unit/test_cluster_page_handoff.c`：3 个 RED 单测
   全绿（FND-10 合取逐项、PL-12 拒绝、per-resource 隔离）。
+
+---
+
+## 工作区本地增量 8：PGDEL-08 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-08：counters/waits/dump 与错误映射；G2/G4′
+producer-consumer 必查）：
+
+- `src/include/cluster/cluster_page_stats.h` + `src/backend/cluster/
+  cluster_page_stats.c`：
+  - §9.1 全部 12 组指标：16 EVENT（source selected×3 / invalid /
+    missing / conflict / result_skip / apply / version_mismatch /
+    unknown_class_blocked / authority_stale / early_release /
+    retire_denied / d3_rebuild / d3_optimization_hit /
+    stable_base_unresolved）+ 4 GAUGE（contributor records/threads/gaps、
+    retained_pinned_bytes）+ 3 TIMESTAMP（last write/durability/
+    post_read）。
+  - **G2**：`cluster_page_stats_describe` 单一语义表（名 → 恰一
+    kind）；未知名 fail-closed（consumer 不猜语义）。
+  - **G4′**：每 counter 恰一 producer（cluster_page_stats_* 函数，
+    由 PGDEL-09 wiring 在属主证明点触发）+ 恰一 consumer
+    （pg_stat_cluster_counters mirror + §9.3 dump）；注册表同步进
+    cluster_pgstat.c（23 个 `cluster.page.*` 条目，SQL consumer）。
+  - **§9.3 dump**：`cluster_page_attempt_dump` 全字段（thread/
+    generation/identity/class/source kind/source+terminal token/
+    contributor count+thread set/apply|mismatch/durability/post-read/
+    authority/released/STOP reason）；API 无 page-bytes 参数（永不
+    打印 page content）；snprintf 截断语义。
+  - §9.2 wait events 按 spec 不新增 dead enum。
+- 边界：producer 触发点（production wiring）归 PGDEL-09；§8.1 的
+  SQLSTATE/errcode 映射待 product plan（§8.1 末段），本层不新增编号。
+- `src/test/cluster_unit/test_cluster_page_stats.c`：4 个 RED 单测全绿
+  （G2 语义表逐项、event producer 值、gauge/timestamp producer、dump
+  全字段 + 截断 + STOP reason）。
