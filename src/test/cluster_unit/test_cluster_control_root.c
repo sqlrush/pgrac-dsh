@@ -235,6 +235,33 @@ cluster_r4_bit22_cutover_active(void)
 }
 
 bool
+cluster_r4_bit22_source_writer_enter(void)
+{
+	return true;
+}
+
+void
+cluster_r4_bit22_source_writer_leave(void)
+{
+}
+
+bool
+cluster_r4_bit22_source_close_begin(uint64 transition_epoch pg_attribute_unused(),
+									uint64 prepare_generation pg_attribute_unused())
+{
+	return true;
+}
+
+static bool test_source_close_current_ok;
+
+bool
+cluster_r4_bit22_source_close_current(uint64 transition_epoch pg_attribute_unused(),
+									  uint64 prepare_generation pg_attribute_unused())
+{
+	return test_source_close_current_ok;
+}
+
+bool
 cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 									 uint64 round_generation)
 {
@@ -1471,7 +1498,7 @@ UT_TEST(test_build_migration_image_maps_registry_and_claims)
 	wipe_root_files();
 	build_source_wal_state(); /* registry slot 1 STOPPED + thread_1 claim */
 	test_membership_incarnation = UINT64_C(0x1020304050607080);
-	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&image),
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(NULL, &image),
 				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
 	UT_ASSERT_EQ(image.assigned_record_count, 1);
 	/* the checkpoint record CRC must come from the real WAL stream scan */
@@ -1493,6 +1520,72 @@ UT_TEST(test_build_migration_image_maps_registry_and_claims)
 	UT_ASSERT(memcmp(image.storage_uuid, image.records[0].identity.storage_uuid,
 					 16) == 0);
 	build_source_wal_state(); /* restore the shared fixture for later tests */
+}
+
+UT_TEST(test_build_migration_image_accepts_frozen_active_slot)
+{
+	/* RF-ROOT P9 审计 #2 重做 (DSH): the online first-open round freezes
+	 * every member's wal-state writers first; an ACTIVE slot is then
+	 * provably quiesced and acceptable as migration input. */
+	ClusterControlRootMigrationImage image;
+	ClusterControlRootMigrationRoundV1 round;
+	uint8 bytes[CLUSTER_WAL_STATE_FILE_SIZE];
+	ClusterWalStateSlot slot;
+
+	wipe_root_files();
+	memset(bytes, 0, sizeof(bytes));
+	cluster_wal_state_header_fill((ClusterWalStateHeader *) bytes,
+								  INT64_C(1699999999000000));
+	cluster_wal_state_slot_fill(&slot, 1, 0,
+								CLUSTER_WAL_SLOT_STATE_ACTIVE, 1,
+								INT64_C(1699999999000001),
+								INT64_C(1699999999000002),
+								UINT64_C(0x1000000), 1);
+	slot.checkpoint_redo_lsn = UINT64_C(0x1000000);
+	slot.crc = cluster_wal_state_block_crc(&slot);
+	memcpy(bytes + CLUSTER_WAL_STATE_SLOT_OFFSET(1), &slot, sizeof(slot));
+	{
+		char path[MAXPGPATH];
+
+		snprintf(path, sizeof(path), "%s/%s", test_wal_root,
+				 CLUSTER_WAL_STATE_FILENAME);
+		write_all_or_abort(path, bytes, sizeof(bytes));
+	}
+	/* claim + minimal WAL segment for the scan */
+	{
+		char thread_dir[MAXPGPATH];
+		char path[MAXPGPATH];
+		ClusterWalThreadClaim claim;
+
+		snprintf(thread_dir, sizeof(thread_dir), "%s/thread_1",
+				 test_wal_root);
+		if (mkdir(thread_dir, 0700) != 0 && errno != EEXIST)
+			abort();
+		cluster_wal_thread_claim_fill(&claim, 1, 0,
+									  INT64_C(1699999999000001));
+		snprintf(path, sizeof(path), "%s/%s", thread_dir,
+				 CLUSTER_WAL_THREAD_CLAIM_FILENAME);
+		write_all_or_abort(path, &claim, sizeof(claim));
+		write_minimal_checkpoint_segment(thread_dir);
+	}
+	test_membership_incarnation = UINT64_C(0x1020304050607080);
+	memset(&round, 0, sizeof(round));
+	round.transition_epoch = 7;
+	round.prepare_generation = 5;
+
+	/* ACTIVE without the round's freeze -> refused. */
+	test_source_close_current_ok = false;
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&round, &image),
+				 CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
+
+	/* ACTIVE frozen by this exact round -> accepted. */
+	test_source_close_current_ok = true;
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&round, &image),
+				 CLUSTER_CONTROL_ROOT_OK_PRIMARY);
+	UT_ASSERT_EQ(image.assigned_record_count, 1);
+	UT_ASSERT_EQ(image.records[0].identity.origin_thread_id, 1);
+	UT_ASSERT(image.records[0].checkpoint_record_crc32c != 0);
+	test_source_close_current_ok = false;
 }
 
 UT_TEST(test_build_migration_image_rejects_non_stopped_slot)
@@ -1524,7 +1617,7 @@ UT_TEST(test_build_migration_image_rejects_non_stopped_slot)
 			abort();
 	}
 	close(fd);
-	UT_ASSERT_EQ(cluster_control_root_build_migration_image(&image),
+	UT_ASSERT_EQ(cluster_control_root_build_migration_image(NULL, &image),
 				 CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT);
 	build_source_wal_state(); /* restore the STOPPED fixture */
 }
@@ -2423,6 +2516,7 @@ main(int argc, char **argv)
 	UT_RUN(test_bootstrap_read_never_returns_authority_token);
 	UT_RUN(test_round_sha256_is_deterministic_and_matches_create);
 	UT_RUN(test_build_migration_image_maps_registry_and_claims);
+	UT_RUN(test_build_migration_image_accepts_frozen_active_slot);
 	UT_RUN(test_build_migration_image_rejects_non_stopped_slot);
 	UT_RUN(test_strong_read_null_identity_stays_invalid_argument);
 	UT_RUN(test_discovered_read_binds_identity_and_mints_token);

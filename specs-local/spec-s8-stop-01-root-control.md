@@ -4459,3 +4459,38 @@ observed 发布前崩溃——重启后 latch 归零（shmem 重建）重新 app
   CAS 已置位 + 异 round → false；census 红 → false 且不写身份；
 - control_root 恢复测试回归（restore 走同一 apply）；
 - t243/regress 复跑。
+
+---
+
+## 增量 61（RF-ROOT P9 审计 #2 重做 第 2 部分 —— first-open source-close，DSH 2026-08-19）
+
+**问题**：`build_migration_image` 要求每个 slot STOPPED——在线成员运行时 slot
+是 ACTIVE——生产 first-open 无法完成（t243 只能离线 cast 伪造）。这是唯一
+需要用户批准的冻结 Spec 修改（用户已批准"参照修复"）。
+
+**设计**：
+
+1. **source-close shmem**（semantic_activation 独立 region）：
+   `ClusterR4Bit22SourceCloseShmem`（closed / writer_count /
+   transition_epoch / prepare_generation）。
+2. **接口**：`source_writer_enter()`（closed 拒绝）/ `writer_leave()` /
+   `source_close_begin(epoch, gen)`（CAS 0→1 + round 身份，幂等）/
+   `source_close_current(epoch, gen)`。
+3. **writer 接入**：`cluster_wal_state_update_own`（RMW 唯一入口）与
+   `write_own_slot`（直接写）——closed 时 enter 拒绝 → NOOP/no-op
+   （良性，非失败）。
+4. **BARRIER 阶段**（bit22 轮）：begin() 先 `source_close_begin` + 等本节点
+   writer_count==0（有界）→ 发布 BARRIER 表 + REQUEST → 成员
+   `member_barrier_bit22`（冻结本节点 + 等 drain + ACK）→ 协调者 tick
+   （`bit22_advance` 的 BARRIER COMPLETE 分支）才 build + create + seam +
+   PREPARED（原 begin 后半整体移入 tick——SQL 函数只构造 round）。
+5. **build 接受条件**：STOPPED 或（ACTIVE && `source_close_current(round)`）。
+   其余 fail-closed 不变（CF(X) 完整读、slot CRC、merge_recovered==0、
+   checkpoint/tail 非零、两次读一致、source SHA）。
+6. **实测修正**：qvotec bootstrap 读从 StartupProcess 打开 voting disks
+   必须 **O_RDONLY**（O_RDWR 打开在 t/243 干扰 2-node 形成窗口——实测）；
+   restore 的 OPEN-record 交叉验证保留（增量 59b）。
+
+**验收**：r4fsm 195/195（test_142/144 改 BARRIER 两阶段）、control_root
+34/34（新增 build 接受冻结 ACTIVE）、t243 33/33、regress 219/219、census
+GREEN。

@@ -1181,7 +1181,11 @@ cluster_qvotec_bootstrap_read_semantic_activation(
 		}
 		memcpy(path, start, len);
 		path[len] = '\0';
-		fd = cluster_voting_disk_open(path, false);
+		/* Read-only open: the startup-process restore must not touch the
+		 * disks with R/W semantics (observed: O_RDWR opens of the voting
+		 * disks from the StartupProcess recovery path perturb the 2-node
+		 * formation window in t/243). */
+		fd = open(path, O_RDONLY, S_IRUSR | S_IWUSR);
 		if (fd < 0) {
 			result = CLUSTER_SEMANTIC_ACTIVATION_QUORUM_HOLD;
 			goto cleanup;

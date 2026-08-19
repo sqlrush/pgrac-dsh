@@ -474,6 +474,7 @@ extern bool cluster_control_root_round_sha256(
 /* 增量 48 step ④d: construct the create_prepared migration image from the
  * live registry + claims + membership (coordinator side). */
 extern ClusterControlRootResult cluster_control_root_build_migration_image(
+	const ClusterControlRootMigrationRoundV1 *round,
 	ClusterControlRootMigrationImage *out);
 extern ClusterControlRootResult cluster_control_root_discard_inactive(
 	const ClusterControlRootFileToken *expected_token,

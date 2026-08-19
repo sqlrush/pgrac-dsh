@@ -276,6 +276,14 @@ extern bool cluster_r4_bit22_cutover_active(void);
  * TARGET_VERIFIED state (phase-4 CF(S) strong revalidation) allows
  * ordinary serving. */
 extern bool cluster_r4_bit22_cutover_verified(void);
+/* RF-ROOT P9 审计 #2 重做 (DSH): source-close freeze for the bit22
+ * first-open round (wal-state registry writer gate). */
+extern bool cluster_r4_bit22_source_writer_enter(void);
+extern void cluster_r4_bit22_source_writer_leave(void);
+extern bool cluster_r4_bit22_source_close_begin(uint64 transition_epoch,
+												uint64 prepare_generation);
+extern bool cluster_r4_bit22_source_close_current(uint64 transition_epoch,
+												  uint64 prepare_generation);
 extern bool cluster_r4_bit22_cutover_latch_verify(void);
 extern bool cluster_r4_bit22_cutover_latch_apply(uint64 transition_epoch,
 												 uint64 round_generation);

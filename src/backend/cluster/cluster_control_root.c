@@ -813,6 +813,42 @@ cluster_control_root_restore_bit22_latch_if_active(void)
 		open.transition_epoch, open.record_generation);
 }
 
+/*
+ * cluster_control_root_bootstrap_validate_active_round -- RF-ROOT P9 审计
+ *	#2 重做 (DSH 2026-08-19): startup/member-side verification that the
+ *	canonical root is ACTIVE and bound to exactly this cutover round
+ *	(migration_round_sha256 == round_sha256(round)).  Full canonical
+ *	validation (storage uuid / sysid / header+body CRC / primary-bak
+ *	coherence) via read_canonical_pair.  Forms a read-only proof: it
+ *	grants no token authority beyond the returned file token.
+ */
+ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round(
+	const ClusterControlRootMigrationRoundV1 *round,
+	ClusterControlRootFileToken *token)
+{
+	ControlRootImage primary;
+	ControlRootImage bak;
+	uint8 sha[PG_SHA256_DIGEST_LENGTH];
+	ClusterControlRootResult result;
+
+	if (round == NULL
+		|| !cluster_control_root_round_sha256(round, sha))
+		return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;
+	result = read_canonical_pair(&primary, &bak);
+	if (result != CLUSTER_CONTROL_ROOT_OK_PRIMARY
+		&& result != CLUSTER_CONTROL_ROOT_OK_PRIMARY_DEGRADED)
+		return result;
+	if (primary.header.activation_state
+			!= CLUSTER_CONTROL_ROOT_ACTIVATION_ACTIVE
+		|| memcmp(primary.header.migration_round_sha256, sha,
+				  PG_SHA256_DIGEST_LENGTH) != 0)
+		return CLUSTER_CONTROL_ROOT_IDENTITY_MISMATCH;
+	if (token != NULL)
+		make_file_token(&primary, token);
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 static void
 make_read_token(const ControlRootImage *image, uint16 thread_id, uint8 source,
 				ClusterControlRootReadToken *token)
@@ -1595,16 +1631,21 @@ migration_wal_scan(uint16 thread_id, uint32 tli, XLogRecPtr checkpoint_redo,
 
 /*
  * cluster_control_root_build_migration_image -- RF-ROOT P7 (增量 48, step
- * ④d): construct the create_prepared migration image from the live shared
- * state: wal-state registry slots (checkpoint/tail bounds), thread claim
- * files (origin evidence), membership incarnations (owner binding) and the
- * local storage identity.  Fail-closed: every non-empty slot must be
- * STOPPED with a valid checkpoint and zero merge-recovered bytes (the W6
- * clause-3 CLOSED-ACK precondition of the cutover round); anything else
+ * ④d) + P9 审计 #2 重做 (DSH 2026-08-19): construct the create_prepared
+ * migration image from the live shared state: wal-state registry slots
+ * (checkpoint/tail bounds), thread claim files (origin evidence),
+ * membership incarnations (owner binding) and the local storage identity.
+ * Fail-closed: every non-empty slot must be STOPPED with a valid
+ * checkpoint and zero merge-recovered bytes — OR ACTIVE and frozen by the
+ * same round's all-member source-close BARRIER
+ * (cluster_r4_bit22_source_close_current(round)): the online first-open
+ * round freezes every member's writers first, so an ACTIVE slot is
+ * provably quiesced (no offline STOPPED requirement).  Anything else
  * refuses the round before any file is touched.
  */
 ClusterControlRootResult
 cluster_control_root_build_migration_image(
+	const ClusterControlRootMigrationRoundV1 *round,
 	ClusterControlRootMigrationImage *out)
 {
 	ClusterControlRootMigrationImage image;
@@ -1675,9 +1716,14 @@ cluster_control_root_build_migration_image(
 		if (verdict == CLUSTER_WAL_SLOT_EMPTY)
 			continue;
 		if (verdict != CLUSTER_WAL_SLOT_OK
-			|| slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
 			|| slot.checkpoint_redo_lsn == 0
-			|| slot.merge_recovered_lsn != 0) {
+			|| slot.merge_recovered_lsn != 0
+			|| (slot.state != CLUSTER_WAL_SLOT_STATE_STOPPED
+				&& !(slot.state == CLUSTER_WAL_SLOT_STATE_ACTIVE
+					 && round != NULL
+					 && cluster_r4_bit22_source_close_current(
+						 round->transition_epoch,
+						 round->prepare_generation)))) {
 			pfree(second);
 			pfree(first);
 			return CLUSTER_CONTROL_ROOT_INVALID_ARGUMENT;

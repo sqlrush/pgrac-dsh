@@ -38,6 +38,8 @@ extern bool cluster_semantic_activation_resolve_shared_undo_root_live_owner_sour
 #define TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES 528
 /* RF-ROOT P7 (增量 39 §B): ClusterR4Bit22CutoverLatchShmem = u32+u32+u64+u64 */
 #define TEST_SEMANTIC_BIT22_LATCH_BYTES 24
+/* RF-ROOT P9 审计 #2 重做: ClusterR4Bit22SourceCloseShmem = u32+u32+u64+u64 */
+#define TEST_SEMANTIC_BIT22_SOURCE_CLOSE_BYTES 24
 /* RF-ROOT P7 (增量 46): ClusterR4Bit22CutoverSeamShmem */
 #define TEST_SEMANTIC_BIT22_SEAM_BYTES 216
 #define TEST_GATE_SEQ_OFFSET 552
@@ -82,6 +84,10 @@ static TestSemanticUtilityMailboxStorage test_semantic_utility_mailbox;
 static TestSemanticAckTableStorage test_semantic_ack_table;
 static TestSemanticPgrdSnapshotStorage test_semantic_pgrd_snapshot;
 static TestSemanticBit22LatchStorage test_semantic_bit22_latch;
+typedef struct TestSemanticSourceCloseStorage {
+	uint8 bytes[TEST_SEMANTIC_BIT22_SOURCE_CLOSE_BYTES];
+} TestSemanticSourceCloseStorage;
+static TestSemanticSourceCloseStorage test_semantic_source_close;
 static TestSemanticBit22SeamStorage test_semantic_bit22_seam;
 static bool test_shmem_found;
 static bool test_utility_mailbox_found;
@@ -89,6 +95,8 @@ static bool test_ack_table_found;
 static bool test_pgrd_snapshot_found;
 static bool test_bit22_latch_found;
 static bool test_bit22_seam_found;
+static bool test_source_close_found;
+static Size test_source_close_requested_size;
 static Size test_shmem_requested_size;
 static Size test_utility_mailbox_requested_size;
 static Size test_ack_table_requested_size;
@@ -216,6 +224,11 @@ ShmemInitStruct(const char *name, Size size, bool *foundPtr)
 		*foundPtr = test_bit22_seam_found;
 		return test_semantic_bit22_seam.bytes;
 	}
+	if (strcmp(name, "pgrac cluster r4 bit22 source close") == 0) {
+		test_source_close_requested_size = size;
+		*foundPtr = test_source_close_found;
+		return test_semantic_source_close.bytes;
+	}
 	test_shmem_requested_size = size;
 	*foundPtr = test_shmem_found;
 	return test_semantic_shmem.bytes;
@@ -308,6 +321,7 @@ superuser(void)
 
 ClusterControlRootResult
 cluster_control_root_build_migration_image(
+	const ClusterControlRootMigrationRoundV1 *round pg_attribute_unused(),
 	ClusterControlRootMigrationImage *out)
 {
 	if (out != NULL)
@@ -3463,7 +3477,8 @@ UT_TEST(test_99_shared_gate_layout_and_bootstrap_are_fail_closed)
 				 + TEST_SEMANTIC_ACK_TABLE_BYTES
 				 + TEST_SEMANTIC_PGRD_SNAPSHOT_BYTES
 				 + MAXALIGN(TEST_SEMANTIC_BIT22_LATCH_BYTES)
-				 + MAXALIGN(TEST_SEMANTIC_BIT22_SEAM_BYTES));
+				 + MAXALIGN(TEST_SEMANTIC_BIT22_SEAM_BYTES)
+				 + MAXALIGN(TEST_SEMANTIC_BIT22_SOURCE_CLOSE_BYTES));
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(SemanticActivationAckTable
 			  == (ClusterSemanticActivationAckTableV1 *)test_semantic_ack_table.bytes);
@@ -5115,32 +5130,59 @@ ut_cutover_round(void)
 
 UT_TEST(test_142_cutover_begin_stages_seam_and_publishes_prepared)
 {
+	/* RF-ROOT P9 审计 #2 重做 (DSH): begin() stages the source-close
+	 * BARRIER only; the migration image build + create_prepared + seam +
+	 * PREPARED publication happen in the LMON tick once the all-member
+	 * BARRIER is COMPLETE. */
 	ClusterControlRootMigrationImage image;
 	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
+	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	int node;
 
 	ut_open_applied_env_setup_coordinator();
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(cluster_r4_bit22_cutover_begin(&image, &round));
+	/* begin: local source frozen, BARRIER staged, no create yet. */
+	UT_ASSERT_EQ(ut_create_calls, 0);
+	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
+	UT_ASSERT_EQ(table->stage, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_BARRIER);
+	UT_ASSERT_EQ(table->record_generation, 5);
+	UT_ASSERT_EQ(table->expected_members_lo, UINT64_C(0x03));
+	UT_ASSERT((table->target_feature_bitmap
+			   & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0);
+	UT_ASSERT(cluster_r4_bit22_source_close_current(7, 5));
+	UT_ASSERT_EQ(pg_atomic_read_u32(
+					 &SemanticActivationBit22SourceClose->writer_count), 0);
+
+	/* All-member BARRIER ACK -> the tick advances: build + create + seam +
+	 * PREPARED stage + REQUEST. */
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		if (!cluster_membership_is_member(node))
+			continue;
+		table->observed[node] = table->expected[node];
+	}
+	table->observed_members_lo = table->expected_members_lo;
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_advance());
 	UT_ASSERT_EQ(ut_create_calls, 1);
 	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 1);
 	UT_ASSERT_EQ(SemanticActivationBit22Seam->transition_epoch, 7);
-	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
-				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
-	UT_ASSERT_EQ(SemanticActivationAckTable->round_nonce, 1);
-	UT_ASSERT_EQ(SemanticActivationAckTable->record_generation, 5);
-	UT_ASSERT_EQ(SemanticActivationAckTable->expected_members_lo,
-				 UINT64_C(0x03));
-	UT_ASSERT((SemanticActivationAckTable->target_feature_bitmap
+	UT_ASSERT_EQ(table->stage, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
+	UT_ASSERT_EQ(table->round_nonce, 1);
+	UT_ASSERT_EQ(table->record_generation, 5);
+	UT_ASSERT_EQ(table->expected_members_lo, UINT64_C(0x03));
+	UT_ASSERT((table->target_feature_bitmap
 			   & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0);
-	UT_ASSERT(SemanticActivationAckTable->expected[0].boot_id != 0);
-	UT_ASSERT(SemanticActivationAckTable->expected[1].boot_id != 0);
-	UT_ASSERT(SemanticActivationAckTable->expected[1].capability_word
+	UT_ASSERT(table->expected[0].boot_id != 0);
+	UT_ASSERT(table->expected[1].boot_id != 0);
+	UT_ASSERT(table->expected[1].capability_word
 			  == CLUSTER_SEMANTIC_ACTIVATION_ACK_REQUIRED_CAPS);
-	/* The PREPARED REQUEST went out through the origin mechanism: every
-	 * member bit is sent (unsent empty) and the wire reached the peer. */
+	/* Both the BARRIER REQUEST (begin) and the PREPARED REQUEST (tick
+	 * advance) went out through the origin mechanism. */
 	UT_ASSERT_EQ(semantic_activation_ack_local_request_origin.unsent_members_lo,
 				 UINT64_C(0));
-	UT_ASSERT_EQ(test_send_calls[1], 1);
+	UT_ASSERT_EQ(test_send_calls[1], 2);
 	test_gate_reset();
 }
 
@@ -5159,14 +5201,32 @@ UT_TEST(test_143_cutover_begin_rejects_non_coordinator)
 
 UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
 {
+	/* RF-ROOT P9 审计 #2 重做: create_prepared runs in the tick after the
+	 * all-member BARRIER COMPLETE; a create failure leaves the round at
+	 * BARRIER with no seam and no PREPARED stage. */
 	ClusterControlRootMigrationImage image;
 	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
+	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	int node;
 
 	ut_open_applied_env_setup_coordinator();
 	ut_create_result = CLUSTER_CONTROL_ROOT_IO_ERROR;
-	UT_ASSERT(!cluster_r4_bit22_cutover_begin(&image, &round));
+	ut_create_calls = 0;
+	UT_ASSERT(cluster_r4_bit22_cutover_begin(&image, &round));
+	UT_ASSERT_EQ(ut_create_calls, 0);
+	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
+	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
+		if (!cluster_membership_is_member(node))
+			continue;
+		table->observed[node] = table->expected[node];
+	}
+	table->observed_members_lo = table->expected_members_lo;
+	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
+				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	UT_ASSERT(!semantic_activation_ack_lmon_bit22_advance());
 	UT_ASSERT_EQ(ut_create_calls, 1);
 	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
+	UT_ASSERT_EQ(table->stage, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_BARRIER);
 	test_gate_reset();
 }
 

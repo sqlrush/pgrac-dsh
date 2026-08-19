@@ -67,6 +67,7 @@
 #include "cluster/cluster_inject.h"
 #include "cluster/cluster_lms.h"
 #include "cluster/cluster_scn.h"
+#include "cluster/cluster_semantic_activation.h" /* source-close writer gate */
 #include "cluster/cluster_wal_state.h"
 #include "cluster/cluster_wal_thread.h"
 #include "miscadmin.h"
@@ -208,6 +209,11 @@ cluster_wal_state_update_own(const ClusterWalStateUpdate *update, ClusterWalStat
 		return CLUSTER_WAL_STATE_UPDATE_DISABLED;
 	if (!wal_state_cf_prerequisites_ready())
 		return CLUSTER_WAL_STATE_UPDATE_CF_UNAVAILABLE;
+	/* RF-ROOT P9 审计 #2 重做 (DSH): the bit22 first-open round's BARRIER
+	 * freezes the source — a closed source refuses new writers (NOOP:
+	 * the caller treats it as a benign no-op, never a failure). */
+	if (!cluster_r4_bit22_source_writer_enter())
+		return CLUSTER_WAL_STATE_UPDATE_NOOP;
 
 	if (cf_mode == CLUSTER_WAL_STATE_CF_ACQUIRE_X) {
 		/* Do not trip cluster_cf_lock's deliberate non-reentrant Assert. */
@@ -318,6 +324,7 @@ cluster_wal_state_update_own(const ClusterWalStateUpdate *update, ClusterWalStat
 		memcpy(published_slot, &fresh_observed, sizeof(*published_slot));
 
 out:
+	cluster_r4_bit22_source_writer_leave();
 	if (fd >= 0) {
 		int save_errno = errno;
 
@@ -522,13 +529,27 @@ static bool
 write_own_slot(const ClusterWalStateSlot *slot)
 {
 	char path[MAXPGPATH];
+	bool entered;
+
+	/* RF-ROOT P9 审计 #2 重做 (DSH): a closed source (bit22 first-open
+	 * BARRIER) freezes the slot — benign no-op, never a failure. */
+	entered = cluster_r4_bit22_source_writer_enter();
+	if (!entered)
+		return true;
 
 	/* Decision-style injection (spec-4.2 D5): simulate a write failure. */
-	if (cluster_injection_should_skip("cluster-wal-state-write-fail"))
+	if (cluster_injection_should_skip("cluster-wal-state-write-fail")) {
+		cluster_r4_bit22_source_writer_leave();
 		return false;
+	}
 
 	registry_path(path, sizeof(path));
-	return write_block(path, CLUSTER_WAL_STATE_SLOT_OFFSET(slot->thread_id), slot);
+	if (!write_block(path, CLUSTER_WAL_STATE_SLOT_OFFSET(slot->thread_id), slot)) {
+		cluster_r4_bit22_source_writer_leave();
+		return false;
+	}
+	cluster_r4_bit22_source_writer_leave();
+	return true;
 }
 
 /*

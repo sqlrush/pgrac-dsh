@@ -868,12 +868,43 @@ UT_TEST(test_g4_census_gate_green_all_sites_gate_bound)
 	UT_ASSERT(cluster_wal_state_correctness_census_ok());
 }
 
+
+/* RF-ROOT P9 审计 #2 重做 (DSH): source-close writer gate stubs — the
+ * unit harness never freezes the source. */
+bool
+cluster_r4_bit22_source_writer_enter(void)
+{
+	return true;
+}
+
+void
+cluster_r4_bit22_source_writer_leave(void)
+{
+}
+
+bool
+cluster_r4_bit22_source_close_begin(uint64 transition_epoch pg_attribute_unused(),
+									uint64 prepare_generation pg_attribute_unused())
+{
+	return true;
+}
+
+bool
+cluster_r4_bit22_source_close_current(uint64 transition_epoch pg_attribute_unused(),
+									  uint64 prepare_generation pg_attribute_unused())
+{
+	return false;
+}
+
 int
 main(int argc pg_attribute_unused(), char **argv pg_attribute_unused())
 {
 	UT_PLAN(13);
 
-	UT_RUN(test_a1_verified_cf_gate_rejects_before_io);
+	
+
+
+UT_RUN(test_a1_verified_cf_gate_rejects_before_io);
 	UT_RUN(test_a1_acquire_fresh_rmw_exact_order_and_distinct_postread);
 	UT_RUN(test_a1_release_uncertain_fails_closed);
 	UT_RUN(test_a1_short_write_and_fsync_fail_without_compensation);
