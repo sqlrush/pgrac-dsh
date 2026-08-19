@@ -1065,3 +1065,31 @@ pages；Rule-26 approval 前只写 RED/STOP，不写 ABI）：
   修订；零 ABI 改动。
 - `src/test/cluster_unit/test_cluster_side_space.c`：2 组 RED 单测全绿
   （mutation 门恒关（含越界 kind）、metadata page 两门负测）。
+
+---
+
+## 工作区本地增量 9：D-SIDE-10 落地（2026-08-20）—— RF-SIDE 主体 D 全部落地
+
+**交付**（spec §1.2 D-SIDE-10：route/domain/blocked/rebuild/durability
+events；counter 只观测，不能成为 authority）：
+
+- `src/include/cluster/cluster_side_stats.h` + `src/backend/cluster/
+  cluster_side_stats.c`：
+  - `ClusterSideStats`：10 个 EVENT 计数器（route applies/noops/
+    blocked、domain tt_undo/projection/storage、blocked
+    unknown_class/authority、rebuild、durability）——每 counter 恰一
+    producer（D-SIDE 判定调用点，production wiring 触发）。
+  - `cluster_side_stats_describe`：G2 单一词汇表（名 → kind）；
+    未知名 fail-closed；名字即 production SQL consumer 镜像键。
+  - **U-SIDE-16**：verdict 判定**纯函数**（不读 counter）——单测把
+    全部 counter 置 UINT64_MAX/2 后重跑 route verdict 与
+    per-resource readiness，判定不变。
+- **RF-SIDE 主体状态**：D-SIDE-01..08、10 全部落地（route registry、
+  TT/undo decode/preflight、2PC binding、projection、space STOP 门、
+  PAGE integration、readiness、retention、observability）+ D-SIDE-09
+  corpus 的 U-SIDE-01..16 判定面由各 D 单测覆盖；U-SIDE-17（G1
+  负构建 fixtures）与 U-SIDE-18（STOP 不可 override，D-SIDE-05 已测）
+  留集成轮。
+- 边界：production wiring（SQL consumer 镜像、durable pending store、
+  RECO ownership、projection 存储/重建执行）仍 RED（§10.3
+  production-caller 面）；零 ABI 改动。

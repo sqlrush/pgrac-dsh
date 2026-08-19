@@ -65,6 +65,7 @@ OBJS = \
 	cluster_side_prepared.o \
 	cluster_side_projection.o \
 	cluster_side_space.o \
+	cluster_side_stats.o \
 	cluster_recovery_duty.o \
 	cluster_cf_enqueue.o \
 	cluster_cf_phase2.o \

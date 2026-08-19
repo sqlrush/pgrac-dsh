@@ -688,6 +688,16 @@ test_cluster_side_space: test_cluster_side_space.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_SPACE_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-10: observability counters (observational only —
+# U-SIDE-16: counters can never change a verdict).
+CLUSTER_SIDE_STATS_O = $(top_builddir)/src/backend/cluster/cluster_side_stats.o
+test_cluster_side_stats: test_cluster_side_stats.c unit_test.h \
+		$(CLUSTER_SIDE_STATS_O) $(CLUSTER_SIDE_ROUTE_O) $(CLUSTER_SIDE_RECOVERY_O) \
+		$(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_STATS_O) $(CLUSTER_SIDE_ROUTE_O) \
+		$(CLUSTER_SIDE_RECOVERY_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
