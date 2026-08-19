@@ -1238,3 +1238,29 @@ repeated-recoverer target-write 保持 STOP）：
   durability → post-read → release → retention handoff 逐段 fire）需要
   production wiring + 不触碰现有 replay 路径（G1）——留 PGDEL-10 之后
   的集成轮（与 RF-ROOT/SIDE 接线同批）。
+
+---
+
+## 工作区本地增量 10：PGDEL-10 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-10：compatibility、manual 与 formal
+regression；PRODUCT AUTHORIZATION 仍为 0）：
+
+- **ABI 基线护栏**（§8.2-4）：`test_cluster_page_abi.c` 编译期
+  StaticAssert 冻结 PGRAC HEAD ABI 基线——PageHeaderData=32（24 字节
+  PG16 头 + 8 字节 pd_block_scn）、XLogRecord=32（+ 8 字节 xl_scn、
+  偏移 16）、BufferTag=20、RelFileLocator=12；未来 RF-PAGE 改动若意外
+  改 ABI 直接编译失败。RF-PAGE 全部交付为**纯新增** in-memory 语义层
+  （新 symbol/新文件），未改 catalog/page/WAL/wire ABI。
+- **§8.2 兼容性逐条处置**（增量文档）：① exact-f076 无 PageVersion
+  producer，现有 replay 行为不宣称兼容新 contract（G3）；② mixed-
+  version peer 缺 proof 事实 → 各 validator fail-closed；③ 不迁移
+  old private artifact 的 correctness authority（recovery set
+  in-memory，D3′ 重建）；④ 零 ABI 改动（护栏守护）；⑤ rollback 不删
+  retained redo、不放宽 gates（§7.4 handoff 拒绝）；⑥ checksum on/off
+  只改 detector——PAGE 判定纯函数零 GUC 依赖。
+- **regression**：t243 33/33 保持绿；cluster_regress 13/13 与 regress
+  219 复跑（本轮后台执行确认）；§10.4 的 4×1×3+rate10/20/30 属
+  R4-OPEN 阶段（PRODUCT AUTHORIZATION 仍为 0，formal campaign 未开）。
+- 全部 RF-PAGE D 的 G1..G9 逐条自检结论落 §11.1（checkbox 保持未勾选
+  直到 §10.3 production caller + STOP 解除）。

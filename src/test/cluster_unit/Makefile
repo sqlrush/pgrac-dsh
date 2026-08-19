@@ -635,6 +635,12 @@ test_cluster_page_recovery_matrix: test_cluster_page_recovery_matrix.c unit_test
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_MATRIX_LIBS) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-10: ABI-baseline guards (page header / WAL record header /
+# buffer tag / relfilelocator sizes frozen at the PGRAC HEAD baseline).
+test_cluster_page_abi: test_cluster_page_abi.c unit_test.h
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
