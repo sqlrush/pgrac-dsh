@@ -588,6 +588,15 @@ test_cluster_page_source: test_cluster_page_source.c unit_test.h \
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_SOURCE_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-PAGE PGDEL-05: in-memory per-block recovery set + §6.3 contributor
+# closure + §3.3 shape-2 chain skip.  Pure judgement over the ordered
+# contributor list.
+CLUSTER_PAGE_SET_O = $(top_builddir)/src/backend/cluster/cluster_page_set.o
+test_cluster_page_set: test_cluster_page_set.c unit_test.h \
+		$(CLUSTER_PAGE_SET_O) $(CLUSTER_PAGE_VERSION_O)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_PAGE_SET_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure

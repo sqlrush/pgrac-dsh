@@ -1077,3 +1077,33 @@ unknown default 必须 BLOCKED）：
   durability/post-read 归 PGDEL-06；现有 replay 路径未触碰。
 - `src/test/cluster_unit/test_cluster_page_source.c`：6 个 RED 单测全绿
   （三 validator 合取真值表 + select 的 BLOCKED/冲突/优先序）。
+
+---
+
+## 工作区本地增量 5：PGDEL-05 落地（2026-08-20）
+
+**交付**（spec §2.1 PGDEL-05：in-memory per-block recovery-set builder
+与 contributor closure；不是 persistent artifact）：
+
+- `src/include/cluster/cluster_page_set.h` + `src/backend/cluster/
+  cluster_page_set.c`：
+  - `ClusterPageRedoChange`（§3.1：identity/class/expected_before/
+    result_version/change_identity/failed_origin_thread）+ §6.1
+    `ClusterBlockRecoverySet`（source kind/version、terminal、有序
+    contributor 链）——可重建 in-memory plan，crash 即弃（D3′）。
+  - §6.3 `cluster_page_contributor_closure`：same-block、非 UNKNOWN
+    class、版本 valid、`c[i].result == c[i+1].expected` 精确邻接
+    （含 incarnation；等 SCN 异 incarnation 不邻接，PU-06/27）、首
+    expected == source、末 result == terminal（唯一，不猜）；空链仅
+    source==terminal 时 OK（空 replay set 的 witness 半边，另半边在
+    PGDEL-04 CURRENT）。GAP/UNKNOWN_CLASS/INCARNATION_CROSS/
+    TERMINAL_MISMATCH/INVALID_INPUT 全 fail-closed；纯函数 rerun
+    确定（§6.3-9）。
+  - §3.3 形状 2 `cluster_page_contributor_chain_covers`：仅闭合链可
+    证明覆盖；numeric high-water 永不覆盖（PU-05）。
+- 边界：recovery set 的 live census（CURRENT/PI/STORAGE 填充）与
+  mutation/durability/post-read 链（PGDEL-06）仍 RED；本层零
+  mutation/I/O。
+- `src/test/cluster_unit/test_cluster_page_set.c`：6 个 RED 单测全绿
+  （闭合链 + rerun 确定、gap/terminal mismatch、unknown class +
+  incarnation cross、空链、invalid inputs、shape-2 skip）。
