@@ -4690,9 +4690,13 @@ UT_TEST(test_128b_bit22_latch_same_round_apply_is_idempotent)
 UT_TEST(test_129_bit22_latch_rejects_zero_round_identity)
 {
 	test_gate_reset();
-	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(0, 1));
+	/* RF-ROOT P9 审计 #2 重做: a fresh cluster's bit22 round legitimately
+	 * runs at formation epoch 0 (no R4 history); only the round generation
+	 * must be nonzero. */
 	UT_ASSERT(!cluster_r4_bit22_cutover_latch_apply(7, 0));
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
+	UT_ASSERT(cluster_r4_bit22_cutover_latch_apply(0, 1));
+	UT_ASSERT(cluster_r4_bit22_cutover_active());
 	test_gate_reset();
 }
 
