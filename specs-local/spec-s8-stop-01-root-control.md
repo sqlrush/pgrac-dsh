@@ -4347,17 +4347,30 @@ pre-bit22（registry 权威）路径 → §17.8 双路径门控跨重启不成�
    返回 false 无副作用；census 红时 fail-closed 拒绝恢复——安全方向，
    退回 registry 路径）。
 2. **恢复点**：`cluster_recovery_plan` 每次 pass 开头、bit22_active
-   采样**之前**：无条件 `cluster_control_root_read_canonical_discovered`
+   采样**之前**：调 `cluster_control_root_restore_bit22_latch_if_active()`
    （失败容忍——root 缺失/身份不符时跳过恢复）→ 满足条件即恢复 →
    同一 pass 的 bit22_active 采样自然走 post-bit22 路径。
    StartupProcess 的 plan pass 是重启后第一个通用 root 读取点。
 3. **幂等**：latch 已 active 时 apply 的 CAS 失败返回 false——恢复调用
    与正常 apply 共用同一 0→1 CAS，无双写、无覆盖。
+4. **修订（t/243 实测，2026-08-19）**：恢复的置位条件必须**排除干净/
+   未 crash 的 root 形态**——t/243 的 cast root（ACTIVE + bit22，记录
+   RECOVERY_COMPLETE/OPEN）若触发置位，plan 切 root-only 进入尚未实现
+   的 post-bit22 crash-rejoin（P8 范围）→ L4 的 peer rejoin 卡 30s。
+   探针对拍实证：读/解析 root 文件本身无副作用；**置位（apply）是唯一
+   破坏因素**。最终条件：**本线程 root 记录必须为 RECOVERY_REQUIRED**
+   （post-bit22 crash 后的形态）才恢复——CLOSED / OPEN /
+   RECOVERY_COMPLETE 走冻结的 THREAD_OPEN/owner-rejoin 主线，crash 真正
+   标记记录后 gate 自然恢复；与 P8 演进兼容。
+5. **轻量读**：restore 只读 512B header + 本线程记录头 16B（含 header
+   CRC 校验与 sysid/storage-uuid 绑定），不做 64KiB body CRC——启动恢复
+   早期保持最小共享-root IO 面。
 
 **验收**：
 
-- recovery_duty/语义激活单测：恢复函数对 ACTIVE+bit22 snapshot 置位
-  latch 并绑定 root 轮次身份；对 PREPARED/非 bit22/非法 epoch 拒绝；
+- control_root 单测：恢复函数对 ACTIVE + bit22 + RECOVERY_REQUIRED 记录
+  置位 latch 并绑定 root 轮次身份；对 PREPARED / 非 bit22 / 非法 epoch /
+  CLOSED / OPEN / RECOVERY_COMPLETE 记录拒绝；census 红 fail-closed；
 - recovery_plan 单测：pass 前恢复（stub root 读 + stub latch）；
 - t243/regress 复跑。
 
