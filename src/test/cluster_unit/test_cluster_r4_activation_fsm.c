@@ -339,6 +339,21 @@ cluster_control_root_round_sha256(
 	return true;
 }
 
+/* RF-ROOT P9 audit #2 redo part 3 (B′): the member-side bit22 cutover path
+ * binds the ACTIVE root via
+ * cluster_control_root_bootstrap_validate_active_round_fields; this binary
+ * does not link cluster_control_root.o.  GREEN stub — the RED identity
+ * refusal path is covered in the control-root suites. */
+ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round_fields(
+	uint64 transition_epoch pg_attribute_unused(),
+	uint64 prepare_generation pg_attribute_unused(),
+	uint64 source_feature_bitmap pg_attribute_unused(),
+	uint64 target_feature_bitmap pg_attribute_unused())
+{
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 bool
 cluster_qvotec_in_quorum(void)
 {
@@ -879,6 +894,10 @@ test_gate_reset(void)
 	semantic_activation_lmon_prepare_cas_utility_request_seq = 0;
 	semantic_activation_lmon_commit_cas_seq = 0;
 	semantic_activation_lmon_commit_cas_utility_request_seq = 0;
+	/* RF-ROOT P9 审计 #2 重做 part 3 (DSH B′): the bit22 round's PREPARE
+	 * CAS driver state is per-round — reset it like the R4 CAS state. */
+	semantic_activation_lmon_bit22_prepare_cas_seq = 0;
+	semantic_activation_lmon_bit22_prepare_cas_done = false;
 	semantic_activation_ack_ingress_init(
 		&semantic_activation_ack_local_ingress);
 	memset(&semantic_activation_ack_local_pending_send, 0,
@@ -4973,12 +4992,17 @@ UT_TEST(test_136_coordinator_open_applied_advance_activates_and_publishes)
 	/* RF-ROOT P9 审计 #2 重做: the coordinator latch is NOT flipped at
 	 * COMMIT_APPLIED — it waits for the durable majority OPEN(P+2)
 	 * record.  The stage advances to COMMIT_APPLIED (members verify the
-	 * ACTIVE root) with a fresh observed set and generation P+1. */
+	 * ACTIVE root) with a fresh observed set and generation P+1.
+	 * RF-ROOT P9 审计 #2 重做 part 3 (DSH B′): the coordinator's own
+	 * COMMIT_APPLIED observation is its locally-verified ACTIVE root —
+	 * it is marked self-observed (bit 0) so observed can equal expected
+	 * and the stage completes. */
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT_EQ(SemanticActivationAckTable->stage,
 				 CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_COMMIT_APPLIED);
 	UT_ASSERT_EQ(SemanticActivationAckTable->record_generation, 6);
-	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo, 0);
+	UT_ASSERT_EQ(SemanticActivationAckTable->observed_members_lo,
+				 UINT64_C(0x01));
 	test_gate_reset();
 }
 
@@ -5137,12 +5161,20 @@ UT_TEST(test_142_cutover_begin_stages_seam_and_publishes_prepared)
 	/* RF-ROOT P9 审计 #2 重做 (DSH): begin() stages the source-close
 	 * BARRIER only; the migration image build + create_prepared + seam +
 	 * PREPARED publication happen in the LMON tick once the all-member
-	 * BARRIER is COMPLETE. */
+	 * BARRIER is COMPLETE.
+	 * RF-ROOT P9 审计 #2 重做 part 3 (DSH B′): the fresh-cluster bit22
+	 * round mints the FIRST PGSA record — the PREPARE CAS writes
+	 * generation 1 over the majority legacy-zero implicit-OPEN record
+	 * (expected gen 0 -> desired gen 1), so the round runs at
+	 * prepare_generation = 1 (the R4 chain then commits gen 2 and opens
+	 * gen 3). */
 	ClusterControlRootMigrationImage image;
 	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
 	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	uint64 cas_seq;
 	int node;
 
+	round.prepare_generation = 1;
 	ut_open_applied_env_setup_coordinator();
 	UT_ASSERT(!cluster_r4_bit22_cutover_active());
 	UT_ASSERT(cluster_r4_bit22_cutover_begin(&image, &round));
@@ -5150,16 +5182,19 @@ UT_TEST(test_142_cutover_begin_stages_seam_and_publishes_prepared)
 	UT_ASSERT_EQ(ut_create_calls, 0);
 	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);
 	UT_ASSERT_EQ(table->stage, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_BARRIER);
-	UT_ASSERT_EQ(table->record_generation, 5);
+	UT_ASSERT_EQ(table->record_generation, 1);
 	UT_ASSERT_EQ(table->expected_members_lo, UINT64_C(0x03));
 	UT_ASSERT((table->target_feature_bitmap
 			   & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0);
-	UT_ASSERT(cluster_r4_bit22_source_close_current(7, 5));
+	UT_ASSERT(cluster_r4_bit22_source_close_current(7, 1));
 	UT_ASSERT_EQ(pg_atomic_read_u32(
 					 &SemanticActivationBit22SourceClose->writer_count), 0);
 
-	/* All-member BARRIER ACK -> the tick advances: build + create + seam +
-	 * PREPARED stage + REQUEST. */
+	/* All-member BARRIER ACK -> the tick advances: PREPARE(P) CAS ->
+	 * build + create + seam + PREPARED stage + REQUEST.  The B′ redo
+	 * submits the PREPARE CAS first (advance #1) and only continues
+	 * after the durable majority completion (advance #2) — simulate the
+	 * QVOTEC-side completion between the two calls. */
 	for (node = 0; node < CLUSTER_MAX_NODES; node++) {
 		if (!cluster_membership_is_member(node))
 			continue;
@@ -5169,12 +5204,19 @@ UT_TEST(test_142_cutover_begin_stages_seam_and_publishes_prepared)
 	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
 				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
 	UT_ASSERT(semantic_activation_ack_lmon_bit22_advance());
+	cas_seq = pg_atomic_read_u64(&SemanticActivationShmem->record_cas_request_seq);
+	UT_ASSERT_EQ(cas_seq, UINT64_C(1));
+	pg_atomic_write_u64(&SemanticActivationShmem->record_cas_completion_seq,
+						cas_seq);
+	pg_atomic_write_u32(&SemanticActivationShmem->record_cas_result,
+						CLUSTER_SEMANTIC_ACTIVATION_OK);
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_advance());
 	UT_ASSERT_EQ(ut_create_calls, 1);
 	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 1);
 	UT_ASSERT_EQ(SemanticActivationBit22Seam->transition_epoch, 7);
 	UT_ASSERT_EQ(table->stage, CLUSTER_SEMANTIC_ACTIVATION_ACK_STAGE_PREPARED);
 	UT_ASSERT_EQ(table->round_nonce, 1);
-	UT_ASSERT_EQ(table->record_generation, 5);
+	UT_ASSERT_EQ(table->record_generation, 1);
 	UT_ASSERT_EQ(table->expected_members_lo, UINT64_C(0x03));
 	UT_ASSERT((table->target_feature_bitmap
 			   & PGRAC_CONTROL_ROOT_FEATURE_RECOVERY_DUTY_IDENTITY_V1) != 0);
@@ -5207,12 +5249,18 @@ UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
 {
 	/* RF-ROOT P9 审计 #2 重做: create_prepared runs in the tick after the
 	 * all-member BARRIER COMPLETE; a create failure leaves the round at
-	 * BARRIER with no seam and no PREPARED stage. */
+	 * BARRIER with no seam and no PREPARED stage.  RF-ROOT P9 审计 #2
+	 * 重做 part 3 (DSH B′): the BARRIER COMPLETE first mints the PREPARE
+	 * record (majority legacy-zero -> gen 1) — the round runs at
+	 * prepare_generation = 1 and the create failure is only reached after
+	 * the PREPARE CAS is durable. */
 	ClusterControlRootMigrationImage image;
 	ClusterControlRootMigrationRoundV1 round = ut_cutover_round();
 	ClusterSemanticActivationAckTableV1 *table = SemanticActivationAckTable;
+	uint64 cas_seq;
 	int node;
 
+	round.prepare_generation = 1;
 	ut_open_applied_env_setup_coordinator();
 	ut_create_result = CLUSTER_CONTROL_ROOT_IO_ERROR;
 	ut_create_calls = 0;
@@ -5227,6 +5275,13 @@ UT_TEST(test_144_cutover_begin_fail_closed_on_create_failure)
 	table->observed_members_lo = table->expected_members_lo;
 	table->flags = CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_EXPECTED_VALID
 				   | CLUSTER_SEMANTIC_ACTIVATION_ACK_FLAG_COMPLETE;
+	UT_ASSERT(semantic_activation_ack_lmon_bit22_advance());
+	cas_seq = pg_atomic_read_u64(&SemanticActivationShmem->record_cas_request_seq);
+	UT_ASSERT_EQ(cas_seq, UINT64_C(1));
+	pg_atomic_write_u64(&SemanticActivationShmem->record_cas_completion_seq,
+						cas_seq);
+	pg_atomic_write_u32(&SemanticActivationShmem->record_cas_result,
+						CLUSTER_SEMANTIC_ACTIVATION_OK);
 	UT_ASSERT(!semantic_activation_ack_lmon_bit22_advance());
 	UT_ASSERT_EQ(ut_create_calls, 1);
 	UT_ASSERT_EQ(pg_atomic_read_u32(&SemanticActivationBit22Seam->valid), 0);

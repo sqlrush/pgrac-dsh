@@ -20,6 +20,29 @@
 
 int cluster_node_id = 0;
 
+/* The SQL entry pgrac_r4_bit22_cutover_begin (增量 48 step ④e) references
+ * superuser(); this binary does not link the backend superuser machinery. */
+bool
+superuser(void)
+{
+	return true;
+}
+
+/* The member-side bit22 cutover path (RF-ROOT P9 audit #2 redo part 3,
+ * B′) binds the ACTIVE root via
+ * cluster_control_root_bootstrap_validate_active_round_fields; this binary
+ * does not link cluster_control_root.o.  GREEN stub — the RED identity
+ * refusal path is covered in the control-root suites. */
+ClusterControlRootResult
+cluster_control_root_bootstrap_validate_active_round_fields(
+	uint64 transition_epoch pg_attribute_unused(),
+	uint64 prepare_generation pg_attribute_unused(),
+	uint64 source_feature_bitmap pg_attribute_unused(),
+	uint64 target_feature_bitmap pg_attribute_unused())
+{
+	return CLUSTER_CONTROL_ROOT_OK_PRIMARY;
+}
+
 /* 批 3 (增量 39 §C): cluster_semantic_activation.c now consults the
  * runtime census at the latch apply; this binary does not link
  * cluster_wal_state.o.  GREEN stub — the RED refusal path is covered in
@@ -798,6 +821,9 @@ UT_TEST(test_50_pgrd_uses_distinct_kind_in_existing_512_byte_mailbox)
 	pg_atomic_init_u64(&utility.utility_completion_seq, 0);
 	pg_atomic_init_u32(&utility.utility_mailbox_state,
 				   SEMANTIC_ACTIVATION_UTILITY_MAILBOX_PENDING);
+	utility.utility_action = CLUSTER_SEMANTIC_ENABLE_ALL;
+	utility.utility_target_feature_bitmap
+		= CLUSTER_SEMANTIC_FEATURE_R4_SYNC_CR_V1;
 	for (i = 0; i < (int)sizeof(desired); i++)
 		desired[i] = (uint8)(i ^ 0x5c);
 	SemanticActivationShmem = &shmem;
@@ -1321,7 +1347,10 @@ UT_TEST(test_64_shmem_size_includes_exact_ack_table)
 					/* 批 1/批 3: the bit22 cutover latch (增量 39 §B). */
 					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverLatchShmem))
 					/* 增量 46: the cutover round seam (step ②). */
-					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverSeamShmem));
+					+ MAXALIGN(sizeof(ClusterR4Bit22CutoverSeamShmem))
+					/* 增量 61/62: online first-open via the source-close
+					 * BARRIER. */
+					+ MAXALIGN(sizeof(ClusterR4Bit22SourceCloseShmem));
 
 	UT_ASSERT_EQ(cluster_semantic_activation_shmem_size(), expected);
 }
