@@ -119,7 +119,14 @@ $deadline = time + 60;
 while (time < $deadline)
 {
 	my $log = PostgreSQL::Test::Utils::slurp_file($node0->logfile);
-	if ($log =~ /OPEN_APPLIED|bit22.*OPEN|TARGET_BOOTSTRAP/)
+	# The OPEN(P+2) CAS is only a SUBMIT — the round is not complete until
+	# the majority OPEN record is durable and the coordinator latch has
+	# flipped (OPEN_APPLIED published).  Requiring completion evidence here
+	# is load-bearing: L4 stops the peer immediately after this poll, and a
+	# mid-cutover departure leaves the survivor's HW remaster structurally
+	# blocked (minted-lost) so the peer restart can never bind the recovery
+	# LMS generation.
+	if ($log =~ /OPEN_APPLIED|bit22 cutover: OPEN\(P\+2\) durable|TARGET_BOOTSTRAP/)
 	{
 		$progress = 1;
 		last;

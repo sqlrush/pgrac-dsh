@@ -330,11 +330,46 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
   re-form fail-closed 加固（20a56a7c7d，allocator_lock + 失败回滚 +
   负测 288/288）、external-rejoin 保留合取加强（20a56a7c7d，96/96）、
   状态表述修正（d6fa29efc8）、本项。
+- **R4-OPEN 已闭环（2026-08-20）**：r4_static_model 9-13 与
+  r4_activation_record 50 全部消解；顺带修复同类 pre-existing 断言
+  （r4_activation_fsm 186/193/195、cluster_qvotec link+26、
+  cluster_ic 17/18/19/24、cluster_sf_dep 15）——cluster_unit
+  **232/232 全绿**。性质全部为 B′/审计 #2 语义过期（test mock/stub
+  或证据锚点 stale），非产品回归：
+  - activation_record 50：utility mailbox mock 缺 ENABLE_ALL/
+    R4_SYNC_CR_V1 字段（pgrd formation binding 检查）；64：
+    shmem_size 缺 source-close shmem 项；link 需 superuser +
+    bootstrap_validate_active_round_fields stub。
+  - static_model：9 区域锚点（try_r4_request80 插入）、10 锚点
+    （enter_internal 重构）、11 contract-17 证据改指真实 D6 符号
+    （heap_hot_r4_updated_xmin_needs_full →
+    cluster_gcs_block_cr_fetch_and_wait → heap_hot_r4_search_scratch +
+    HeapTupleSatisfiesMVCCScratch）、12 RED 标记过期、13 contract-10/11
+    证据（ClusterCrBuildReason 在 gcs_block.h；
+    cluster_semantic_activation_record_cas_write 在 cluster_qvotec.c）。
+  - fsm 136/142/144：B′ self-observed（observed=0x01）与 PREPARE CAS
+    两步链（BARRIER COMPLETE 先 mint gen-1 记录再 build/create；
+    新增 bit22_prepare_cas_* 静态需 test_gate_reset）。
+  - qvotec：B′ reconfig/control-root/formation-marker/superuser link
+    stubs；26 文件尺寸断言改 LOCAL_OFFSET(127)+512（B′ P0 懒物化，
+     attested 容量 8N+3 ≠ 运行文件）。
+  - ic：ACK-v1 位（0x8000）随审计 #2 广告（wire 0x0039BFFE）；
+    sf_dep 15：gen 0 → 1（首连映射）。
+- **t/274 重启腿（L4/L5）= 已知阻断，确定性复现**：L3 judge 曾用
+  "bit22.*OPEN" 匹配到 "OPEN(P+2) CAS submitted" 行，停止动作可能
+  抢在 latch 翻转前 → 依赖时序侥幸通过。已把 judge 收窄为完成证据
+  （OPEN durable / OPEN_APPLIED / TARGET_BOOTSTRAP）——现在
+  L1-L3 恒绿、L4 恒 RED（post-bit22 peer 干净重启 → 幸存者
+  hw_remaster "minted-lost" blocked_structural（bit22 分支 491）、
+  GRD recovery WAIT_CLUSTER 卡、peer phase3 "recovery LMS generation
+  could not be bound"，与上方实证诊断一致）。此路径依赖
+  RF-PAGE/SIDE 的 stable-base/post-read/retirement proof
+  （P9 RL-02..12 / STOP-ROOT-IO-FENCE），外部条件具备后实施。
 
 **剩余 RED**：native apply/durability/post-read 的 mutation 执行
 （STOP-RF-PAGE-STABLE-BASE 未解除）、PL-01..14 的 faithful TAP cast
 （2-node 基板限制）、production stores/executors（durable pending
-store、RECO ownership、projection 存储/重建执行、SQL consumer 镜像）。
-**下一步队列**：R4-OPEN 阶段（r4_static_model / r4_activation_record
-既有失败）→ 外部条件具备后 P9 RL-02..12 / STOP-ROOT-IO-FENCE /
+store、RECO ownership、projection 存储/重建执行、SQL consumer 镜像）、
+t/274 L4/L5 重启腿（post-bit22 恢复路径未完成，确定性 RED）。
+**下一步队列**：外部条件具备后 P9 RL-02..12 / STOP-ROOT-IO-FENCE /
 全量 TAP 272。
