@@ -288,3 +288,36 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
   `dsh-flash-wip-*` 快照 tag。
 - `.dsh-change-watch.sh`：45s 轮询签名，编码会话一动代码即退出（job 结束
   通知唤醒 DSH 复审），复审后带新基线重启。
+
+---
+
+## RF-PAGE / RF-SIDE 完成度修正（DSH 复审 2026-08-20）
+
+准确口径（替代任何 "D 全部落地/完成" 表述）：
+
+- **RF-PAGE（PGDEL-01..10）**：semantic/helper 层与聚焦单测层已落地
+  （PageVersion 类型/classifier/decide、rmgr census+hints、action 表+
+  状态机+outcome、source validators+selection、recovery set+closure、
+  admission+sequence gates+crash matrix、FND-10 handoff、counters+dump、
+  PU/PL 单元面、ABI 护栏；17 套件 80 RED 全绿）。**未完成**：
+  production caller（§10.3——core 接口在 src/backend 无生产调用者）、
+  native buffer/GCS apply + durability + canonical post-read 执行
+  （§7.2，STOP-RF-PAGE-STABLE-BASE 下 mutation 面保持 RED）、PL-01..14
+  fault TAP/formal。
+- **RF-SIDE（D-SIDE-01..08、D-SIDE-10）**：semantic/helper 层已落地
+  （route registry、TT/undo decode+preflight、2PC binding、projection
+  判定、space STOP 门、PAGE integration verdict、per-resource
+  readiness、retention exporter、observability）+ PCM-X 窄集成
+  （re-form，t/274 12/12 闭环）。**未完成**：durable PREPARED pending
+  store 与 RECO ownership、CLOG/MULTIXACT/COMMIT_TS 真实
+  producer/invalidate/rebuild、TT/undo 真实 decode/apply caller、
+  RF-PAGE proof 的 live consumer、retention proof 生产 exporter、
+  **D-SIDE-09 完整 unit/TAP/fault corpus**（U-SIDE 全表 + L1-L20）。
+- 纪律：生产 caller 是 D 的完成条件（§10.3），不得推迟到
+  "integration round" 后仍宣称 D 完成；私有 Spec 副本（specs-local/
+  spec-rf-page-*、spec-rf-side-*）已移出 git 跟踪（AGENTS.md），
+  原版与增量记录留在 ~/pgrac 私库与本地工作区。
+
+**下一步队列**：① PGDEL-06 §10.3 production caller 接线（读侧判定链
+接真实 replay 路径：classifier/source/closure/handoff；mutation 面受
+STOP 约束）；② D-SIDE-09 完整 corpus；③ 之后 R4-OPEN 阶段。
