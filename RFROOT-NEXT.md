@@ -318,6 +318,23 @@ plan 恒 0 candidates → worker 永不启动。127-unknown 是 NULL-identity bu
   spec-rf-page-*、spec-rf-side-*）已移出 git 跟踪（AGENTS.md），
   原版与增量记录留在 ~/pgrac 私库与本地工作区。
 
-**下一步队列**：① PGDEL-06 §10.3 production caller 接线（读侧判定链
-接真实 replay 路径：classifier/source/closure/handoff；mutation 面受
-STOP 约束）；② D-SIDE-09 完整 corpus；③ 之后 R4-OPEN 阶段。
+**进展（2026-08-20 晚）**：
+- ① production caller 已落地（78b5daba95）：§10.3 探针在真实 replay
+  路径逐 record+block fire 全链（classify→decode→decide→D-SIDE-06/07
+  消费）+ durability barrier 后 fire FND-10/retention exporter（只读，
+  mutation 面受 STOP 约束保持 RED；t243 无行为变化）。
+- ② D-SIDE-09 fault corpus judgement face 已落地（108bdf6dbc）：
+  U-SIDE-17 + L1..L20 单元 RED 全绿；faithful TAP cast 仍受 2-node
+  基板限制保持 RED/BLOCKED（与 RL-02..12 同因）。
+- DSH 复审 5 点全部闭环：P0 私有 Spec 移出 git（80ab984975）、PCM-X
+  re-form fail-closed 加固（20a56a7c7d，allocator_lock + 失败回滚 +
+  负测 288/288）、external-rejoin 保留合取加强（20a56a7c7d，96/96）、
+  状态表述修正（d6fa29efc8）、本项。
+
+**剩余 RED**：native apply/durability/post-read 的 mutation 执行
+（STOP-RF-PAGE-STABLE-BASE 未解除）、PL-01..14 的 faithful TAP cast
+（2-node 基板限制）、production stores/executors（durable pending
+store、RECO ownership、projection 存储/重建执行、SQL consumer 镜像）。
+**下一步队列**：R4-OPEN 阶段（r4_static_model / r4_activation_record
+既有失败）→ 外部条件具备后 P9 RL-02..12 / STOP-ROOT-IO-FENCE /
+全量 TAP 272。
