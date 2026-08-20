@@ -17313,10 +17313,59 @@ UT_TEST(test_runtime_reform_fail_closed_paths)
 				 PCM_X_RUNTIME_RECOVERY_BLOCKED);
 }
 
+static bool
+PcmXTagEpochAdvanceTestFailHook_stub(void)
+{
+	return true;
+}
+
+/*
+ * DSH review (2026-08-20): a failed tag-epoch advance (allocator/view
+ * failure, injected via the assert-build hook) must keep the runtime
+ * RECOVERY_BLOCKED — a partially advanced generation is never published
+ * as a re-formed ACTIVE runtime.
+ */
+UT_TEST(test_runtime_reform_tag_epoch_failure_keeps_blocked)
+{
+	PcmXShmemHeader *header;
+	PcmXPeerBinding bindings[PCM_X_PROTOCOL_NODE_LIMIT];
+
+	reset_fake_shmem();
+	cluster_pcm_x_convert_shmem_init();
+	header = ClusterPcmXConvertShmem;
+	UT_ASSERT(cluster_pcm_x_runtime_activate(UINT64_C(77)));
+	UT_ASSERT(
+		cluster_pcm_x_runtime_transition(PCM_X_RUNTIME_ACTIVE,
+										 PCM_X_RUNTIME_RECOVERY_BLOCKED));
+
+	memset(bindings, 0, sizeof(bindings));
+	bindings[0].cluster_epoch = 5;
+	bindings[0].peer_session_incarnation = UINT64_C(77);
+	bindings[1].cluster_epoch = 5;
+	bindings[1].peer_session_incarnation = UINT64_C(99);
+
+	/* Inject the advance failure; reform must fail and keep BLOCKED. */
+	cluster_pcm_x_tag_epoch_advance_test_fail_hook =
+		&PcmXTagEpochAdvanceTestFailHook_stub;
+	UT_ASSERT(!cluster_pcm_x_runtime_reform(5, bindings));
+	UT_ASSERT_EQ(cluster_pcm_x_runtime_snapshot().state,
+				 PCM_X_RUNTIME_RECOVERY_BLOCKED);
+	UT_ASSERT_EQ(cluster_pcm_x_runtime_snapshot().gate_generation, UINT64_C(2));
+	UT_ASSERT_EQ(cluster_pcm_x_runtime_snapshot().master_session_incarnation,
+				 UINT64_C(0));
+
+	/* Without the injected failure the same collect re-forms fine. */
+	cluster_pcm_x_tag_epoch_advance_test_fail_hook = NULL;
+	UT_ASSERT(cluster_pcm_x_runtime_reform(5, bindings));
+	UT_ASSERT_EQ(cluster_pcm_x_runtime_snapshot().state, PCM_X_RUNTIME_ACTIVE);
+	UT_ASSERT_EQ(cluster_pcm_x_runtime_snapshot().gate_generation, UINT64_C(3));
+	(void) header;
+}
+
 int
 main(void)
 {
-	UT_PLAN(287);
+	UT_PLAN(288);
 	UT_RUN(test_image_id_domain_is_canonical_and_bounded);
 	UT_RUN(test_wire_abi_sizes_are_exact);
 	UT_RUN(test_wire_abi_offsets_are_exact);
@@ -17604,6 +17653,7 @@ main(void)
 	UT_RUN(test_runtime_reform_rebinds_after_reconfig);
 	UT_RUN(test_runtime_reform_advances_tag_generation);
 	UT_RUN(test_runtime_reform_fail_closed_paths);
+	UT_RUN(test_runtime_reform_tag_epoch_failure_keeps_blocked);
 	UT_DONE();
 	return ut_failed_count == 0 ? 0 : 1;
 }

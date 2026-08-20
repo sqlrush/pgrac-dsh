@@ -306,6 +306,11 @@ typedef enum PcmXAllocatorKind {
 typedef void (*PcmXDomainSlotTestHook)(PcmXAllocatorKind kind, PcmXSlotRef ref);
 extern PGDLLIMPORT PcmXDomainSlotTestHook
 	cluster_pcm_x_domain_slot_test_between_state_reads_hook;
+/* RF-SIDE re-form negative test hook: when set and returning true, the
+ * tag-epoch advance fails like an allocator/view failure. */
+typedef bool (*PcmXTagEpochAdvanceTestFailHook)(void);
+extern PGDLLIMPORT PcmXTagEpochAdvanceTestFailHook
+	cluster_pcm_x_tag_epoch_advance_test_fail_hook;
 #endif
 
 /* Seven bounded key spaces over the five logical pools. */

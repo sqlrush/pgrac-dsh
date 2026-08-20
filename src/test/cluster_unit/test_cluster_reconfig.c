@@ -5471,6 +5471,10 @@ UT_TEST(test_external_rejoin_consumes_exact_candidate_before_jcmk_submit)
 	cluster_membership_set_state(0, CLUSTER_MEMBER_MEMBER);
 	cluster_membership_set_state(1, CLUSTER_MEMBER_DEAD);
 	cluster_membership_record_admitted(1, UINT64_C(70));
+	/* DSH review (2026-08-20): the UNDECIDED preservation is a
+	 * conjunction — self must be a genuine formed member whose admitted
+	 * floor exactly equals the current self incarnation (77). */
+	cluster_membership_record_admitted(0, UINT64_C(77));
 
 	epoch_init_done = false;
 	cluster_epoch_shmem_init();

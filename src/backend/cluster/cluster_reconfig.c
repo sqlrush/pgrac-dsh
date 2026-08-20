@@ -5469,15 +5469,39 @@ cluster_reconfig_joiner_self_tick(void)
 			 * the admitted node back to JOINING, the survivor set lost a
 			 * member, no coordinator existed, and the external rejoin
 			 * fence could never start its operation.
+			 *
+			 * DSH review (2026-08-20): the preservation is a CONJUNCTION,
+			 * not a bare flag check — the admission is kept only while
+			 * the node is a genuine formed member: self still in the
+			 * current formation (membership MEMBER + in-quorum), the
+			 * admitted floor is nonzero AND exactly equals the current
+			 * self incarnation (a new postmaster incarnation does not
+			 * inherit the old admission), and the external fence is
+			 * active (the provider manages this admission).  Any missing
+			 * fact demotes exactly like the ordinary UNDECIDED arm.
 			 */
 			LWLockAcquire(&ReconfigShmem->lock, LW_EXCLUSIVE);
 			cluster_write_fence_authority_cache_invalidate();
-			if (ReconfigShmem->self_join_admitted == 0
-				|| !cluster_external_fence_runtime_active())
 			{
-				ReconfigShmem->self_join_admitted = 0;
-				cluster_membership_set_state(cluster_node_id,
-											 CLUSTER_MEMBER_JOINING);
+				bool		preserve;
+				uint64		self_incarnation;
+
+				self_incarnation = cluster_qvotec_get_self_incarnation();
+				preserve = ReconfigShmem->self_join_admitted != 0
+					&& cluster_external_fence_runtime_active()
+					&& cluster_qvotec_in_quorum()
+					&& cluster_membership_get_state(cluster_node_id)
+						   == CLUSTER_MEMBER_MEMBER
+					&& cluster_membership_get_last_admitted_incarnation(
+						   cluster_node_id) != 0
+					&& cluster_membership_get_last_admitted_incarnation(
+						   cluster_node_id) == self_incarnation;
+				if (!preserve)
+				{
+					ReconfigShmem->self_join_admitted = 0;
+					cluster_membership_set_state(cluster_node_id,
+												 CLUSTER_MEMBER_JOINING);
+				}
 			}
 			LWLockRelease(&ReconfigShmem->lock);
 		}
