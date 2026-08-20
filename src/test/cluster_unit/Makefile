@@ -1876,6 +1876,7 @@ test_cluster_r4_static_model: test_cluster_r4_static_model.c unit_test.h
 		-DTX_RESOLVE_SOURCE_PATH='"$(abspath $(top_srcdir))/src/backend/cluster/cluster_tx_resolve.c"' \
 		-DSEMANTIC_HEADER_PATH='"$(abspath $(top_srcdir))/src/include/cluster/cluster_semantic_activation.h"' \
 		-DSEMANTIC_SOURCE_PATH='"$(abspath $(top_srcdir))/src/backend/cluster/cluster_semantic_activation.c"' \
+		-DQVOTEC_SOURCE_PATH='"$(abspath $(top_srcdir))/src/backend/cluster/cluster_qvotec.c"' \
 		$< \
 		$(top_builddir)/src/common/libpgcommon.a \
 		$(top_builddir)/src/port/libpgport.a $(LDFLAGS) -lssl -lcrypto -o $@
