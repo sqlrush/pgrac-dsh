@@ -698,6 +698,19 @@ test_cluster_side_stats: test_cluster_side_stats.c unit_test.h \
 		$(CLUSTER_SIDE_RECOVERY_O) $(CLUSTER_PAGE_VERSION_O) \
 		$(top_builddir)/src/port/libpgport_srv.a -o $@
 
+# RF-SIDE D-SIDE-09: fault corpus judgement face — U-SIDE-17 + L1..L20
+# legs over the delivered judgement layers.
+CLUSTER_SIDE_CORPUS_LIBS = $(CLUSTER_PAGE_APPLY_O) $(CLUSTER_PAGE_SET_O) \
+		$(CLUSTER_PAGE_SOURCE_O) $(CLUSTER_PAGE_RECOVERY_O) \
+		$(CLUSTER_SIDE_PREPARED_O) $(CLUSTER_SIDE_PROJECTION_O) \
+		$(CLUSTER_SIDE_RECOVERY_O) $(CLUSTER_SIDE_ROUTE_O) \
+		$(CLUSTER_SIDE_SPACE_O) $(CLUSTER_PAGE_VERSION_O) \
+		$(CLUSTER_PAGE_HANDOFF_O)
+test_cluster_side_corpus: test_cluster_side_corpus.c unit_test.h \
+		$(CLUSTER_SIDE_CORPUS_LIBS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(CLUSTER_SIDE_CORPUS_LIBS) \
+		$(top_builddir)/src/port/libpgport_srv.a -o $@
+
 # spec-5.7 D3 S1: test_cluster_hw_snapshot links cluster_hw_snapshot.o (the HW
 # authority durable-snapshot envelope: serialize / deserialize+validate /
 # identity / generation-supersede).  CRC32C comes from libpgport; the pure
